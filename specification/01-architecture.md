@@ -29,7 +29,7 @@ Nyxite.sln
 │   ├── Nyxite.Application          # use-cases (structure CRUD, ACL, relay coordination, history index)
 │   ├── Nyxite.Domain               # entities, ACL rules, sync-policy semantics  ── shared with desktop
 │   ├── Nyxite.Contracts            # DTOs, request/response records, enums       ── shared with desktop
-│   ├── Nyxite.Crypto               # HPKE wrap/unwrap, AEAD, content addressing, recovery escrow ── shared
+│   ├── Nyxite.Crypto               # HPKE wrap/unwrap, AEAD, content addressing, recovery blob (AES-GCM/Argon2id) ── shared
 │   ├── Nyxite.Crdt                 # ydotnet glue, encrypted update encode/snapshot ── shared (CLIENT-side merge)
 │   ├── Nyxite.Persistence          # EF Core DbContext, migrations, repositories
 │   └── Nyxite.BlobStore            # IBlobStore + filesystem implementation (+ S3 later)
@@ -90,7 +90,7 @@ v1.0.0 is single-node. The relay's no-merge design makes horizontal scale-out (R
 | **Logging** | Structured logs (Serilog **[P]**), correlation IDs; security events → audit log; **never content** (there is none readable). |
 | **Config** | `IOptions` from env + mounted secrets. [14](14-deployment-and-config.md) |
 | **Telemetry** | OpenTelemetry **[P]**; health/readiness. |
-| **Idempotency** | Content-addressed writes are idempotent; `Idempotency-Key` on creates. **[P]** |
+| **Idempotency** | Content-addressed writes are idempotent; `Idempotency-Key` **required on POST creates** — the server stores `key → response` for 24h scoped to `(user, endpoint)`; a replay returns the original response/status; the same key with a different body → `409 idempotency_conflict` ([04](04-rest-api.md)). **[P]** |
 | **Background work** | Blob GC, share-token/expiry sweeps, audit retention. **No** snapshotting/indexing (those are client-side). |
 
 ## 1.6 Request lifecycle (REST write of ciphertext)

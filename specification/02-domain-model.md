@@ -54,15 +54,19 @@ As master spec, with **encrypted names** (`name_enc`) and encrypted metadata. Th
 
 > The previous `zk` opt-in column is **gone** — E2EE is the default for every file.
 
+> **`current_version_id` vs `currentVersionSeq` (mapping):** the DB persists `files.current_version_id` (uuid FK to `file_versions.id`); the API/wire exposes `currentVersionSeq` = that row's `file_versions.seq`. The server resolves uuid → seq on read ([03](03-data-model.md), [04](04-rest-api.md)).
+
 ### 2.2.6 FileKey (wraps)
 Not one row — a set of **wrapped** file keys ([03 `file_keys`](03-data-model.md)): one per authorized member, each the per-file AES-256-GCM key wrapped to that member's public key (HPKE), plus a generation marker for rotation. The server stores only wrapped copies and cannot open them.
+
+> **`key_id` vs `generation` (clarification):** `key_id` (uuid) identifies a specific file-key; `generation` (int) is a monotonic counter incremented on each rotation. They are **1:1** — each generation has exactly one `key_id`. `key_id` is the stable reference embedded in encrypted frames / `crdt_updates` / `file_versions`; `generation` is the ordering/staleness basis for `412 key_generation_stale` ([04](04-rest-api.md), [09 §9.6](09-sharing-and-acl.md)).
 
 ### 2.2.7 FileVersion (history)
 Immutable, **encrypted**, content-addressed snapshot ([10](10-version-history.md)). Fields: `seq`, `content_hash` (client-computed BLAKE3 of plaintext), `blob_ref` (ciphertext), `size_cipher`, `key_id`, `author_id` (null for guests), `created_at`. No plaintext size or server-side diff summary.
 
 ### 2.2.8 FileContent (logical)
 - **Text:** encrypted Yrs update log (`crdt_doc_id`) relayed by the server + client-produced encrypted snapshots.
-- **Ink / binary:** encrypted blob; LWW/version-vector metadata held **encrypted** in `metadata_enc` (the version-vector itself can be small and client-managed; the server need not read it). **[P]**
+- **Ink / binary:** encrypted blob; **LWW** by head sequence. Conflict detection is purely head-`seq` based (the client sends the parent version `seq` on write); the server does **not** read encrypted metadata ([06 §6.5](06-sync.md)). **[P]**
 
 ### 2.2.9 Share / ACL — see [09](09-sharing-and-acl.md). 2.2.10 AuditEntry — see [12](12-administration.md).
 
@@ -72,22 +76,21 @@ Immutable, **encrypted**, content-addressed snapshot ([10](10-version-history.md
 |----------------|-------|-----------|--------|
 | `markdown` | 1 | CRDT (client-merged) | Markdown |
 | `plaintext` | 1 | CRDT (client-merged) | Plain text |
-| `ink` | 3 | LWW / version-vector | Vector strokes |
-| `office` | 5 | LWW / version-vector | — |
+| `ink` | 3 | LWW | Vector strokes |
+| `office` | 5 | LWW | — |
 | `sourcecode` | 5 | CRDT (client-merged) | Code |
-| `image` | 5 | LWW / version-vector | — |
+| `image` | 5 | LWW | — |
 
-`content_type` is fixed at creation **[P]**; the CRDT-vs-LWW assignment is **[OD-4]**. `content_type` is one of the few content-adjacent facts the server sees, because it must route the right sync channel and tell the client which decoder to use.
+`content_type` is fixed at creation **[P]**; the CRDT-vs-LWW assignment is **decided ([OD-4] resolved)**. `content_type` is one of the few content-adjacent facts the server sees, because it must route the right sync channel and tell the client which decoder to use.
 
-## 2.4 Sync policy (per file) **[OD-3]**
+## 2.4 Sync policy (per file) (**[OD-3] resolved**)
 
 | Value | Meaning | Server behavior |
 |-------|---------|-----------------|
 | `server-default` | Synced through the server (as ciphertext) | Stored/relayed encrypted |
-| `pinned-local` | Kept offline on the device **and** synced | Same server storage; "pin" is a client cache directive |
 | `excluded` | Device-only, never uploaded | Server **never receives** content; tolerates content-absent files |
 
-Semantics are **[OD-3]**. Note: even `server-default` content is opaque to the server under E2EE — "synced through the server" means *relayed as ciphertext*, not *readable*.
+The server model has exactly **two** values. **Offline pinning is purely client-local** — a device cache directive the zero-knowledge server never sees; the former `pinned-local` value is **removed** from the server model. Note: even `server-default` content is opaque to the server under E2EE — "synced through the server" means *relayed as ciphertext*, not *readable*.
 
 ## 2.5 Identifiers and naming
 
@@ -103,4 +106,4 @@ Semantics are **[OD-3]**. Note: even `server-default` content is opaque to the s
 
 ## 2.7 Multi-content-type sync split (summary)
 
-Text rides the **encrypted** CRDT relay; ink/binary use LWW/version-vector with on-demand **encrypted** blob download ([06](06-sync.md), [OD-4]). One `File` abstraction carries both shapes. The server moves bytes and sequences updates; it never reads them.
+Text rides the **encrypted** CRDT relay; ink/binary use **LWW** with on-demand **encrypted** blob download ([06](06-sync.md), [OD-4] resolved). One `File` abstraction carries both shapes. The server moves bytes and sequences updates; it never reads them.

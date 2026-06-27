@@ -19,8 +19,8 @@ ASP.NET Core (C#) backend. The core service: API, sync engine, real-time collabo
 ## Sync
 
 - Cross-device sync engine (moves ciphertext + structure, never plaintext)
-- Per-file sync policies enforced server-side: server-default, pinned-local, excluded
-- Per-file-type split: CRDT for text, last-write-wins for ink/binary
+- Per-file sync policies enforced server-side: server-default, excluded (offline pinning is client-local only)
+- Per-file-type split: CRDT (Yrs) for text, last-write-wins for ink/binary
 
 ## Collaboration
 
@@ -62,4 +62,6 @@ ASP.NET Core (C#) backend. The core service: API, sync engine, real-time collabo
 
 ## Open questions
 
-See [../docs/OPEN-DECISIONS.md](../docs/OPEN-DECISIONS.md). Server-owned items: key recovery model (no-escrow default), metadata boundary (encrypted names; defer structure-hiding), multi-device enrollment, fragment-key sharing, rotation-based revocation, key-directory trust, sync-policy semantics, and the CRDT/LWW split.
+See [../docs/OPEN-DECISIONS.md](../docs/OPEN-DECISIONS.md). Server-owned items: metadata boundary (encrypted names; defer structure-hiding), multi-device enrollment, fragment-key sharing, rotation-based revocation, and key-directory trust.
+
+**Now decided:** sync-policy semantics ([OD-3] — `server-default`/`excluded`; offline pinning client-local), the CRDT/LWW split ([OD-4] — text = CRDT, ink + binary = LWW), and the recovery model (a client-encrypted recovery blob, AES-256-GCM under Argon2id, no escrow).

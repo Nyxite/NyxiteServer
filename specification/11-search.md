@@ -11,7 +11,7 @@ Server-side search would require the server to read plaintext — incompatible w
 | Surface | Search scope |
 |---------|--------------|
 | **Desktop** | Full local corpus (all synced files decrypted and indexed locally) — the primary, complete search experience |
-| **Android** | Local cache subset (`pinned-local` + recently opened); battery/storage-bounded |
+| **Android** | Local cache subset (client-pinned + recently opened); battery/storage-bounded |
 | **Web** | Whatever the session has decrypted/cached; weakest — a browser can't hold the whole corpus |
 
 This is the direct, accepted consequence of privacy-first ([00](00-overview.md), [07](07-encryption.md)).

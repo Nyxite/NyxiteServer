@@ -31,10 +31,10 @@ The server records `content_hash` (client-computed), `blob_ref`, `size_cipher`, 
 
 ## 10.5 Restore
 
-- `POST /files/{id}/restore` with `{ "seq": n }`: the **client** resolves version `n`, derives the restored content, and uploads it as a **new head**:
-  - Text: client produces a CRDT update transforming the current doc to the restored content (so collaborators converge), encrypts it, submits via the relay, and snapshots.
-  - Ink/binary: client uploads the restored bytes as ciphertext = new head version.
-- The server records the new head; prior versions are untouched (non-destructive). Restores are audited (structurally).
+- `POST /files/{id}/restore` body = `{ "seq": n }` **only** — **no ciphertext upload in the restore call**. The new head arrives via the **normal write path**:
+  - Text: the client produces a CRDT update transforming the current doc to the restored content (so collaborators converge), encrypts it, submits **via the relay**, then snapshots.
+  - Ink/binary: the client uploads the restored bytes as ciphertext via **`PUT /files/{id}/blob`** = new head version.
+- The restore endpoint **records the restore** (audit), linking the new head to the source `seq`. Prior versions are untouched (non-destructive).
 
 ## 10.6 Retention & garbage collection
 

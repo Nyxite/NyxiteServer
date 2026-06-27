@@ -35,7 +35,7 @@ This table is the heart of the security model — design changes must preserve t
 
 ## 13.4 Tokens, keys & secrets
 
-- **Short-lived tokens** for relay upgrades and any presigned ciphertext URLs.
+- **Short-lived tokens** for relay upgrades and any presigned ciphertext URLs. Concrete lifetimes **[P]**: OIDC access token **~5 min**; relay **socket ticket** single-use, **60s** TTL; guest **share-session token 15 min**, renewable while the share is valid ([08 §8.2](08-authentication.md)).
 - Server-held secrets are limited to **Keycloak client secret + DB credentials** — there is **no content KEK** to guard. Injected via env/mounted secrets with tight permissions, never in DB or admin config ([14](14-deployment-and-config.md)).
 - Link tokens ≥128-bit, stored hashed; **fragment keys** ≥256-bit, never sent to the server ([09](09-sharing-and-acl.md)).
 - **User recovery keys** are the critical user-held secret; losing one (with all devices) is unrecoverable by design ([07 §7.8](07-encryption.md)).
@@ -44,15 +44,17 @@ This table is the heart of the security model — design changes must preserve t
 
 Limits on **authentication, key-directory lookups, device enrollment, share creation, and link access** (master spec §15 + E2EE additions). Concrete buckets **[P]**:
 
+Concrete starting values (tunable):
+
 | Surface | Limit (tunable) |
 |---------|------------------|
-| Auth / token endpoints | strict per-IP + per-user |
-| `GET /keys/directory` | per-user moderate (limits social-graph probing) |
+| Auth / login | **10/min/IP** |
+| `GET /keys/directory` | **60/min/user** (limits social-graph probing) |
 | `POST /devices` enrollment | strict per-user |
-| `POST /shares` | per-user moderate |
-| `/share/{token}*` link access | per-IP strict |
-| Ciphertext upload / relay submit | per-user, size/rate aware |
-| General REST | per-user/per-IP baseline |
+| `POST /shares` | **30/min/user** |
+| `/share/{token}*` guest access | **30/min/IP** |
+| Blob upload | **60/min/user** |
+| General API | **600/min/user** |
 
 `429 rate_limited` + `Retry-After`.
 

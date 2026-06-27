@@ -4,10 +4,10 @@
 
 ## 14.1 Runtime packaging
 
+- **Primary artifact = the Docker Compose stack** on **Hetzner ARM64** (nginx + Keycloak + Postgres + server). The earlier "single binary vs container" question is **resolved in favor of container/Compose** as the supported primary; a single self-contained binary is **not** a v1 target.
 - **Docker image**, multi-arch incl. **linux/arm64** (Hetzner ARM64 VPS).
-- Runs in a **Docker Compose** stack behind **nginx**, alongside **Keycloak**.
+- Runs in the **Docker Compose** stack behind **nginx**, alongside **Keycloak**.
 - Services: `nyxite-server`, `postgres`, `keycloak`, blob store (filesystem volume now; MinIO later), `redis` (later, relay backplane). nginx reverse-proxies; Cloudflare fronts public traffic.
-- Single self-contained binary vs container is an open deploy question (`features/deploy.md`); container-first assumed.
 
 ## 14.2 Dependencies
 
@@ -43,6 +43,7 @@
 | `NYXITE__Retention__*` | History/audit retention ([10](10-version-history.md), [12](12-administration.md)) |
 
 > **Removed vs prior model:** `NYXITE__Kek__*` (no server KEK) and `NYXITE__Search__*` (no server search).
+> **No server crypto config:** AEAD/HPKE primitives are fixed in the wire format ([07 §7.3–7.4](07-encryption.md)); **Argon2id recovery params** (m/t/p/salt) are **client-chosen and persisted per blob** in `recovery_blobs.kdf_params` ([03](03-data-model.md)), not server configuration.
 
 ## 14.4 Startup & lifecycle
 

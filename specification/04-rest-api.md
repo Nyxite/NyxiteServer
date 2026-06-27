@@ -7,7 +7,9 @@
 - **Base path:** `/api/v1`. URL-versioned. **[P]**
 - **Auth:** `Authorization: Bearer <OIDC token>` on `/api/v1/**` except public share endpoints ([§4.8](#48-public-share-endpoints)).
 - **Content type:** `application/json` for structure/metadata; binary streams for ciphertext blobs.
-- **IDs:** UUIDv7. **Timestamps:** RFC 3339 UTC. **Pagination:** cursor-based. **Idempotency:** `Idempotency-Key` on creates. **[P]**
+- **IDs:** UUIDv7. **Timestamps:** RFC 3339 UTC. **[P]**
+- **Pagination:** query `?cursor=<opaque>&limit=<n>` (default `50`, max `200`); response envelope `{ "items": [...], "nextCursor": <opaque|null> }`. The cursor is an **opaque base64url server token** — clients must not parse it.
+- **Idempotency:** `Idempotency-Key` is **required on POST creates**. The server stores `key → response` for **24h** scoped to `(user, endpoint)`; a replay returns the original response/status; the same key with a **different body** → `409 idempotency_conflict`.
 - **Names in payloads are ciphertext** (`nameEnc`), never plaintext.
 - **OpenAPI:** `/openapi/v1.json` (code-first).
 
@@ -36,7 +38,7 @@ Same shape as a normal CRUD tree, but **names are ciphertext**:
 | `GET` | `/projects/{id}/folders` | List folders (tree/flat) |
 | `POST/GET/PATCH/DELETE` | `/folders`, `/folders/{id}` | Folder CRUD/move (`nameEnc`, `parentFolderId`) |
 | `GET` | `/folders/{id}/files` | List files in a folder |
-| `POST/GET/PATCH/DELETE` | `/files`, `/files/{id}` | File CRUD/move/policy (`nameEnc`, `contentType`, `syncPolicy`) |
+| `POST/GET/PATCH/DELETE` | `/files`, `/files/{id}` | File CRUD/move/policy. `POST` sets `contentType` (**immutable**); `PATCH` updates **only** `nameEnc`, `syncPolicy`, `parentFolderId` (move), `metadataEnc` |
 
 ### File content (ciphertext)
 | Method | Path | Purpose |
@@ -54,16 +56,19 @@ Same shape as a normal CRUD tree, but **names are ciphertext**:
 |--------|------|---------|
 | `GET` | `/files/{id}/keys` | Get the caller's **wrapped** file key(s) for this file (to unwrap locally) |
 | `POST` | `/files/{id}/keys` | Upload wrapped file key(s) for members (used when sharing / rotating) |
-| `POST` | `/files/{id}/keys/rotate` | Register a new key generation (bumps `keyGeneration`); body carries re-wrapped keys + new head ciphertext ref |
+| `POST` | `/files/{id}/keys/rotate` | Commit a rotation. Body `{ newKeyId, generation, wrappedKeys[], newHeadRef }`. The server commits **only if** `generation == current + 1`, else `409 conflict` (another rotation won). In-flight CRDT updates tagged with the old `key_id` are accepted until commit, then rejected `412 key_generation_stale` |
+| `POST` | `/files/keys:batch` | Batch wrap (subtree share fan-out). Body `{ grants: [ { fileId, keyId, memberId, wrappedKey } ] }`; **idempotent**, with **partial-success** reporting per item ([09 §9.3](09-sharing-and-acl.md)) |
 
 ### Keys, devices, recovery (E2EE)
 | Method | Path | Purpose |
 |--------|------|---------|
 | `GET` | `/keys/directory?userId=` or `?email=` | Fetch a user's **public** keys (to wrap shares to them) |
 | `PUT` | `/keys` | Publish/rotate the caller's own public identity keys |
-| `GET/POST/DELETE` | `/devices`, `/devices/{id}` | List / enroll / revoke devices |
-| `POST` | `/devices/{id}/approve` | Approve a new device from an existing one (device-to-device enrollment) |
-| `GET/PUT` | `/recovery` | Get/set the server-opaque recovery escrow blob (wrapped by the user's recovery key) |
+| `GET/DELETE` | `/devices`, `/devices/{id}` | List / revoke devices |
+| `POST` | `/devices` | Enroll: body `{ label, pubkey }` → `{ deviceId, status:"pending", pairingCode (6–8 digit), qrPayload }` |
+| `POST` | `/devices/{id}/approve` | Approve a pending device from an enrolled one: body `{ wrappedIdentityKey }` = **HPKE-seal** of the identity bundle to the pending device's `pubkey`; server stores it in `pending_key_blob` |
+| `GET` | `/devices/me/enrollment` | Once approved → `{ wrappedIdentityKey }`; server **deletes** `pending_key_blob` after a successful fetch (**single-use**) and marks the device `active` |
+| `GET/PUT` | `/recovery` | Get/set the server-opaque recovery blob: `{ version, kdf:{alg:"argon2id",m,t,p,salt}, nonce, ciphertext, tag }` — **AES-256-GCM under an Argon2id-derived key** from the recovery phrase (not HPKE; [07 §7.8](07-encryption.md)) |
 
 ### Versions / history
 | Method | Path | Purpose |
@@ -71,14 +76,14 @@ Same shape as a normal CRUD tree, but **names are ciphertext**:
 | `GET` | `/files/{id}/versions` | List versions (paginated, newest first) |
 | `GET` | `/files/{id}/versions/{seq}` | Version metadata |
 | `GET` | `/files/{id}/versions/{seq}/blob` | Download a version's **ciphertext** |
-| `POST` | `/files/{id}/restore` | Restore: client uploads new head ciphertext derived from version `n` (server records the new head) |
+| `POST` | `/files/{id}/restore` | Restore: body `{ "seq": n }` **only** (no ciphertext upload). The new head arrives via the normal write path — text → client submits a CRDT update via the relay then snapshots; ink/binary → client uploads restored bytes via `PUT /files/{id}/blob`. This endpoint records the restore (audit) linking the new head to source `seq` |
 
 > **No `/diff` endpoint** — diffs are computed **client-side** from decrypted snapshots ([10](10-version-history.md)).
 
 ### Shares
 | Method | Path | Purpose |
 |--------|------|---------|
-| `GET` | `/shares?target=files/{id}` | List shares on a target |
+| `GET` | `/shares?targetType={file\|folder\|project}&targetId={id}` | List shares on a target |
 | `POST` | `/shares` | Create share. Account share: include wrapped key(s). Link share: server stores token hash only (key rides the URL fragment, never sent) |
 | `PATCH` | `/shares/{id}` | Change permission / expiry |
 | `DELETE` | `/shares/{id}` | Revoke (instant ACL cutoff; client rotates key separately) |
@@ -86,7 +91,7 @@ Same shape as a normal CRUD tree, but **names are ciphertext**:
 ### Sync
 | Method | Path | Purpose |
 |--------|------|---------|
-| `POST` | `/sync/changes` | Delta sync of **structure + ciphertext refs** since a cursor |
+| `POST` | `/sync/changes` | Delta sync of **structure + ciphertext refs** since a cursor; returns `nextCursor`. The cursor is **opaque base64url**, monotonic and resumable, tied to the global change-log seq ([06 §6.3](06-sync.md)) |
 | `GET` | `/sync/manifest?projectId=` | Manifest (ids, contentType, versions, hashes, policies) for client reconcile/index |
 
 ### Me / Admin / Public share — see below and [12](12-administration.md), [§4.8](#48-public-share-endpoints).
@@ -102,7 +107,7 @@ RFC 9457 `application/problem+json`. Selected codes:
 | 401 | `unauthenticated`, `token_expired` | Missing/invalid bearer |
 | 403 | `acl_denied`, `2fa_required` | Authz denied (note: **no** `breakglass` — content access can't exist) |
 | 404 | `not_found` | Missing/not visible |
-| 409 | `conflict`, `version_conflict`, `excluded_content`, `address_exists` | LWW conflict / policy / write-once |
+| 409 | `conflict`, `version_conflict`, `excluded_content`, `address_exists`, `idempotency_conflict` | LWW conflict / policy / write-once / rotation lost / same key + different body |
 | 410 | `share_revoked`, `link_expired` | Dead share/link |
 | 412 | `key_generation_stale` | Client used a superseded file-key generation (rotate/refetch) |
 | 413 | `payload_too_large` | Ciphertext exceeds limit |
@@ -115,12 +120,14 @@ RFC 9457 `application/problem+json`. Selected codes:
 public record FileDto(
     Guid Id, Guid ProjectId, Guid? FolderId, Guid OwnerId,
     byte[] NameEnc, string ContentType, string SyncPolicy,
-    long? CurrentVersionSeq, int KeyGeneration,
+    long? CurrentVersionSeq,                        // = file_versions.seq of current_version_id
+    Guid? CrdtDocId, int KeyGeneration,
     DateTimeOffset CreatedAt, DateTimeOffset UpdatedAt);
 
 public record CreateFileRequest(
     Guid ProjectId, Guid? FolderId, byte[] NameEnc,
     string ContentType, string? SyncPolicy, byte[]? MetadataEnc,
+    Guid? CrdtDocId,                               // client-allocated UUIDv7; REQUIRED for text types, null otherwise
     WrappedKey OwnerWrappedKey);                 // owner's file key, wrapped to themselves
 
 public record WrappedKey(Guid KeyId, Guid? MemberId, byte[] Ciphertext, int Generation);
@@ -134,6 +141,17 @@ public record CreateShareRequest(
     DateTimeOffset? ExpiresAt);
 
 public record PublicKeyDto(Guid KeyId, byte[] X25519, byte[] Ed25519, int Generation);
+
+// Recovery blob (GET/PUT /recovery): AES-256-GCM under an Argon2id-derived key ([07 §7.8](07-encryption.md))
+public record RecoveryBlobDto(int Version, KdfParams Kdf, byte[] Nonce, byte[] Ciphertext, byte[] Tag);
+public record KdfParams(string Alg, int M, int T, int P, byte[] Salt);   // alg = "argon2id"
+
+// Batch wrap (POST /files/keys:batch) — subtree share fan-out
+public record BatchWrapRequest(BatchGrant[] Grants);
+public record BatchGrant(Guid FileId, Guid KeyId, Guid MemberId, byte[] WrappedKey);
+
+// Generic paginated envelope; cursor is opaque base64url
+public record Paged<T>(IReadOnlyList<T> Items, string? NextCursor);
 ```
 
 ## 4.6 Authorization summary
@@ -154,6 +172,6 @@ Unauthenticated, token-scoped; the **decryption key is in the URL fragment**, ne
 |--------|------|---------|
 | `GET` | `/share/{token}` | Resolve a link → guest bootstrap (serves the guest client; fragment key used client-side) |
 | `GET` | `/share/{token}/blob` | Serve **ciphertext** if the link is read/write |
-| `WS` | `/share/{token}/ws` | Guest WebSocket into the encrypted relay (write links) |
+| `WS` | `/share/{token}/ws` | Guest WebSocket into the encrypted relay — serves **both read and write links**. Read-only guests receive `OnUpdate`/`OnAwareness` but are rejected (`OnError`) on `SubmitUpdate` ([05 §5.8](05-realtime-collaboration.md)) |
 
 `{token}` validated against `shares.link_token_hash`; expired/revoked → `410`. Guests get a short-lived relay-scoped session token; they **never** receive a key from the server ([09 §9.4](09-sharing-and-acl.md)).

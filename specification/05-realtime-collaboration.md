@@ -6,7 +6,7 @@
 
 - **Client-authoritative, server-relayed.** Each participating client holds the Yrs document and merges updates locally. The server stores the encrypted update log and broadcasts encrypted updates to the room. Convergence is guaranteed by the CRDT, independent of the server.
 - **The server cannot read collaboration traffic.** Updates are encrypted with the file key ([07](07-encryption.md)) before they reach the server. The server sees update **size and ordering**, not content.
-- **Applies to text** types (`markdown`, `plaintext`, later `sourcecode`). Ink/binary sync via LWW/version-vector ([06](06-sync.md)), also encrypted.
+- **Applies to text** types (`markdown`, `plaintext`, later `sourcecode`). Ink/binary sync via LWW ([06](06-sync.md)), also encrypted.
 
 ## 5.2 Transport
 
@@ -52,7 +52,8 @@ public record EncryptedUpdate(long Seq, byte[] Ciphertext, Guid KeyId);
 ## 5.6 Snapshotting & compaction (client-driven)
 
 - The server cannot compact an encrypted log it can't read. **Clients** periodically produce an **encrypted snapshot** (serialized merged doc, encrypted with the file key) and upload it as a content-addressed blob + a `file_versions` row ([10](10-version-history.md)). **[P]**
-- Triggers are client-side **[P]**: N local updates, time threshold, or on graceful leave. Any participating client may snapshot; the server stores the result and may prune superseded updates older than the snapshot's `seq` (keeping enough for in-flight clients).
+- **Snapshot triggers (client-side):** a client snapshots when **≥ 200 CRDT updates since the last snapshot**, **OR ≥ 5 min of accumulated edits**, **OR on the last participant leaving**. Any participating client may snapshot.
+- **Server prune (`PruneAfterSnapshotSeq`):** the server may delete `crdt_updates` with `seq ≤` the latest snapshot's `seq`, but **retains a safety tail** = updates from the **last 7 days OR the most recent 1000 updates, whichever is larger** (enough for in-flight clients).
 - This also produces version history ([10](10-version-history.md)).
 
 ## 5.7 Presence & awareness
@@ -64,7 +65,7 @@ public record EncryptedUpdate(long Seq, byte[] Ciphertext, Guid KeyId);
 
 - A guest enters via a **link share** ([09](09-sharing-and-acl.md)); `/share/{token}/ws` upgrades them into the relay room.
 - The guest's browser holds the **file key from the URL fragment** — the server never sees it. The guest gets a short-lived scoped session token authorizing **relay access only** ([08](08-authentication.md)).
-- Read-only guests receive `OnUpdate`/`OnAwareness` but are rejected on `SubmitUpdate`.
+- `/share/{token}/ws` serves **both read and write links**. Read-only guests receive `OnUpdate`/`OnAwareness` but are rejected via `OnError` on `SubmitUpdate`.
 - Guest-authored updates/snapshots store `author_id = null` ([03](03-data-model.md)).
 
 ## 5.9 Ordering, durability, conflict

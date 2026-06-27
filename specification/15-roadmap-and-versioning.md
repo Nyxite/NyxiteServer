@@ -11,14 +11,14 @@
 ### Phase 0 — Foundations
 - Solution/project scaffold ([01](01-architecture.md)); `NyxiteDbContext` + initial migration ([03](03-data-model.md)).
 - Keycloak OIDC + 2FA ([08](08-authentication.md)).
-- **E2EE foundation: key directory (`user_keys`), device enrollment, recovery escrow (`recovery_blobs`)** ([07](07-encryption.md), [08](08-authentication.md)).
+- **E2EE foundation: key directory (`user_keys`), device enrollment, client-encrypted recovery blob (`recovery_blobs`, AES-256-GCM under Argon2id)** ([07](07-encryption.md), [08](08-authentication.md)).
 - `IBlobStore` filesystem impl (**ciphertext**); structure/metadata CRUD with **encrypted names** ([02](02-domain-model.md), [04](04-rest-api.md)); OpenAPI.
 - Audit-log foundation; health/readiness.
 
 ### Phase 1 — Notes that sync (single user)
 - Markdown + plaintext on the **encrypted CRDT relay** ([05](05-realtime-collaboration.md)); encrypted update log + **client** snapshots ([10](10-version-history.md)).
 - Encrypted blob sync; **on-demand download** ([06](06-sync.md)).
-- Sync policies `server-default`/`pinned-local`/`excluded` ([OD-3]).
+- Sync policies `server-default`/`excluded` (**[OD-3] resolved**); offline pinning is client-local only.
 - Sync manifests that drive **client-side search** ([11](11-search.md)) — no server index.
 
 ### Phase 2 — Collaboration & sharing
@@ -29,7 +29,7 @@
 
 ### Phase 3 — Handwriting
 - Ink vector strokes as **encrypted** blobs ([02](02-domain-model.md), [07](07-encryption.md)).
-- **LWW / version-vector** ink sync ([06 §6.5](06-sync.md), [OD-4]).
+- **LWW** ink sync ([06 §6.5](06-sync.md), **[OD-4] resolved**).
 
 ### Phase 4 — Admin & polish
 - Admin APIs (structure/usage/audit, **no content, no break-glass**) ([12](12-administration.md)).
@@ -77,4 +77,4 @@ This spec now encodes **privacy-first, full E2EE** as the default. That **revers
 - `docs/SPECIFICATION.md` §6 (encryption), §5.2 (search → client-side), §7 (collaboration → encrypted relay), §8 (sharing → wrapped/fragment keys), §11 (admin → no break-glass), §16 (roadmap).
 - `docs/OPEN-DECISIONS.md` — move the encryption-model line out of "Resolved (encryption at rest)" and record **E2EE/zero-knowledge default**; revisit [OD-2] (admin access — now moot) and [OD-5] (ZK — now the default).
 
-Remaining open items still tracked canonically in `docs/OPEN-DECISIONS.md`: **[OD-3]** sync-policy semantics, **[OD-4]** CRDT-vs-LWW split. The new E2EE-specific choices (recovery model, encrypted names, fragment-key sharing) are marked **[P]** here and should be ratified there.
+**[OD-3]** (sync-policy semantics) and **[OD-4]** (CRDT-vs-LWW split) are now **resolved** here and should be marked resolved canonically: **[OD-3]** → server policies are `server-default`/`excluded` only, offline pinning is client-local (no `pinned-local` server value); **[OD-4]** → text (markdown/plaintext/sourcecode) = CRDT (Yrs), ink + binary (office/image) = LWW. The E2EE-specific choices — **recovery = a client-encrypted recovery blob (AES-256-GCM under Argon2id; no escrow)**, encrypted names, fragment-key sharing — are now **ratified** in `docs/OPEN-DECISIONS.md`.

@@ -25,12 +25,16 @@ Backed by `shares` ([03](03-data-model.md)); wrapped keys for account shares liv
 | Lifetime | `expires_at`, `revoked_at` | |
 | Wrapped key(s) | `file_keys` rows | FK wrapped to each member's public key (account shares) |
 
+> **API target shape:** the API addresses a target uniformly via **`targetType` + `targetId`** (`file` \| `folder` \| `project`) everywhere — `GET /shares?targetType=&targetId=`, `CreateShareRequest { targetType, targetId, ... }` ([04](04-rest-api.md)). The DB columns `file_id`/`folder_id`/`project_id` are the persisted form of that one target.
+
 ## 9.3 Account (user-grant) shares — key wrapping
 
 1. Sharer's client looks up the grantee's **public key** from the server key directory (`user_keys`, [03](03-data-model.md)).
 2. Client **wraps the file key** to that public key via HPKE and uploads the wrapped blob (`file_keys` row) plus a `shares` row.
 3. The grantee's client downloads the wrapped key and **unwraps it with their private key** — the server only ever held an opaque blob. ✅ Still E2EE.
-4. For folder/project shares, the relevant per-file keys are wrapped to the grantee (lazily or in a batch) so the subtree is decryptable.
+4. For **folder/project (subtree) shares**, the client enumerates the subtree and wraps **each current file-key** to the grantee in batches via `POST /files/keys:batch { grants: [ { fileId, keyId, memberId, wrappedKey } ] }` (idempotent, partial-success per item; [04](04-rest-api.md)).
+
+> **Completeness rule:** a subtree share is **"fully granted"** only once **every current file-key in the subtree** has a wrapped row for the grantee. Until then the client keeps draining its (resumable) batch queue.
 
 > **Trust note:** the sharer trusts the directory's public key for the grantee. Key-transparency / verification (e.g. safety numbers) is a hardening item ([15](15-roadmap-and-versioning.md)).
 
@@ -55,6 +59,8 @@ Revocation is **two-layered** ([§9.1](#91-principles)):
 
 1. **Instant ACL cutoff** — `DELETE /shares/{id}` sets `revoked_at`; the removed member can no longer fetch ciphertext or join the relay (enforced at every checkpoint: fetch, join, submit, periodic re-check). This is immediate.
 2. **Cryptographic rotation** — to protect **future** content from a member who already holds the file key, a remaining member's client **rotates the file key** (new generation: new FK, re-encrypt head/snapshot, re-wrap to remaining members) and bumps `files.key_generation` ([03](03-data-model.md)). Done client-side, in the background.
+
+> **Rotation concurrency:** the rotating client (owner or a writer driving revocation) generates a new FK (**new `key_id`, `generation + 1`**), re-encrypts the current head and writes a new snapshot under the new key, wraps the new FK to all remaining members, then `POST /files/{id}/keys/rotate { newKeyId, generation, wrappedKeys[], newHeadRef }`. The server commits **only if** the submitted `generation == current + 1`, else `409 conflict` (another rotation won). In-flight CRDT updates tagged with the **old** `key_id` are accepted **until commit**; after commit they are rejected `412 key_generation_stale`, and the client re-encrypts/re-submits under the new key.
 
 > **Honest limitation:** content the removed member **already downloaded** can't be un-seen — true of any system. The combination (instant relay cutoff + forward-secrecy rotation) is the strongest practical revocation under E2EE. This differs from the master spec's "clean revocation, no key rotation," which was only possible when the server held keys.
 

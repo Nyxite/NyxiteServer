@@ -46,25 +46,32 @@ Only **public** keys live here. Private keys never reach the server.
 ### devices  (per-device enrollment)
 ```sql
 CREATE TABLE devices (
-  id            uuid PRIMARY KEY,
-  user_id       uuid NOT NULL REFERENCES users(id),
-  label         text,
-  pubkey        bytea NOT NULL,            -- device public key (enrollment/approval)
-  enrolled_at   timestamptz NOT NULL DEFAULT now(),
-  revoked_at    timestamptz
+  id               uuid PRIMARY KEY,
+  user_id          uuid NOT NULL REFERENCES users(id),
+  label            text,
+  pubkey           bytea NOT NULL,            -- device public key (enrollment/approval)
+  status           text NOT NULL DEFAULT 'pending'
+                     CHECK (status IN ('pending','active','revoked')),
+  pending_key_blob bytea,                     -- HPKE-seal of the identity bundle to this device's pubkey;
+                                              --   set on approval, DELETED after the single-use enrollment fetch
+  enrolled_at      timestamptz NOT NULL DEFAULT now(),
+  revoked_at       timestamptz
 );
 ```
+> A device is created `pending`; an existing device approves it by sealing the identity bundle to its `pubkey` (HPKE) into `pending_key_blob`. The new device fetches it once (single-use), then the server clears `pending_key_blob` and the device becomes `active` ([04](04-rest-api.md), [08 §8.3](08-authentication.md)).
 
-### recovery_blobs  (server-opaque escrow of the identity private key)
+### recovery_blobs  (client-encrypted recovery blob — server-opaque)
 ```sql
 CREATE TABLE recovery_blobs (
   user_id     uuid PRIMARY KEY REFERENCES users(id),
-  blob        bytea NOT NULL,              -- identity private key wrapped by the user's recovery key
-  kdf_params  jsonb NOT NULL,              -- Argon2id params (non-secret)
+  version     int  NOT NULL DEFAULT 1,      -- bound into the AEAD AAD (userId ‖ version)
+  blob        bytea NOT NULL,              -- AES-256-GCM frame: nonce(12B) ‖ ciphertext ‖ tag(16B);
+                                           --   plaintext = identity bundle (X25519 priv ‖ Ed25519 priv)
+  kdf_params  jsonb NOT NULL,              -- non-secret: { alg:"argon2id", m, t, p, salt(16B) }
   updated_at  timestamptz NOT NULL DEFAULT now()
 );
 ```
-The server stores but **cannot open** this ([07 §7.8](07-encryption.md)). No server/admin escrow.
+The blob is **AES-256-GCM** under a 256-bit key derived from the user's recovery phrase via **Argon2id** (not HPKE — the recovery key is symmetric). The server stores but **cannot open** this ([07 §7.8](07-encryption.md)). No server/admin escrow.
 
 ## 3.3 Domain tables
 
@@ -110,9 +117,9 @@ CREATE TABLE files (
   content_type       text NOT NULL CHECK (content_type IN
                        ('markdown','plaintext','ink','office','sourcecode','image')),
   sync_policy        text NOT NULL DEFAULT 'server-default'
-                       CHECK (sync_policy IN ('server-default','pinned-local','excluded')),
-  current_version_id uuid,                   -- FK added after file_versions
-  crdt_doc_id        uuid,                    -- text types only
+                       CHECK (sync_policy IN ('server-default','excluded')),  -- pinned-local is client-local only, never a server value
+  current_version_id uuid,                   -- FK added after file_versions; API exposes file_versions.seq as currentVersionSeq
+  crdt_doc_id        uuid,                    -- text types only (client-allocated UUIDv7 at creation)
   key_generation     int NOT NULL DEFAULT 1,  -- current file-key rotation generation
   metadata_enc       bytea,                    -- encrypted per-file metadata
   created_at         timestamptz NOT NULL DEFAULT now(),
@@ -125,21 +132,51 @@ CREATE INDEX ix_files_owner   ON files(owner_id)   WHERE deleted_at IS NULL;
 ```
 > `content_type` and sizes stay visible (needed to route sync and pick the client decoder); everything content-bearing is encrypted. The former `zk` hook is gone — **E2EE is the default**, not an opt-in.
 
-### file_keys  (wrapped file keys — one row per authorized member)
+### shares  (ACL — see [09](09-sharing-and-acl.md))
+> Defined **before** `file_keys`, which references `shares(id)`.
+```sql
+CREATE TABLE shares (
+  id              uuid PRIMARY KEY,
+  file_id         uuid REFERENCES files(id),
+  folder_id       uuid REFERENCES folders(id),
+  project_id      uuid REFERENCES projects(id),
+  kind            text NOT NULL CHECK (kind IN ('user_grant','link')),
+  grantee_id      uuid REFERENCES users(id),
+  link_token_hash bytea,                    -- hash of the link token; KEY is in the URL fragment, never here
+  permission      text NOT NULL CHECK (permission IN ('read','write')),
+  created_by      uuid NOT NULL REFERENCES users(id),
+  created_at      timestamptz NOT NULL DEFAULT now(),
+  expires_at      timestamptz,
+  revoked_at      timestamptz,
+  CHECK (num_nonnulls(file_id, folder_id, project_id) = 1)
+);
+CREATE INDEX ix_shares_target_file   ON shares(file_id)   WHERE revoked_at IS NULL;
+CREATE INDEX ix_shares_target_folder ON shares(folder_id) WHERE revoked_at IS NULL;
+CREATE INDEX ix_shares_link          ON shares(link_token_hash) WHERE kind='link' AND revoked_at IS NULL;
+```
+> For a **user_grant**, the file key is wrapped to the grantee's public key in `file_keys`. For a **link**, the key rides the URL fragment ([09](09-sharing-and-acl.md)); the server stores only the token hash.
+
+### file_keys  (wrapped file keys — one row per authorized member or link-share grant)
 ```sql
 CREATE TABLE file_keys (
+  id           uuid PRIMARY KEY,             -- surrogate key (UUIDv7)
   file_id      uuid NOT NULL REFERENCES files(id),
-  member_id    uuid REFERENCES users(id),   -- null for link/guest shares
-  share_id     uuid REFERENCES shares(id),  -- set for link/guest grants
-  key_id       uuid NOT NULL,                -- which file-key generation
+  member_id    uuid REFERENCES users(id),   -- set for account grants; null for link/guest shares
+  share_id     uuid REFERENCES shares(id),  -- set for link/guest grants; null for account grants
+  key_id       uuid NOT NULL,                -- which file-key (1:1 with generation)
   wrapped_key  bytea NOT NULL,               -- FK wrapped to member's public key (HPKE)
-  generation   int  NOT NULL DEFAULT 1,
+  generation   int  NOT NULL DEFAULT 1,      -- rotation generation; 1:1 with key_id
   created_at   timestamptz NOT NULL DEFAULT now(),
   revoked_at   timestamptz,
-  PRIMARY KEY (file_id, key_id, member_id)
+  -- exactly one of a member grant or a link-share grant
+  CHECK ((member_id IS NOT NULL) <> (share_id IS NOT NULL))
 );
+-- partial unique indexes replace the old composite PK (which broke on nullable member_id)
+CREATE UNIQUE INDEX uq_file_keys_member ON file_keys(file_id, key_id, member_id) WHERE member_id IS NOT NULL;
+CREATE UNIQUE INDEX uq_file_keys_share  ON file_keys(file_id, key_id, share_id)  WHERE share_id IS NOT NULL;
 ```
 > **The server holds only *wrapped* file keys** — it cannot unwrap them. Link-share keys are not stored at all when carried in the URL fragment ([09](09-sharing-and-acl.md)); a `share_id` row is used only if a link key is server-relayed wrapped to an ephemeral share keypair.
+> **`key_id` vs `generation`:** `key_id` (uuid) names a specific file-key; `generation` (int) is a monotonic rotation counter — **1:1** with `key_id`. `key_id` is the stable reference embedded in frames / `crdt_updates` / `file_versions`; `generation` drives staleness (`412 key_generation_stale`).
 
 ### file_versions  (history — encrypted snapshots)
 ```sql
@@ -176,29 +213,6 @@ CREATE TABLE crdt_updates (
 CREATE INDEX ix_crdt_updates_doc ON crdt_updates(crdt_doc_id, seq);
 ```
 > The server **stores and relays** encrypted updates; it does **not** apply or merge them ([05](05-realtime-collaboration.md)). Compaction into encrypted snapshots is **client-driven**.
-
-### shares  (ACL — see [09](09-sharing-and-acl.md))
-```sql
-CREATE TABLE shares (
-  id              uuid PRIMARY KEY,
-  file_id         uuid REFERENCES files(id),
-  folder_id       uuid REFERENCES folders(id),
-  project_id      uuid REFERENCES projects(id),
-  kind            text NOT NULL CHECK (kind IN ('user_grant','link')),
-  grantee_id      uuid REFERENCES users(id),
-  link_token_hash bytea,                    -- hash of the link token; KEY is in the URL fragment, never here
-  permission      text NOT NULL CHECK (permission IN ('read','write')),
-  created_by      uuid NOT NULL REFERENCES users(id),
-  created_at      timestamptz NOT NULL DEFAULT now(),
-  expires_at      timestamptz,
-  revoked_at      timestamptz,
-  CHECK (num_nonnulls(file_id, folder_id, project_id) = 1)
-);
-CREATE INDEX ix_shares_target_file   ON shares(file_id)   WHERE revoked_at IS NULL;
-CREATE INDEX ix_shares_target_folder ON shares(folder_id) WHERE revoked_at IS NULL;
-CREATE INDEX ix_shares_link          ON shares(link_token_hash) WHERE kind='link' AND revoked_at IS NULL;
-```
-> For a **user_grant**, the file key is wrapped to the grantee's public key in `file_keys`. For a **link**, the key rides the URL fragment ([09](09-sharing-and-acl.md)); the server stores only the token hash.
 
 ### audit_log  (security events only — no content)
 ```sql

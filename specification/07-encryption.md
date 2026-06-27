@@ -17,7 +17,7 @@ User identity keypair (per user)            ── public key on server; private
         │
 Device keys (per device)                     ── enrolled copies of/access to the identity private key
         │
-Recovery key (user-held secret/phrase)       ── wraps an escrow of the identity private key for self-recovery
+Recovery phrase (user-held secret)           ── Argon2id-derived key wraps the identity private key (AES-256-GCM) for self-recovery
         │  unlocks
         ▼
 Identity private key
@@ -34,19 +34,22 @@ File content + CRDT updates + snapshots + encrypted name/title
 
 - **File key (FK):** one AES-256-GCM 256-bit key **per file**, generated client-side with a CSPRNG. It encrypts that file's bytes, CRDT updates, history snapshots, and its encrypted name. The server only ever stores it **wrapped** (one wrapped copy per authorized member).
 - **Identity keypair:** each user has a long-lived keypair. The **public** key is published to the server's key directory so others can wrap file keys to them; the **private** key never leaves the user's devices.
-- **Device keys:** enrolling a new device gives it access to the identity private key (via device-to-device approval or recovery-key unwrap). **[P]**
-- **Recovery key:** a high-entropy user-held secret (shown once as a phrase/file) that wraps an escrow blob of the identity private key, stored by the server **but unreadable to it**. This is the **only** recovery path — **no server escrow** ([§7.8](#78-key-recovery-od)). **[P]**
+- **Device keys:** enrolling a new device gives it access to the identity private key (via device-to-device approval or recovery-key unwrap). *(Ratified in `docs/OPEN-DECISIONS.md`.)*
+- **Recovery key:** a high-entropy user-held secret (shown once as a phrase/file). A 256-bit key is derived from it via **Argon2id** and wraps the identity private key with **AES-256-GCM** (not HPKE — the recovery key is symmetric); the server stores that blob **but cannot read it**. This is the **only** recovery path — **no server escrow** ([§7.8](#78-key-recovery-decided)). *(Ratified in `docs/OPEN-DECISIONS.md`.)*
 
 ## 7.3 Algorithms **[P]**
 
 | Purpose | Algorithm |
 |---------|-----------|
-| Content / CRDT / snapshot encryption | AES-256-GCM (96-bit nonce, 128-bit tag) |
-| File-key wrapping to a member | HPKE (X25519 + HKDF-SHA256 + AES-256-GCM) |
+| Symmetric AEAD everywhere (content / CRDT / snapshots / names / recovery blob) | **AES-256-GCM**, 96-bit (12B) nonce, 128-bit (16B) tag |
+| Public-key wrap to a recipient public key (file-key to members; device enrollment to a device pubkey) | **HPKE base mode**, suite = DHKEM(X25519, HKDF-SHA256) / HKDF-SHA256 / AES-256-GCM — RFC 9180 suite IDs **KEM=0x0020, KDF=0x0001, AEAD=0x0002** |
+| Recovery blob wrap | **AES-256-GCM** under an **Argon2id**-derived key (NOT HPKE — see the rule below) |
 | Identity key agreement | X25519 |
 | Signing (updates, key directory entries) | Ed25519 |
-| Recovery-key derivation | Argon2id → wrapping key |
-| Plaintext hashing (content address) | BLAKE3 (256-bit) |
+| Recovery-key derivation | **Argon2id** — m=64 MiB, t=3, p=1 (tunable; persisted in `recovery_blobs.kdf_params`) |
+| Plaintext hashing (content address) | **BLAKE3-256** of plaintext |
+
+> **System rule — HPKE vs AES-256-GCM:** use **HPKE wherever the target is a public key** (file-key wrap to members, device enrollment to a device pubkey); use **AES-256-GCM wherever the key is symmetric** (all content + the recovery blob).
 
 ## 7.4 Encrypted object framing **[P]**
 
@@ -54,7 +57,12 @@ Each ciphertext object (blob, snapshot, CRDT update, encrypted name) is framed:
 ```
 magic(4) | version(1) | key_id(16) | nonce(12) | ciphertext(...) | gcm_tag(16)
 ```
-`key_id` identifies which **file key** (and rotation generation) was used; the server cannot resolve it to a usable key. AAD binds the frame to its `file_id` and object kind.
+- **magic** = ASCII `"NYXC"` (`0x4E 0x59 0x58 0x43`); **version** = `0x01`.
+- **AAD** = `magic ‖ version ‖ key_id ‖ file_id(16) ‖ object_kind(1)` — binds the frame to its file and kind.
+- **`object_kind`** enum: `blob=1`, `snapshot=2`, `crdt=3`, `name=4`, `metadata=5`, `awareness=6`, `settings=7`.
+- **HPKE wrap output framing** (a wrapped file-key): `enc(32, HPKE encapsulated key) ‖ ciphertext ‖ tag(16)`.
+
+`key_id` identifies which **file key** (and its 1:1 rotation generation) was used; the server cannot resolve it to a usable key.
 
 ## 7.5 Content addressing & deduplication
 
@@ -89,10 +97,10 @@ E2EE "in all places" is pushed as far as practical while keeping the server able
 
 > **[P] decision — names are encrypted.** Titles are sensitive, so they are E2EE like content; admins and the server see structure by opaque ID only. A *further* step (hiding the structural graph itself) is **not** taken, because the server needs the graph to route sync and evaluate ACLs. If you want structure hidden too, that's a larger, separate design.
 
-## 7.8 Key recovery [OD] **[P]**
+## 7.8 Key recovery (decided)
 
-- **Default: user-held recovery key, no server escrow.** At enrollment the client generates a recovery key (shown once). It wraps an escrow of the identity private key; the server stores that **opaque** escrow blob and cannot open it.
-- **Consequence:** losing **all** devices **and** the recovery key = permanent data loss. The server has no master key and cannot reset content. This is the honest cost of zero-knowledge.
+- **Decision: user-held recovery phrase, no server escrow.** At enrollment the client generates a high-entropy **recovery phrase** (shown once). A 256-bit key is derived from it via **Argon2id** (m=64 MiB, t=3, p=1; params persisted in `recovery_blobs.kdf_params`), and that key wraps the identity bundle (X25519 priv ‖ Ed25519 priv) with **AES-256-GCM** — **not** HPKE, because the recovery key is symmetric. The server stores the resulting **opaque** blob `{ version, kdf, nonce, ciphertext, tag }` (AAD = `userId ‖ version`) and cannot open it ([03 `recovery_blobs`](03-data-model.md)).
+- **Consequence:** losing **all** devices **and** the recovery phrase = permanent data loss. The server has no master key and cannot reset content. This is the honest cost of zero-knowledge.
 - **Alternative (not chosen):** server-side or admin escrow would enable recovery but reintroduce a key the operator holds — rejected as contrary to the privacy-first principle. Flagged here so it can be revisited as an explicit, less-private opt-in.
 
 ## 7.9 Rotation & revocation

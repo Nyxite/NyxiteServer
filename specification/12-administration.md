@@ -37,7 +37,9 @@
 | Method | Path | Purpose |
 |--------|------|---------|
 | `GET` | `/admin/audit?from=&to=&actor=&action=&target=` | Query the audit log |
-| `GET` | `/admin/audit/export` | Export a signed audit bundle **[P]** |
+| `GET` | `/admin/audit/export` | Export a signed audit bundle (see below) **[P]** |
+
+> **Signed audit bundle format [P]:** `NDJSON` of audit rows + a `manifest.json` `{ from, to, count, chainHead, alg:"ed25519", signature }`. The rows form a **rolling hash chain** (each row hashes the previous), and the manifest carries a **detached Ed25519 signature** over the final `chainHead` using a server **audit-signing key**. A verifier replays the chain and checks the signature to prove the export is complete and untampered.
 
 ## 12.3 Audit log
 
