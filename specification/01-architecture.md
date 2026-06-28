@@ -16,7 +16,7 @@
 | CRDT | Yrs family; **client-side merge** (`ydotnet` on desktop). Server runs **no CRDT engine in the live path** | Privacy decision |
 | Search | **Client-side** (no server index) | Privacy decision |
 | Cache / backplane | Redis 7 (later; encrypted relay backplane + presence) | Master spec §2.2 |
-| Auth | Keycloak (OIDC + TOTP) + per-device key enrollment | Master spec §2.1 + E2EE |
+| Auth | **Native** (password+TOTP / passkeys, server-issued tokens) + per-device key enrollment; enterprise Keycloak/OIDC pluggable | Master spec §2.1, §10 + E2EE |
 | Crypto | AES-256-GCM, HPKE (X25519), Ed25519, BLAKE3, Argon2id | [07](07-encryption.md) **[P]** |
 | Reverse proxy / packaging | nginx behind Cloudflare; Docker Compose on Hetzner ARM64 | INFRASTRUCTURE.md |
 
@@ -35,7 +35,7 @@ Nyxite.sln
 │   └── Nyxite.BlobStore            # IBlobStore + filesystem implementation (+ S3 later)
 └── tests/
     ├── Nyxite.UnitTests
-    ├── Nyxite.IntegrationTests     # Testcontainers: Postgres, Keycloak
+    ├── Nyxite.IntegrationTests     # Testcontainers: Postgres (Keycloak only for the enterprise profile)
     └── Nyxite.CrdtConformanceTests # Yrs wire-protocol conformance vs Yjs / ykt
 ```
 
@@ -61,7 +61,10 @@ Nyxite.sln
                 ┌───────────────────┼───────────────────────────┐
                 ▼                   ▼                           ▼
         Nyxite.Server         Keycloak (JVM)            (static client assets)
-        ├─ REST API            OIDC + TOTP
+        ├─ REST API            OIDC (enterprise
+        ├─ Native auth          profile only)
+        │   (pw+TOTP/passkeys,
+        │    server-issued tokens)
         ├─ RelayHub (encrypted)
         └─ background workers (GC, expiry, audit)
              │        │            │
@@ -83,7 +86,7 @@ v1.0.0 is single-node. The relay's no-merge design makes horizontal scale-out (R
 
 | Concern | Approach |
 |---------|----------|
-| **AuthN** | OIDC bearer (users) + per-device keys; short-lived share tokens (guests). [08](08-authentication.md) |
+| **AuthN** | The server's own access token (users; native auth by default, enterprise OIDC resolves to the same token) + per-device keys; short-lived share tokens (guests). [08](08-authentication.md) |
 | **AuthZ** | Server ACL gates ciphertext/relay; crypto layer gates decryption. [09](09-sharing-and-acl.md) |
 | **Validation** | Structure/ACL DTOs validated at the edge; **content is opaque** (server can't validate plaintext). |
 | **Errors** | RFC 9457 `application/problem+json`. [04 §4.4](04-rest-api.md) |
@@ -97,7 +100,7 @@ v1.0.0 is single-node. The relay's no-merge design makes horizontal scale-out (R
 
 1. nginx → Kestrel (TLS already terminated).
 2. Rate-limiting middleware ([13](13-security.md)).
-3. OIDC bearer (or share token) → principal.
+3. Bearer (the server's own access token) or share token → principal.
 4. Routing → endpoint; structure/ACL DTO validation (content payloads passed through opaque).
 5. Authorization: ACL policy for the target.
 6. Application service: transaction → structure/ACL change and/or `IBlobStore.Put(ciphertext)` → commit.

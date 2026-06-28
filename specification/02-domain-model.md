@@ -19,16 +19,21 @@ User ──owns──┐    User ──has──► IdentityKeypair (public on s
 ## 2.2 Entities
 
 ### 2.2.1 User
-Thin projection of a Keycloak subject (no credentials). Account identity (`display_name`, `email`) is server-visible — needed for sharing-by-account and presence — and is **not** file content.
+A **native, server-owned account** (not a thin IdP projection). The server holds the credentials needed for native auth — an Argon2id **password verifier**, a **TOTP secret**, and any **WebAuthn/passkey credentials** ([08](08-authentication.md)) — none of which is content-derivable. Account identity (`display_name`, `email`) is server-visible — needed for sharing-by-account and presence — and is **not** file content. An external IdP subject is recorded **only** for enterprise-linked accounts.
 
 | Field | Type | Notes |
 |-------|------|-------|
 | `id` | UUIDv7 | |
-| `keycloak_sub` | string | OIDC `sub`; unique |
-| `display_name`, `email` | string | Account identity (from Keycloak) |
-| `role` | `user` \| `admin` | |
+| `display_name`, `email` | string | Account identity |
+| `password_verifier` | bytea? | Argon2id verifier; **nullable** for passkey-only or enterprise-linked accounts |
+| `totp_secret_enc` | bytea? | Enrolled TOTP secret (encrypted at rest); required alongside a password |
+| `external_idp` | string? | Enterprise IdP name (e.g. `keycloak`); **null** for native accounts |
+| `external_idp_sub` | string? | OIDC `sub` from the enterprise IdP; **null** for native accounts |
+| `role` | `user` \| `admin` | Lives on the native account; an enterprise IdP may map a claim to it |
 | `settings_enc` | bytea | **Client-encrypted** user settings |
 | timestamps | timestamptz | |
+
+WebAuthn/passkey credentials are a separate per-user collection (**WebAuthnCredential**: `credential_id`, `public_key`, `sign_count`, …) — see [03 §3.2](03-data-model.md).
 
 ### 2.2.2 IdentityKeypair / Device / RecoveryBlob (E2EE additions)
 - **IdentityKeypair** — per user: X25519 (wrapping) + Ed25519 (signing). **Public** keys published to the server directory (`user_keys`); private keys never leave devices.

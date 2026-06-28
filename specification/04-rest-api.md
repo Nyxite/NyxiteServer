@@ -5,7 +5,7 @@
 ## 4.1 Conventions
 
 - **Base path:** `/api/v1`. URL-versioned. **[P]**
-- **Auth:** `Authorization: Bearer <OIDC token>` on `/api/v1/**` except public share endpoints ([§4.8](#48-public-share-endpoints)).
+- **Auth:** `Authorization: Bearer <token>` on `/api/v1/**` except the auth and public-share endpoints. The bearer is **the server's own access token** (native auth by default; the enterprise Keycloak/OIDC profile resolves to the same token — [08](08-authentication.md)). Auth endpoints live under `/api/v1/auth` ([§4.3](#43-endpoints)); public share endpoints under `/share/**` ([§4.8](#48-public-share-endpoints)).
 - **Content type:** `application/json` for structure/metadata; binary streams for ciphertext blobs.
 - **IDs:** UUIDv7. **Timestamps:** RFC 3339 UTC. **[P]**
 - **Pagination:** query `?cursor=<opaque>&limit=<n>` (default `50`, max `200`); response envelope `{ "items": [...], "nextCursor": <opaque|null> }`. The cursor is an **opaque base64url server token** — clients must not parse it.
@@ -17,6 +17,7 @@
 
 | Area | Base |
 |------|------|
+| Auth (native; enterprise OIDC) | `/api/v1/auth` |
 | Projects / Folders / Files (structure) | `/api/v1/projects`, `/folders`, `/files` |
 | File content (ciphertext) | `/api/v1/files/{id}/blob`, `/crdt/*` |
 | File keys (wrapped) | `/api/v1/files/{id}/keys` |
@@ -29,6 +30,20 @@
 | Public share | `/share/**` (unauthenticated, token-scoped) |
 
 ## 4.3 Endpoints
+
+### Auth (native by default; enterprise OIDC)
+Native, server-owned auth ([08 §8.1](08-authentication.md)); these endpoints issue/refresh **the server's own tokens**. Unauthenticated except where marked (auth'd). The enterprise profile adds `GET /auth/oidc/authorize` + `/auth/oidc/callback`, which resolve to the same internal token.
+| Method | Path | Purpose |
+|--------|------|---------|
+| `POST` | `/auth/register` | Create a native account `{ email, displayName, password }` (Argon2id verifier); TOTP enrollment required before full login |
+| `POST` | `/auth/login` | Password step `{ email, password }` → `{ challenge:"totp_required", mfaToken }` (password alone never yields a full token) |
+| `POST` | `/auth/login/totp` | Complete login `{ mfaToken, totpCode }` → `{ accessToken, refreshToken }` |
+| `POST` | `/auth/totp/enroll` / `/auth/totp/verify` | (auth'd) Enroll/confirm the required TOTP factor |
+| `POST` | `/auth/webauthn/register/options` / `/auth/webauthn/register` | (auth'd) Register a passkey (stores public credential only) |
+| `POST` | `/auth/webauthn/assert/options` / `/auth/webauthn/assert` | Passkey login → `{ accessToken, refreshToken }` (sufficient alone) |
+| `POST` | `/auth/refresh` | Rotate a refresh token → new `{ accessToken, refreshToken }` |
+| `POST` | `/auth/logout` | Revoke the presented refresh token / session |
+| `POST` | `/auth/password/forgot` / `/auth/password/reset` | Email-based reset — **restores login only**, never content ([08 §8.1](08-authentication.md)) |
 
 ### Projects / Folders / Files (structure)
 Same shape as a normal CRUD tree, but **names are ciphertext**:

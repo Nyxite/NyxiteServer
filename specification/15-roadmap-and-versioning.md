@@ -10,7 +10,7 @@
 
 ### Phase 0 — Foundations
 - Solution/project scaffold ([01](01-architecture.md)); `NyxiteDbContext` + initial migration ([03](03-data-model.md)).
-- Keycloak OIDC + 2FA ([08](08-authentication.md)).
+- Native auth (password + required TOTP, passkeys) with the server issuing its own tokens; pluggable enterprise Keycloak/OIDC IdP ([08](08-authentication.md)).
 - **E2EE foundation: key directory (`user_keys`), device enrollment, client-encrypted recovery blob (`recovery_blobs`, AES-256-GCM under Argon2id)** ([07](07-encryption.md), [08](08-authentication.md)).
 - `IBlobStore` filesystem impl (**ciphertext**); structure/metadata CRUD with **encrypted names** ([02](02-domain-model.md), [04](04-rest-api.md)); OpenAPI.
 - Audit-log foundation; health/readiness.

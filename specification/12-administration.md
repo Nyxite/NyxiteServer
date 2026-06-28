@@ -4,7 +4,7 @@
 
 ## 12.1 Admin model
 
-- `admin` is a Keycloak role projected to `users.role` ([08](08-authentication.md)).
+- The `admin` role lives on the native account (`users.role`); with the enterprise IdP enabled, a Keycloak claim may be mapped onto it ([08](08-authentication.md)).
 - Admin visibility: account list, **structure by opaque ID** (names are encrypted), storage usage, version/key-generation counts, audit log.
 - Admin **cannot** decrypt names or content. No content-read policy and no break-glass exist ([08 §8.5](08-authentication.md)).
 
@@ -15,7 +15,7 @@
 |--------|------|---------|
 | `GET` | `/admin/users` | List users (account identity + usage) |
 | `GET` | `/admin/users/{id}` | Storage usage, counts, device list, key generations |
-| `PATCH` | `/admin/users/{id}` | Role/limit adjustments (within Keycloak constraints) |
+| `PATCH` | `/admin/users/{id}` | Role/limit adjustments (on the native account; an enterprise IdP may constrain role mapping) |
 | `GET` | `/admin/instance` | Status: storage, DB, blob store, relay, key directory health |
 | `GET` | `/admin/instance/config` | Effective **non-secret** configuration |
 
@@ -64,7 +64,7 @@ Each entry: `occurred_at`, `actor_id`/`actor_kind`, `action`, `target_type`/`tar
 
 ## 12.4 Configuration surface
 
-- Admin endpoints expose **effective non-secret** config only — never Keycloak client secrets or any keys. (There is no server content KEK to expose.)
+- Admin endpoints expose **effective non-secret** config only — never the native token-signing key, the enterprise Keycloak client secret, or any keys. (There is no server content KEK to expose.)
 - Per-user/per-file settings (sync policy, etc.) are surfaced via user-facing endpoints ([04 `/me/settings`](04-rest-api.md)) and are **client-encrypted**.
 
 ## 12.5 Operational admin

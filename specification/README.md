@@ -39,7 +39,7 @@ Two privacy-maximal **[P]** defaults to note explicitly:
 | 05 | [realtime-collaboration.md](05-realtime-collaboration.md) | Encrypted relay, client-side merge, guest sessions |
 | 06 | [sync.md](06-sync.md) | Sync of ciphertext + structure, policies, CRDT/LWW split |
 | 07 | [encryption.md](07-encryption.md) | **E2EE** key hierarchy, HPKE wrapping, recovery, content addressing |
-| 08 | [authentication.md](08-authentication.md) | Keycloak OIDC + TOTP, device/identity keys, two-layer authz |
+| 08 | [authentication.md](08-authentication.md) | Native auth (password+TOTP / passkeys, server-issued tokens) + pluggable enterprise OIDC, device/identity keys, two-layer authz |
 | 09 | [sharing-and-acl.md](09-sharing-and-acl.md) | Server ACL + crypto layer, wrapped/fragment keys, rotation revocation |
 | 10 | [version-history.md](10-version-history.md) | Encrypted snapshots, client-side diffs/restore, dedup |
 | 11 | [search.md](11-search.md) | **Client-side** search; server has no index |

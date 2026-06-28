@@ -4,7 +4,7 @@
 
 ## 0.1 Purpose
 
-The Nyxite Server is the core service of the Nyxite platform: a single-tenant, self-hosted, **zero-knowledge** backend for notes and documents. It stores content in three forms — **markdown**, **handwritten ink**, and **plain text** — organized into **projects** and **folders**, and synchronizes them across the desktop, Android, and web clients under configurable per-file policies. Content (and even file names) is **encrypted on the client**; the server persists and relays ciphertext it cannot read. Real-time multi-user editing, including anonymous guests via share links, works over an **encrypted relay** — clients merge, the server does not. Authentication is delegated to Keycloak with TOTP two-factor.
+The Nyxite Server is the core service of the Nyxite platform: a single-tenant, self-hosted, **zero-knowledge** backend for notes and documents. It stores content in three forms — **markdown**, **handwritten ink**, and **plain text** — organized into **projects** and **folders**, and synchronizes them across the desktop, Android, and web clients under configurable per-file policies. Content (and even file names) is **encrypted on the client**; the server persists and relays ciphertext it cannot read. Real-time multi-user editing, including anonymous guests via share links, works over an **encrypted relay** — clients merge, the server does not. Authentication is **Nyxite-native** (server-owned accounts: password + required TOTP, or passkeys), with Keycloak/OIDC as a pluggable **enterprise** IdP.
 
 The server is the authority for **persistence, routing, access control, and durable relay** — **not** for reading, merging, indexing, or processing content.
 
@@ -22,11 +22,11 @@ The server is the authority for **persistence, routing, access control, and dura
 
 | Actor | Description | Auth |
 |-------|-------------|------|
-| **Owner / Admin** | Operates the instance; manages users; sees structure/usage/audit but **cannot read content** (cryptographically impossible). | Keycloak + TOTP, admin role |
-| **User** | Registered account; owns/encrypts projects/folders/files, shares them, collaborates. Holds their own keys. | Keycloak + TOTP, device keys |
+| **Owner / Admin** | Operates the instance; manages users; sees structure/usage/audit but **cannot read content** (cryptographically impossible). | Native (password+TOTP / passkey), admin role |
+| **User** | Registered account; owns/encrypts projects/folders/files, shares them, collaborates. Holds their own keys. | Native (password+TOTP / passkey), device keys |
 | **Guest** | Anonymous participant joining via a link share; gets the file key from the link's URL fragment, not the server. | Short-lived share token + fragment key |
-| **Client app** | Desktop (Avalonia), Android (Compose), Web (Next.js). Does all encryption, decryption, merge, search, and diffing. | Bearer (OIDC) tokens |
-| **Keycloak** | External identity provider (OIDC + TOTP). | — |
+| **Client app** | Desktop (Avalonia), Android (Compose), Web (Next.js). Does all encryption, decryption, merge, search, and diffing. | Bearer (the server's own access token) |
+| **Keycloak** | **Enterprise-only** pluggable external IdP (OIDC + TOTP); resolves to the server's internal token. Absent in the default profile. | — |
 
 ## 0.4 Content forms
 
@@ -40,7 +40,7 @@ The text/ink split — CRDT (Yrs) for text (`markdown`/`plaintext`/`sourcecode`)
 
 ## 0.5 Capability summary
 
-- **API** — REST (OIDC-protected) + WebSocket relay; public share endpoint for guests. Serves/relays **ciphertext only**.
+- **API** — REST (protected by the server's own access token — native auth by default; enterprise Keycloak/OIDC resolves to the same token) + WebSocket relay; public share endpoint for guests. Serves/relays **ciphertext only**.
 - **Domain** — projects → folders → files; structure server-visible, **names and content encrypted**.
 - **Sync** — cross-device engine; per-file server policies `server-default`, `excluded` (**[OD-3] resolved**). Offline pinning is purely **client-local** — the zero-knowledge server never sees it.
 - **Collaboration** — **encrypted relay**; clients merge CRDT updates; per-document rooms; ephemeral awareness; anonymous guests via fragment-key links.
@@ -48,14 +48,14 @@ The text/ink split — CRDT (Yrs) for text (`markdown`/`plaintext`/`sourcecode`)
 - **Version history** — full history of **encrypted** snapshots; **client-side** diffs and restore; content-addressed dedup.
 - **Search** — **client-side** full-text (desktop indexes the full local corpus; web/Android over their local subset). No server index.
 - **Encryption** — full E2EE; per-file AES-256-GCM keys generated and held on clients; wrapped to members via HPKE.
-- **Authentication** — Keycloak OIDC SSO; TOTP 2FA; per-device key enrollment; user-held recovery key.
+- **Authentication** — native auth (password + required TOTP, or passkeys) with the server issuing its own tokens; pluggable enterprise Keycloak/OIDC IdP; per-device key enrollment; user-held recovery key.
 - **Administration** — instance/user management; structure/usage/audit only; **no content access path exists** (no break-glass — there is nothing to break into).
 
 ## 0.6 Phase map (full v1.0.0 spanning Phases 0–6)
 
 | Phase | Server deliverables |
 |-------|---------------------|
-| **0 Foundations** | Keycloak + 2FA; **device-key enrollment + key directory + client-encrypted recovery blob**; Postgres + blob store (ciphertext); structure/metadata CRUD with encrypted names; OpenAPI. |
+| **0 Foundations** | Native auth (password+TOTP, passkeys) with server-issued tokens + pluggable enterprise Keycloak/OIDC; **device-key enrollment + key directory + client-encrypted recovery blob**; Postgres + blob store (ciphertext); structure/metadata CRUD with encrypted names; OpenAPI. |
 | **1 Notes that sync** | Markdown + plain text on the **encrypted** CRDT relay; encrypted blob sync; the three sync policies; on-demand download; **client-side search** support (server serves ciphertext + manifests). |
 | **2 Collaboration & sharing** | Encrypted live relay; account shares (HPKE-wrapped keys) + link shares (fragment keys); anonymous guests; version history of encrypted snapshots with client-side diffs/restore; rotation-based revocation. |
 | **3 Handwriting** | Ink vector strokes as encrypted blobs; LWW sync. |

@@ -11,7 +11,7 @@
 ## 5.2 Transport
 
 - **SignalR** over WebSocket. A single hub, `RelayHub`, multiplexes per-document rooms via SignalR groups keyed by `file:{fileId}`. **[P]**
-- **Upgrade auth:** OIDC bearer (users) or a short-lived **share token** (guests) ([08](08-authentication.md)). The share token authorizes **relay access**; the **decryption key** comes from the link's URL fragment, never the server ([09](09-sharing-and-acl.md)).
+- **Upgrade auth:** the server's own access token (users) or a short-lived **share token** (guests) ([08](08-authentication.md)). The share token authorizes **relay access**; the **decryption key** comes from the link's URL fragment, never the server ([09](09-sharing-and-acl.md)).
 - **Fallback:** REST encrypted-update endpoints ([04](04-rest-api.md)) for offline catch-up.
 
 ## 5.3 Hub contract **[P]**
@@ -61,7 +61,7 @@ public record EncryptedUpdate(long Seq, byte[] Ciphertext, Guid KeyId);
 ## 5.7 Presence & awareness
 
 - **Awareness** (cursors/selection/label) is **encrypted** and ephemeral; relayed via `OnAwareness`, never stored.
-- **Presence roster** (`OnPresence`) reflects group membership by **account identity** (display name from Keycloak) or "guest" — no content. On multi-node it is Redis-backed; single-node keeps it in memory.
+- **Presence roster** (`OnPresence`) reflects group membership by **account identity** (display name from the user's account) or "guest" — no content. On multi-node it is Redis-backed; single-node keeps it in memory.
 
 ## 5.8 Guest sessions
 

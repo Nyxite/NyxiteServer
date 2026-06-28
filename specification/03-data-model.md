@@ -16,17 +16,36 @@
 ### users
 ```sql
 CREATE TABLE users (
-  id            uuid PRIMARY KEY,
-  keycloak_sub  text NOT NULL UNIQUE,
-  display_name  text NOT NULL,            -- account identity (from Keycloak), NOT file content
-  email         text NOT NULL,
-  role          text NOT NULL DEFAULT 'user' CHECK (role IN ('user','admin')),
-  settings_enc  bytea,                     -- client-encrypted user settings (server-opaque)
-  created_at    timestamptz NOT NULL DEFAULT now(),
-  updated_at    timestamptz NOT NULL DEFAULT now()
+  id                uuid PRIMARY KEY,
+  email             text NOT NULL UNIQUE,
+  display_name      text NOT NULL,            -- account identity, NOT file content
+  password_verifier bytea,                    -- Argon2id verifier (m=64MiB,t=3,p=1); NULL for passkey-only / enterprise accounts
+  totp_secret_enc   bytea,                    -- enrolled TOTP secret, encrypted at rest; required alongside a password
+  external_idp      text,                     -- enterprise IdP name (e.g. 'keycloak'); NULL for native accounts
+  external_idp_sub  text,                     -- OIDC `sub` from the enterprise IdP; NULL for native accounts
+  role              text NOT NULL DEFAULT 'user' CHECK (role IN ('user','admin')),
+  settings_enc      bytea,                    -- client-encrypted user settings (server-opaque)
+  created_at        timestamptz NOT NULL DEFAULT now(),
+  updated_at        timestamptz NOT NULL DEFAULT now(),
+  UNIQUE (external_idp, external_idp_sub)     -- enterprise-linked identity, when present
 );
 ```
-> `display_name`/`email` are account identity from Keycloak (needed for sharing-by-account and presence), not file content. User *settings* are client-encrypted.
+> Native, server-owned account ([08](08-authentication.md)): `password_verifier` is an **Argon2id** hash (the password never feeds content-key derivation), `totp_secret_enc` the required second factor; passkeys live in `webauthn_credentials`. `external_idp`/`external_idp_sub` are populated **only** for enterprise OIDC-linked accounts. `display_name`/`email` are account identity (needed for sharing-by-account and presence), not file content. User *settings* are client-encrypted.
+
+### webauthn_credentials  (passkey / WebAuthn public credentials)
+```sql
+CREATE TABLE webauthn_credentials (
+  id             uuid PRIMARY KEY,
+  user_id        uuid NOT NULL REFERENCES users(id),
+  credential_id  bytea NOT NULL UNIQUE,       -- WebAuthn credential ID
+  public_key     bytea NOT NULL,              -- COSE public key (PUBLIC material only)
+  sign_count     bigint NOT NULL DEFAULT 0,   -- signature counter (clone-detection)
+  label          text,
+  created_at     timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX ix_webauthn_user ON webauthn_credentials(user_id);
+```
+> Only **public** credential material is stored; a passkey is phishing-resistant and sufficient on its own ([08 §8.1](08-authentication.md)). Nothing here is content-derivable.
 
 ### user_keys  (public-key directory)
 ```sql

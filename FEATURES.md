@@ -6,7 +6,7 @@ ASP.NET Core (C#) backend. The core service: API, sync engine, real-time collabo
 
 ## API
 
-- REST (OIDC-protected) and WebSocket API for all clients; serves/relays ciphertext only
+- REST (protected by the server's own access token) and WebSocket API for all clients; serves/relays ciphertext only
 - Key-directory, device-enrollment, recovery, and wrapped-key endpoints
 - Public share endpoint serving the guest collaboration client (decryption key rides the link's URL fragment)
 
@@ -19,8 +19,8 @@ ASP.NET Core (C#) backend. The core service: API, sync engine, real-time collabo
 ## Sync
 
 - Cross-device sync engine (moves ciphertext + structure, never plaintext)
-- Per-file sync policies enforced server-side: server-default, excluded (offline pinning is client-local only)
-- Per-file-type split: CRDT (Yrs) for text, last-write-wins for ink/binary
+- Per-file sync policies enforced server-side: server-default, excluded (offline pinning is a purely client-local "keep on device" choice the server never sees)
+- Per-file-type split: CRDT for text, last-write-wins for ink/binary
 
 ## Collaboration
 
@@ -47,12 +47,12 @@ ASP.NET Core (C#) backend. The core service: API, sync engine, real-time collabo
 
 - End-to-end encryption (zero-knowledge), default from Phase 0; **no server-held KEK**
 - Per-file AES-256-GCM content keys generated client-side, stored only wrapped (to member public keys via HPKE, or carried in a share-link URL fragment)
-- Identity keypair per user (public key in a server directory, private key never on the server); per-device enrollment; user-held recovery key with no server/admin escrow
+- Identity keypair per user (public key in a server directory, private key never on the server); per-device enrollment; recovery via a client-encrypted recovery blob (identity private key wrapped under an Argon2id-derived key with AES-256-GCM, stored but unreadable by the server) — no server-readable escrow and no admin escrow
 - Plaintext-hash addressing with ciphertext stored under it; no convergent encryption
 
 ## Authentication
 
-- Keycloak OIDC integration; TOTP two-factor (authenticates the account; decryption is governed by device/identity keys)
+- **Native, server-owned auth** — password (Argon2id verifier) + required TOTP, plus co-equal **passkeys (WebAuthn)**; the server **issues its own access + refresh tokens**. The login password never feeds content-key derivation; decryption is governed by device/identity keys. **Keycloak/OIDC is a pluggable enterprise IdP** resolving to the same internal token. (See [SPECIFICATION §10](../docs/SPECIFICATION.md).)
 
 ## Administration
 
@@ -62,6 +62,6 @@ ASP.NET Core (C#) backend. The core service: API, sync engine, real-time collabo
 
 ## Open questions
 
-See [../docs/OPEN-DECISIONS.md](../docs/OPEN-DECISIONS.md). Server-owned items: metadata boundary (encrypted names; defer structure-hiding), multi-device enrollment, fragment-key sharing, rotation-based revocation, and key-directory trust.
+See [../docs/OPEN-DECISIONS.md](../docs/OPEN-DECISIONS.md). The server-owned items are now **resolved** there: native auth (server-owned password+TOTP / passkeys, server-issued tokens, Keycloak as a pluggable enterprise IdP — #9), key recovery (client-encrypted recovery blob, no server/admin escrow), metadata boundary (encrypted names; structure-hiding deferred to Phase 6), multi-device enrollment, fragment-key sharing, rotation-based revocation, key-directory trust (TLS + Ed25519 self-signature for v1), sync-policy semantics (`{ server-default, excluded }`), background auto-sync relay (#11), and the CRDT/LWW split.
 
-**Now decided:** sync-policy semantics ([OD-3] — `server-default`/`excluded`; offline pinning client-local), the CRDT/LWW split ([OD-4] — text = CRDT, ink + binary = LWW), and the recovery model (a client-encrypted recovery blob, AES-256-GCM under Argon2id, no escrow).
+All raised decisions (#1–#11) are now resolved; nothing is pending ratification.

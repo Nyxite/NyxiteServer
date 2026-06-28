@@ -1,13 +1,13 @@
 # 14 — Deployment & Configuration
 
-> **E2EE.** The server stores ciphertext and holds **no content KEK** — the only server-side secrets are the Keycloak client secret and DB credentials. There is **no server search service**. Deploy stack graduates to the `deploy` repo; this section is the server's deployment contract. Values are **[P]**.
+> **E2EE.** The server stores ciphertext and holds **no content KEK** — the server-side secrets are the **native-auth token-signing key** and DB credentials (plus the Keycloak client secret **only** under the optional `enterprise` profile). There is **no server search service**. Deploy stack graduates to the `deploy` repo; this section is the server's deployment contract. Values are **[P]**.
 
 ## 14.1 Runtime packaging
 
-- **Primary artifact = the Docker Compose stack** on **Hetzner ARM64** (nginx + Keycloak + Postgres + server). The earlier "single binary vs container" question is **resolved in favor of container/Compose** as the supported primary; a single self-contained binary is **not** a v1 target.
+- **Primary artifact = the Docker Compose stack** on **Hetzner ARM64** (nginx + Postgres + server + blob store). The earlier "single binary vs container" question is **resolved in favor of container/Compose** as the supported primary; a single self-contained binary is **not** a v1 target.
 - **Docker image**, multi-arch incl. **linux/arm64** (Hetzner ARM64 VPS).
-- Runs in the **Docker Compose** stack behind **nginx**, alongside **Keycloak**.
-- Services: `nyxite-server`, `postgres`, `keycloak`, blob store (filesystem volume now; MinIO later), `redis` (later, relay backplane). nginx reverse-proxies; Cloudflare fronts public traffic.
+- Runs in the **Docker Compose** stack behind **nginx**.
+- **Default services:** `nyxite-server`, `postgres`, blob store (filesystem volume now; MinIO later), `redis` (later, relay backplane). The **optional `enterprise` Compose profile** adds `keycloak` (the pluggable enterprise IdP — [08](08-authentication.md)). nginx reverse-proxies; Cloudflare fronts public traffic.
 
 ## 14.2 Dependencies
 
@@ -15,7 +15,7 @@
 |------------|----------|-------|
 | PostgreSQL 17 | yes | Structure, ACLs, wrapped keys, encrypted names, audit |
 | Blob store volume / endpoint | yes | **Ciphertext** behind `IBlobStore` |
-| Keycloak | yes | OIDC issuer + JWKS reachable from the server |
+| Keycloak | enterprise only | Optional `enterprise` profile: OIDC issuer + JWKS reachable from the server. Native auth needs no external IdP. |
 | Redis | optional | Multi-node relay backplane / presence |
 | ~~Meilisearch~~ | **n/a** | No server-side search under E2EE |
 | ~~KEK provider~~ | **n/a** | No server content KEK — keys live on clients |
@@ -33,9 +33,11 @@
 | `NYXITE__BlobStore__Provider` | `filesystem` \| `s3` |
 | `NYXITE__BlobStore__RootPath` | Filesystem blob root (content-addressed, sharded) |
 | `NYXITE__BlobStore__S3__*` | Endpoint/bucket/credentials when `s3` |
-| `NYXITE__Auth__Authority` | Keycloak issuer URL |
+| `NYXITE__Auth__TokenSigningKey` (secret) | **Native** token-signing key — signs/validates the server's own access + refresh tokens (always required) |
 | `NYXITE__Auth__Audience` | Expected token audience |
-| `NYXITE__Auth__ClientId` / `ClientSecret` (secret) | OIDC client |
+| `NYXITE__Auth__Enterprise__Enabled` | `true` to enable the enterprise OIDC IdP (default `false` = native only) |
+| `NYXITE__Auth__Enterprise__Authority` | Keycloak issuer URL (**enterprise profile only**) |
+| `NYXITE__Auth__Enterprise__ClientId` / `ClientSecret` (secret) | OIDC client (**enterprise profile only**) |
 | `NYXITE__Realtime__Backplane` | `none` \| `redis` |
 | `NYXITE__Realtime__Redis` (secret) | Redis connection when enabled |
 | `NYXITE__Limits__*` | Upload sizes, rate-limit buckets ([13](13-security.md)) |
@@ -48,7 +50,7 @@
 ## 14.4 Startup & lifecycle
 
 - **Migrations** run as a discrete deploy step (separate DB role), not at app startup in prod. **[P]**
-- Boot validation: DB reachable + migrated, Keycloak JWKS reachable, blob store writable. (No KEK probe — there is none.) Fail fast otherwise.
+- Boot validation: DB reachable + migrated, native **token-signing key** present, blob store writable. The **Keycloak JWKS reachable** check applies **only under the `enterprise` profile** (native auth validates its own tokens with the signing key). (No KEK probe — there is none.) Fail fast otherwise.
 - Background hosted services: blob GC, share-token/expiry sweeps, audit retention. **No** snapshotting/indexing (client-side).
 
 ## 14.5 Health & observability
@@ -75,5 +77,5 @@ Structured logs to stdout; security events → audit log; **never content** (non
 
 ## 14.8 Environments **[P]**
 
-- **dev/test:** Testcontainers for Postgres + Keycloak; filesystem blob store; throwaway test client keypairs.
+- **dev/test:** Testcontainers for Postgres (and Keycloak only when exercising the `enterprise` profile); filesystem blob store; throwaway test client keypairs.
 - **prod:** the Compose stack on the ARM64 VPS.
