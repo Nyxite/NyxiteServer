@@ -115,7 +115,7 @@ CREATE TABLE files (
   owner_id           uuid NOT NULL REFERENCES users(id),
   name_enc           bytea NOT NULL,        -- encrypted file name
   content_type       text NOT NULL CHECK (content_type IN
-                       ('markdown','plaintext','ink','office','sourcecode','image')),
+                       ('markdown','plaintext','ink','office','sourcecode','image','binary')),  -- 'binary' = generic LWW attachment ([06 §6.1](06-sync.md)); adding it needs an EF Core migration
   sync_policy        text NOT NULL DEFAULT 'server-default'
                        CHECK (sync_policy IN ('server-default','excluded')),  -- pinned-local is client-local only, never a server value
   current_version_id uuid,                   -- FK added after file_versions; API exposes file_versions.seq as currentVersionSeq

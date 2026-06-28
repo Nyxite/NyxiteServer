@@ -35,6 +35,8 @@ Task LeaveDocument(string fileId);
 public record EncryptedUpdate(long Seq, byte[] Ciphertext, Guid KeyId);
 ```
 
+> **Wire encoding [P]:** over the SignalR **MessagePack** protocol, `Seq` is an int64, `Ciphertext` raw bytes, and `KeyId` a **canonical UUID string** (e.g. `018f…`); clients map it to their native `Guid`/`UUID` type. (The on-disk frame's `key_id` is the same value as 16 raw bytes — [07 §7.4](07-encryption.md).)
+
 ## 5.4 Join handshake
 
 1. Client opens the socket (authenticated) and calls `JoinDocument(fileId, sinceSeq)`.

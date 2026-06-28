@@ -44,7 +44,7 @@ Same shape as a normal CRUD tree, but **names are ciphertext**:
 | Method | Path | Purpose |
 |--------|------|---------|
 | `GET` | `/files/{id}/blob` | Stream current **ciphertext** (server never decrypts) |
-| `PUT` | `/files/{id}/blob` | Upload new **ciphertext** for ink/binary (LWW); body is already encrypted |
+| `PUT` | `/files/{id}/blob` | Upload new **ciphertext** for ink/binary (LWW); body is already encrypted. Client sends the parent version as **`If-Match: <seq>`**. If the server head `!= seq` (concurrent write) the server applies **last-write-wins by server-received time** and returns **`409 conflict`** with the winning version metadata, **retaining the losing bytes as a sibling `file_versions` row** (not head) so nothing is lost ([06 §6.5](06-sync.md)) |
 | `GET` | `/files/{id}/crdt/log?since={seq}` | Encrypted CRDT updates after a cursor (REST fallback for the relay) |
 | `POST` | `/files/{id}/crdt/log` | Submit **encrypted** CRDT update(s) (REST fallback) |
 | `GET` | `/files/{id}/snapshot` | Pointer/stream of the latest **encrypted** snapshot blob |
