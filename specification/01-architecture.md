@@ -36,7 +36,7 @@ Nyxite.sln
 └── tests/
     ├── Nyxite.UnitTests
     ├── Nyxite.IntegrationTests     # Testcontainers: Postgres (Keycloak only for the enterprise profile)
-    └── Nyxite.CrdtConformanceTests # Yrs wire-protocol conformance vs Yjs / ykt
+    └── Nyxite.CrdtConformanceTests # Yrs wire-protocol conformance vs Yjs / android yrs/UniFFI
 ```
 
 - **No `Nyxite.Search` project** — search is client-side.

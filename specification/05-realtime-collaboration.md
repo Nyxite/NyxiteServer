@@ -82,4 +82,4 @@ Multi-node relay uses the Redis SignalR backplane (encrypted fan-out) + Redis pr
 
 ## 5.11 Conformance testing
 
-`Nyxite.CrdtConformanceTests` pins the Yrs **wire protocol** across `ydotnet` (desktop), Yjs (web), and `ykt` (Android) — independent implementations of the same protocol. Under the relay model the **server does not run a CRDT engine in the live path**, which removes server-side merge as a risk surface; the binding-maturity risk now lives entirely in the clients (the desktop still uses `ydotnet` for local merge/snapshotting).
+`Nyxite.CrdtConformanceTests` pins the Yrs **wire protocol** across `ydotnet` (desktop), Yjs (web), and `yrs/UniFFI` (Android) — independent implementations of the same protocol. Under the relay model the **server does not run a CRDT engine in the live path**, which removes server-side merge as a risk surface; the binding-maturity risk now lives entirely in the clients (the desktop still uses `ydotnet` for local merge/snapshotting).

@@ -57,14 +57,14 @@
 - **Server releases:** SemVer; v1.0.0 is the first complete release; pre-1.0 tags track phases.
 - **Schema:** forward-only EF Core migrations.
 - **Crypto agility:** algorithm identifiers in object framing and `key_id`/`generation` markers allow rotating primitives and keys without a format break ([07 §7.4](07-encryption.md)).
-- **CRDT wire protocol:** pinned by conformance tests across `ydotnet`/Yjs/`ykt` ([05 §5.11](05-realtime-collaboration.md)).
+- **CRDT wire protocol:** pinned by conformance tests across `ydotnet`/Yjs/android `yrs/UniFFI` ([05 §5.11](05-realtime-collaboration.md)).
 
 ## 15.4 Risk register (server-relevant)
 
 | Risk | Source | Mitigation |
 |------|--------|------------|
 | Key loss = data loss | [07 §7.8](07-encryption.md) | Recovery key UX; multi-device enrollment; clear user warnings |
-| `ydotnet`/`ykt` maturity (now client-only) | OPEN-DECISIONS | Conformance tests; server runs no live CRDT engine, shrinking the blast radius |
+| `ydotnet` / android `yrs/UniFFI` maturity (now client-only) | OPEN-DECISIONS | Conformance tests; server runs no live CRDT engine, shrinking the blast radius |
 | Key-directory trust (pubkey MITM) | [09](09-sharing-and-acl.md) | TLS now; key transparency/verification in Phase 6 |
 | Weak web/Android search | [11](11-search.md) | Desktop is the full-search surface; accepted trade for privacy |
 | Metadata leakage (structure/sizes/timestamps) | [13 §13.1](13-security.md) | Names encrypted; optional structure-hiding in Phase 6 |
