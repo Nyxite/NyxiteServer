@@ -65,6 +65,16 @@ Concrete starting values (tunable):
 - CRDT updates are relayed without server validation of contents; a malformed update simply fails to apply on clients (low risk in a trusted single-tenant system).
 - Served ciphertext carries safe content-type/disposition headers; the guest client is the only unauthenticated surface and is token-scoped, with the key supplied by the URL fragment ([04 §4.8](04-rest-api.md)).
 
+## 13.6a Existence-hiding responses (no resource enumeration)
+
+Authorization failures on a resource must not reveal that the resource exists. **Prefer `404` over `403` for anything addressed by an id or token.**
+
+- **`404 not_found`** — an authenticated caller with **no reach** to a resource (files, projects, folders, users, **admin resources**, share URLs) gets the **same response as for a non-existent id**: identical `code`/body and, as far as practical, indistinguishable timing. An attacker cannot tell "exists but I'm not authorized" from "nothing there"; only the **correct token + real access** returns `200`.
+- **`403 acl_denied` is still allowed**, but **only** where existence is not a secret to the caller — they **already have read reach** and merely lack the specific action (e.g. a read-only collaborator writing; a `blocked` account writing its own file), or a **capability/collection** denial that exposes no id (e.g. a non-admin calling `GET /admin/users`).
+- **`401`** (no valid auth) is uniform across all ids and leaks nothing.
+- Share tokens: a never-issued/unauthorized token → `404`; a genuinely-issued but dead token → `410` `share_revoked`/`link_expired` (presenting it already proves the holder knew it existed).
+- Applies uniformly to the `/admin/**` surface ([12](12-administration.md)) and all content/ACL endpoints ([04 §4.4](04-rest-api.md), [09 §9.5](09-sharing-and-acl.md)). Avoid timing/error-shape side channels that re-introduce the distinction.
+
 ## 13.7 Revocation
 
 Two-layered: **instant server-ACL cutoff** + **client-driven key rotation** for forward secrecy ([09 §9.6](09-sharing-and-acl.md)). Content a removed member already downloaded can't be recalled — inherent to any system.

@@ -1,6 +1,6 @@
 # Nyxite Server — Features
 
-ASP.NET Core (C#) backend. The core service: API, sync engine, real-time collaboration **relay**, end-to-end encryption support, authentication, and administration.
+ASP.NET Core (C#) backend. The core service: API, sync engine, real-time collaboration **relay**, end-to-end encryption support, authentication, and the admin API (the operator dashboard is the separate [Admin](admin.md) component).
 
 **Privacy first / full E2EE.** Content keys are generated and held on clients; the server stores only ciphertext, never holds a content key, and acts as a blind relay/store. It cannot read notes, attachments, ink, file names, or collaboration traffic. The detailed build spec lives in this repo's `specification/` folder.
 
@@ -54,11 +54,12 @@ ASP.NET Core (C#) backend. The core service: API, sync engine, real-time collabo
 
 - **Native, server-owned auth** — password (Argon2id verifier) + required TOTP, plus co-equal **passkeys (WebAuthn)**; the server **issues its own access + refresh tokens**. The login password never feeds content-key derivation; decryption is governed by device/identity keys. **Keycloak/OIDC is a pluggable enterprise IdP** resolving to the same internal token. (See [SPECIFICATION §10](../docs/SPECIFICATION.md).)
 
-## Administration
+## Admin API & audit
 
-- Instance and user management
-- Admins see structure/usage/audit only; they **cannot read file contents** and there is **no break-glass** (the server holds no key)
+- Exposes the **admin API** (`/admin/**`) and owns the **audit log** plus signed-export generation; the operator UI is **not** built into the server — it is the separate **[Admin dashboard](admin.md)** (`NyxiteAdmin`), which consumes this API
+- Serves structure/usage/audit **by opaque ID only**; admins **cannot read file contents** and there is **no break-glass** (the server holds no key)
 - Audit log for auth events, device/key lifecycle, shares, admin actions, key rotations, and purges — never content
+- `admin`-role auth, device-revoke enforcement, and operational jobs (blob GC, share-expiry sweeps, audit retention) stay server-side
 
 ## Open questions
 

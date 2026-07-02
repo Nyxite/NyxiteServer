@@ -119,15 +119,18 @@ RFC 9457 `application/problem+json`. Selected codes:
 | HTTP | `code` | When |
 |------|--------|------|
 | 400 | `validation_failed`, `bad_sync_policy` | Malformed structure/ACL request |
-| 401 | `unauthenticated`, `token_expired` | Missing/invalid bearer |
-| 403 | `acl_denied`, `2fa_required` | Authz denied (note: **no** `breakglass` — content access can't exist) |
-| 404 | `not_found` | Missing/not visible |
+| 401 | `unauthenticated`, `token_expired` | Missing/invalid bearer — uniform across all ids, reveals no specific resource |
+| 403 | `acl_denied`, `2fa_required` | Authz denied **only when the caller already has read reach** to the resource (existence not secret to them) or on capability/collection denials that expose no id; **no** `breakglass` |
+| 404 | `not_found` | Resource missing **or** the caller has no reach to it — **the two are indistinguishable** (existence-hiding, see below) |
 | 409 | `conflict`, `version_conflict`, `excluded_content`, `address_exists`, `idempotency_conflict` | LWW conflict / policy / write-once / rotation lost / same key + different body |
 | 410 | `share_revoked`, `link_expired` | Dead share/link |
 | 412 | `key_generation_stale` | Client used a superseded file-key generation (rotate/refetch) |
-| 413 | `payload_too_large` | Ciphertext exceeds limit |
+| 413 | `payload_too_large` | Ciphertext exceeds the upload limit **or the per-user storage quota** ([§4.7](#47-limits--validation-p), [12 §12.6](12-administration.md)) |
+| 507 | `insufficient_storage` | Instance-level storage exhausted (per-user quota → `413`) |
 | 429 | `rate_limited` | [13](13-security.md) |
 | 5xx | `internal`, `unavailable` | Server/dependency failure |
+
+> **Existence-hiding (no resource enumeration) — `404`, not `403`.** For any resource addressed by an id or token (files, projects, folders, users, **admin resources**, share URLs), an authenticated caller who has **no reach** to it gets the **same `404 not_found`** as for a non-existent id — identical `code`, body, and (as far as practical) timing. An attacker must not be able to tell "exists but I'm not authorized" from "nothing is there"; only a **correct token + actual access** yields a `200`. `403` is reserved for the case where the caller **demonstrably already knows the resource exists** (has read reach but lacks the specific action) or for capability/collection denials that reveal no id. `401` (no valid auth) is uniform across all ids and so leaks nothing. See [13 §13.6a](13-security.md). *(For share tokens: a never-issued/unauthorized token → `404`; a genuinely-issued but dead token → `410` `share_revoked`/`link_expired`, since presenting it already proves the holder knew it existed.)*
 
 ## 4.5 Representative DTOs **[P]**
 
@@ -176,6 +179,8 @@ Every endpoint resolves the target and evaluates the **server ACL** ([09](09-sha
 ## 4.7 Limits & validation **[P]**
 
 - Max ciphertext upload: 100 MB inline (larger → chunked, Phase 5).
+- **Per-user storage quota:** when `users.storage_quota_bytes` is set, an upload that would push the user's counted **ciphertext bytes** over the quota is rejected with **`413 payload_too_large`** (or `507` for instance-level exhaustion); enforced by size only — no content is read ([12 §12.6](12-administration.md), [03](03-data-model.md)).
+- **Blocked accounts** (`users.status='blocked'`) are denied all write endpoints (download stays allowed) — see [09 §9.5](09-sharing-and-acl.md), [12 §12.6](12-administration.md).
 - `nameEnc`/`metadataEnc` size caps; structural fields validated; `excluded` uploads rejected (`409`).
 - The server validates **structure and ACL**, and write-once addressing — it **cannot** validate plaintext or that ciphertext matches its claimed address ([07 §7.5](07-encryption.md)).
 

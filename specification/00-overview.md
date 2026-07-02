@@ -59,7 +59,7 @@ The text/ink split — CRDT (Yrs) for text (`markdown`/`plaintext`/`sourcecode`)
 | **1 Notes that sync** | Markdown + plain text on the **encrypted** CRDT relay; encrypted blob sync; the three sync policies; on-demand download; **client-side search** support (server serves ciphertext + manifests). |
 | **2 Collaboration & sharing** | Encrypted live relay; account shares (HPKE-wrapped keys) + link shares (fragment keys); anonymous guests; version history of encrypted snapshots with client-side diffs/restore; rotation-based revocation. |
 | **3 Handwriting** | Ink vector strokes as encrypted blobs; LWW sync. |
-| **4 Admin & polish** | Admin panel (structure/usage/audit, no content); rich encrypted config; audit-log surfacing. |
+| **4 Admin & polish** | Admin **API** (structure/usage/audit, no content) serving the separate `NyxiteAdmin` dashboard; rich encrypted config; audit-log surfacing + signed export. |
 | **5 Format expansion** | Office docs, source-code text types, images — stored as encrypted blobs; any processing (thumbnails, extraction) is **client-side**. |
 | **6 Advanced** | Hardening and optional features (e.g. metadata-graph hiding, key-transparency) — see [15](15-roadmap-and-versioning.md). E2EE itself is **not** deferred; it is the default from Phase 0. |
 

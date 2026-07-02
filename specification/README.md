@@ -1,6 +1,6 @@
 # Nyxite Server — Specification (v1.0.0)
 
-This folder is the detailed, implementation-level specification for the **Nyxite Server** — the ASP.NET Core (C#) backend that provides the API, sync engine, real-time collaboration relay, access control, and administration for the Nyxite platform.
+This folder is the detailed, implementation-level specification for the **Nyxite Server** — the ASP.NET Core (C#) backend that provides the API, sync engine, real-time collaboration relay, access control, and the admin API for the Nyxite platform. (The operator dashboard itself is a separate component — the [`admin`](https://github.com/Nyxite/admin) repo.)
 
 It expands the architectural planning documents in the central [`Nyxite`](https://github.com/Nyxite/Nyxite) repository into a concrete server build specification covering the full v1.0.0 product across all roadmap phases.
 
@@ -43,7 +43,7 @@ Two privacy-maximal **[P]** defaults to note explicitly:
 | 09 | [sharing-and-acl.md](09-sharing-and-acl.md) | Server ACL + crypto layer, wrapped/fragment keys, rotation revocation |
 | 10 | [version-history.md](10-version-history.md) | Encrypted snapshots, client-side diffs/restore, dedup |
 | 11 | [search.md](11-search.md) | **Client-side** search; server has no index |
-| 12 | [administration.md](12-administration.md) | Admin APIs (structure/usage/audit), **no break-glass**, audit log |
+| 12 | [administration.md](12-administration.md) | Server-owned admin API (structure/usage/audit), **no break-glass**, audit log — consumed by the separate `admin` dashboard |
 | 13 | [security.md](13-security.md) | What the server can/can't see, threat model, rate limiting |
 | 14 | [deployment-and-config.md](14-deployment-and-config.md) | Docker Compose, config (no KEK/no search), operations |
 | 15 | [roadmap-and-versioning.md](15-roadmap-and-versioning.md) | Phase mapping, versioning, canonical-doc updates |

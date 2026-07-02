@@ -53,6 +53,10 @@ Backed by `shares` ([03](03-data-model.md)); wrapped keys for account shares liv
 
 Effective permission for (principal, resource) = **max** over: ownership, direct grants, inherited folder/project grants, and (for guests) the resolving link's permission. The **server ACL** uses this to gate ciphertext access and relay writes; the **crypto layer** independently requires the right file key to decrypt. Admins get **structure/usage only — never content** (no key exists for them; no break-glass — [12](12-administration.md)).
 
+> **No reach → `404`, not `403`.** When the resolved permission is **none** (the caller has no ownership/grant/link path to the addressed file/folder/project), the server returns **`404 not_found`** — identical to a non-existent id — so existence is never disclosed by an authz failure ([13 §13.6a](13-security.md)). `403 acl_denied` is used only when the caller **has read reach but lacks the action** (e.g. read-only collaborator writing, or a `blocked` account writing its own file), since existence is already known to them.
+
+> **Account block (download-only).** If `users.status = 'blocked'` ([03](03-data-model.md)), the ACL layer **caps that principal's effective permission at read/download**: all writes (create/edit, `PUT …/blob`, relay `submit`, share create/rotate) are denied and **web-client sessions are refused**, while ciphertext **fetch/download** stays allowed so the user keeps local copies. Admin-set and reversible ([12 §12.6](12-administration.md)); every transition is audited. Purely metadata — no content or key is read to enforce it.
+
 ## 9.6 Revocation
 
 Revocation is **two-layered** ([§9.1](#91-principles)):

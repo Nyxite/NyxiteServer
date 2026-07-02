@@ -23,14 +23,52 @@ CREATE TABLE users (
   totp_secret_enc   bytea,                    -- enrolled TOTP secret, encrypted at rest; required alongside a password
   external_idp      text,                     -- enterprise IdP name (e.g. 'keycloak'); NULL for native accounts
   external_idp_sub  text,                     -- OIDC `sub` from the enterprise IdP; NULL for native accounts
-  role              text NOT NULL DEFAULT 'user' CHECK (role IN ('user','admin')),
+  role              text NOT NULL DEFAULT 'user' CHECK (role IN ('user','admin')),  -- bootstrap flag only; fine-grained access is RBAC (§3.2a)
+  status            text NOT NULL DEFAULT 'active' CHECK (status IN ('active','blocked')),  -- 'blocked' = download-only (§12.6)
+  storage_quota_bytes bigint,                 -- per-user storage limit (ciphertext bytes); NULL = unlimited (§12.6)
   settings_enc      bytea,                    -- client-encrypted user settings (server-opaque)
   created_at        timestamptz NOT NULL DEFAULT now(),
   updated_at        timestamptz NOT NULL DEFAULT now(),
   UNIQUE (external_idp, external_idp_sub)     -- enterprise-linked identity, when present
 );
 ```
-> Native, server-owned account ([08](08-authentication.md)): `password_verifier` is an **Argon2id** hash (the password never feeds content-key derivation), `totp_secret_enc` the required second factor; passkeys live in `webauthn_credentials`. `external_idp`/`external_idp_sub` are populated **only** for enterprise OIDC-linked accounts. `display_name`/`email` are account identity (needed for sharing-by-account and presence), not file content. User *settings* are client-encrypted.
+> Native, server-owned account ([08](08-authentication.md)): `password_verifier` is an **Argon2id** hash (the password never feeds content-key derivation), `totp_secret_enc` the required second factor; passkeys live in `webauthn_credentials`. `external_idp`/`external_idp_sub` are populated **only** for enterprise OIDC-linked accounts. `display_name`/`email` are account identity (needed for sharing-by-account and presence), not file content. User *settings* are client-encrypted. `status='blocked'` and `storage_quota_bytes` are admin-set and **server-enforced** ([12 §12.6](12-administration.md)) — both operate on metadata/sizes only, never content.
+
+### Access control — roles, permissions, groups (admin RBAC) — §3.2a
+
+System-defined **permissions** (one per feature/capability, code-owned by stable key — not a mutable table) are bundled into **roles**, granted to users via **groups**. A user's effective permissions are the union of their groups' roles. See [12 §12.1](12-administration.md).
+
+```sql
+CREATE TABLE roles (
+  id          uuid PRIMARY KEY,
+  name        text NOT NULL UNIQUE,
+  is_builtin  boolean NOT NULL DEFAULT false,   -- preset roles cannot be deleted
+  created_at  timestamptz NOT NULL DEFAULT now()
+);
+CREATE TABLE role_permissions (              -- permission_key is a system constant, validated against the catalog in code
+  role_id        uuid NOT NULL REFERENCES roles(id) ON DELETE CASCADE,
+  permission_key text NOT NULL,
+  scope          jsonb,                       -- target-aware constraint (AD-1): NULL = instance-wide; else e.g. {"groups":[...]} / {"excludeRoles":["admin"]} (§12.6)
+  PRIMARY KEY (role_id, permission_key)
+);
+CREATE TABLE groups (
+  id          uuid PRIMARY KEY,
+  name        text NOT NULL UNIQUE,
+  description text,
+  created_at  timestamptz NOT NULL DEFAULT now()
+);
+CREATE TABLE group_roles (
+  group_id uuid NOT NULL REFERENCES groups(id) ON DELETE CASCADE,
+  role_id  uuid NOT NULL REFERENCES roles(id)  ON DELETE CASCADE,
+  PRIMARY KEY (group_id, role_id)
+);
+CREATE TABLE group_members (
+  group_id  uuid NOT NULL REFERENCES groups(id) ON DELETE CASCADE,
+  user_id   uuid NOT NULL REFERENCES users(id)  ON DELETE CASCADE,
+  PRIMARY KEY (group_id, user_id)
+);
+```
+> These are **access-control** groups (membership + roles, metadata only, **no keys**). The deferred **enterprise/family file-sharing groups** (per-visibility encryption, hierarchical keys) are a separate capability that will build on this model — backlog in `docs/OPEN-DECISIONS.md`.
 
 ### webauthn_credentials  (passkey / WebAuthn public credentials)
 ```sql
