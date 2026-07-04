@@ -77,3 +77,25 @@ Share creation, permission changes, revocations, and **key rotations** are writt
 - Share creation and link access are **rate-limited** ([13](13-security.md)).
 - Link tokens ≥128-bit, stored hashed; fragment keys ≥256-bit, never transmitted to the server.
 - Folder/project-scoped writes constrained to the shared subtree.
+
+## 9.9 Group sharing (enterprise/family groups)
+
+Group sharing is **additive** alongside the per-file/subtree account shares above (G-2) — a **group-key layer** ([07 §7.2a](07-encryption.md)) so a file readable by a whole group is stored **once** and enrolling a reader is **one blob (O(1))**, not a per-file re-wrap. It serves **family** (all members read shared data) and **enterprise** (a *managers* group reads all of a team's files; a worker reads only their own). Membership reuses the §3.2a `groups`/`group_members` rows ([03 §3.2b](03-data-model.md)); this section adds the two-layer access model for group-key blobs. Steps P4.4-SRV-1..4.
+
+**Enrollment (transparency-gated, one grant).** A client that already holds the group key adds a member by wrapping the group private key under the newcomer's personal public key and writing **one** `group_key_grants` row via `POST /groups/{id}/members` ([04](04-rest-api.md)). Because a single substituted public key would expose the group's **entire** corpus (not one file), the server **verifies a key-transparency inclusion proof (Phase 4.3) for the member's directory key before accepting the grant** (G-3); a directory-substituted key is rejected `409 key_not_transparent`. No file is touched. Enrollment is subject to the **member-count limit** ([12 §12.7](12-administration.md), enforced by row count only).
+
+**Grant a file to a group.** Wrap that file's DEK to the group **public key** and store one `file_keys` group-principal row (per scope, [03 §3.2b](03-data-model.md)); a subtree grant drains the same resumable batch queue as §9.3.
+
+**Reader-group attachment (auto-wrap policy).** A project/folder may name a group whose public key **new files are auto-wrapped to** on creation, in addition to the author's own key — the enterprise "manager reads all" path. It rides the **existing per-project/folder/file cascade** (`inherit` / a specific group / none, same inheritance as sync policy [06](06-sync.md)); it is **client-enforced at file creation**, and the server stores only the **opaque** `reader_group_attachment` structure field and never learns which group it names ([03 §3.2b](03-data-model.md)).
+
+**Fetch-ACL for group-key blobs.** The two walls of §9.1 extend to groups: the **crypto wall** holds because the server stores only opaque grants and DEK-to-group wraps; the **server ACL** still decides **which client may fetch which group-key blob**. A member may pull a grant/DEK-to-group wrap only within the **target-aware RBAC `scope`** (AD-1, [12 §12.6](12-administration.md)) — group enrollment and key management are gated by the caller's scoped permission over that group; no reach → **`404`** (existence-hiding, [13 §13.6b](13-security.md)). Signed writes are unchanged: each client signs with the group Ed25519 key; others verify on read; the server verifies without decrypting.
+
+**Removal & scope-scoped rotation.** Reuses the §9.6 spectrum at the group-key level, **scoped to the affected project/time-period** (G-4):
+
+1. **Soft** (trusted departure) — `DELETE /groups/{id}/members/{uid}` deletes the member's live grant. Instant ACL cutoff.
+2. **Rotate** (forward secrecy) — a remaining member's client mints a **new group key for the affected scope**, re-wraps it to the remaining members (new generation), and commits `POST /groups/{id}/keys/rotate { scopeId, newGeneration, grants[], dekWraps[] }`. The server commits **only if** `newGeneration == current + 1` **for that scope**, else `409 conflict` (concurrent-rotation loser); post-commit wraps tagged with the old generation → `412 key_generation_stale`. **Only the named scope is touched** — other scopes keep their keys.
+3. **Full** (seal the scope) — rotate **and** re-seal the affected scope's file DEKs under the new group key (`dekWraps[]`), re-wrapping only the small DEKs, never the ciphertext.
+
+> **Honest limitation (unchanged, [§9.6](#96-revocation)):** rotation only guarantees the removed member reads nothing **new** — content they already decrypted can't be recalled. Surfaced in UI + docs.
+
+> **Recovery composes for free.** The group private key is wrapped under a member's personal public key, so recovering the personal key ([07 §7.8](07-encryption.md)) automatically restores group access — no special path. A member who lost all devices **and** their recovery phrase is **re-enrolled** by a group admin (one new grant).

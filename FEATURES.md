@@ -34,6 +34,13 @@ ASP.NET Core (C#) backend. The core service: API, sync engine, real-time collabo
 - User-grant shares (file key wrapped to the recipient's public key via HPKE) and link shares (key in the URL fragment), read/write
 - Revocation: instant server-ACL cutoff plus client-driven file-key rotation for forward secrecy
 
+## Group sharing (enterprise/family)
+
+- Stores the **group-key layer** ([SPECIFICATION §8.1](../docs/SPECIFICATION.md), [features/groups.md](groups.md)) as opaque blobs + membership metadata only — never a group key: group public material, append-only **group-key grants** (group private key HPKE-wrapped per member, generation- and scope-versioned, with an `alg_id`), DEK-to-group wrapped keys, and the per-project/folder **reader-group attachment**
+- Group endpoints (`/groups`, membership enroll/remove, group keys, scope-scoped rotate); enrollment accepts a grant **only for a key-transparency-verified member public key**; the fetch-ACL gates which client may pull which group-key blob, under the target-aware RBAC `scope`
+- **Group-size limit** enforced server-side at enrollment by **membership-row count** (no content/key read); instance-wide default `group_max_members` plus a per-group `max_members` override set via the admin API; over-limit adds and override changes are audited
+- Group-key rotation is generation-guarded per scope (same machinery as file-key rotation); the server never unwraps anything
+
 ## Version history
 
 - Full version history of encrypted content-addressed snapshots
@@ -58,6 +65,7 @@ ASP.NET Core (C#) backend. The core service: API, sync engine, real-time collabo
 
 - Exposes the **admin API** (`/admin/**`) and owns the **audit log** plus signed-export generation; the operator UI is **not** built into the server — it is the separate **[Admin dashboard](admin.md)** (`NyxiteAdmin`), which consumes this API
 - Serves structure/usage/audit **by opaque ID only**; admins **cannot read file contents** and there is **no break-glass** (the server holds no key)
+- Exposes the **per-group size-limit override** (`PATCH /admin/groups/{id}` sets `max_members`) — metadata-only, audited
 - Audit log for auth events, device/key lifecycle, shares, admin actions, key rotations, and purges — never content
 - `admin`-role auth, device-revoke enforcement, and operational jobs (blob GC, share-expiry sweeps, audit retention) stay server-side
 

@@ -68,7 +68,59 @@ CREATE TABLE group_members (
   PRIMARY KEY (group_id, user_id)
 );
 ```
-> These are **access-control** groups (membership + roles, metadata only, **no keys**). The deferred **enterprise/family file-sharing groups** (per-visibility encryption, hierarchical keys) are a separate capability that will build on this model — backlog in `docs/OPEN-DECISIONS.md`.
+> These are **access-control** groups (membership + roles, metadata only, **no keys**). The **enterprise/family file-sharing groups** (per-visibility encryption, group-key layer) **build directly on this model** — same `groups`/`group_members` rows as the membership primitive, extended with public-key columns and grant/wrap storage in §3.2b. They do **not** introduce a parallel membership concept.
+
+### Enterprise/family file-sharing groups — group-key layer — §3.2b
+
+A **group-key layer** inserted into the envelope hierarchy (`personal key → group key → DEK → file`, [07 §7.2a](07-encryption.md)) so a file readable by a whole group is stored **once** and adding a reader is **one blob (O(1))**. The **membership** stays the §3.2a `groups`/`group_members` rows; this subsection adds only the **public key material, per-member grants, DEK-to-group wraps, and reader-group attachments**. The server holds **only opaque wrapped blobs, membership rows, and public keys** — never a group private key, content key, or plaintext name ([13 §13.6b](13-security.md)). Build steps P4.4-SRV-1..4.
+
+A file-sharing group **extends** the existing `groups` table with public material + scoping + the size override; plain RBAC groups leave these `NULL`.
+```sql
+ALTER TABLE groups
+  ADD COLUMN group_pubkey   bytea,                 -- X25519 public half (HPKE target); private half NEVER on server
+  ADD COLUMN ed25519_pubkey bytea,                 -- group signing key (verify group-authored writes)
+  ADD COLUMN scope_kind     text CHECK (scope_kind IN ('project','time_period')),  -- G-4 scope granularity
+  ADD COLUMN max_members    int;                   -- per-group size override (G-5); NULL → instance default group_max_members (§12.7)
+-- group_pubkey/ed25519_pubkey are set together iff the group is key-bearing (a file-sharing group).
+```
+> `group_pubkey` is published in the key directory as just another HPKE target — **no new primitive** ([07 §7.3](07-encryption.md)). `max_members` is a **metadata-only** count cap, enforced by membership-row count at enrollment ([12 §12.7](12-administration.md)).
+
+**Per-member group-key grant — `group_key_grants` (append-only).** The group private key HPKE-wrapped **once per member** under that member's personal public key, per scope/generation.
+```sql
+CREATE TABLE group_key_grants (
+  id                    uuid PRIMARY KEY,          -- surrogate (UUIDv7)
+  group_id              uuid NOT NULL REFERENCES groups(id),
+  member_id             uuid NOT NULL REFERENCES users(id),
+  scope_id              uuid NOT NULL,             -- project/time-period scope this key covers (G-4)
+  wrapped_group_privkey bytea NOT NULL,            -- group X25519+Ed25519 privkey bundle, HPKE-wrapped to member pubkey — OPAQUE
+  generation            int  NOT NULL DEFAULT 1,   -- rotation generation per (group, scope)
+  alg_id                text NOT NULL,             -- wrap-algorithm identifier (crypto-agility / future PQC swap)
+  created_at            timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX ix_group_grants_group  ON group_key_grants(group_id, scope_id, generation);
+CREATE INDEX ix_group_grants_member ON group_key_grants(member_id);
+```
+> **Append-only** (no `deleted_at`, no UPDATE): rotation **bumps `generation` and appends**, never mutates, giving an auditable "who could read what when" history. A **soft removal** deletes the departing member's live grant row; a **rotate/full** removal appends a new-generation grant for the remaining members ([09 §9.9](09-sharing-and-acl.md)). Stored as **opaque bytes** — no key columns; the server cannot open a grant. Enrollment appends **one** row and is gated on a **transparency-verified** member public key ([09 §9.9](09-sharing-and-acl.md), P4.4-SRV-2). `alg_id` carries the wrap primitive so a PQC migration re-wraps small keys without touching content ([07 §7.3](07-encryption.md), [15 §15.3](15-roadmap-and-versioning.md)).
+
+**DEK-to-group wraps** reuse the existing `file_keys` store with a **group** principal (per scope/generation), alongside the per-member/link rows:
+```sql
+ALTER TABLE file_keys
+  ADD COLUMN group_id uuid REFERENCES groups(id),  -- set for a DEK-to-group wrap; null for member/link grants
+  ADD COLUMN scope_id uuid;                         -- the group scope (G-4) this wrap belongs to; null for non-group rows
+-- The old two-way CHECK becomes three-way: exactly one principal — member, link-share, or group.
+ALTER TABLE file_keys DROP CONSTRAINT IF EXISTS file_keys_check;
+ALTER TABLE file_keys ADD CONSTRAINT ck_file_keys_principal
+  CHECK (num_nonnulls(member_id, share_id, group_id) = 1);
+CREATE UNIQUE INDEX uq_file_keys_group ON file_keys(file_id, key_id, group_id) WHERE group_id IS NOT NULL;
+```
+> A group-principal row wraps the file's **DEK to the group public key** (HPKE) instead of a member's — the same `wrapped_key`/`key_id`/`generation` columns, still **opaque**. This is what makes the enterprise "manager reads all" path work: a worker wraps a DEK to **own key + the managers-group pubkey** with no membership in that group ([09 §9.9](09-sharing-and-acl.md)).
+
+**Reader-group attachment** — an **opaque** per-project/folder structure field naming the group whose public key new files are auto-wrapped to (client-enforced cascade; the server only stores/serves the opaque bytes):
+```sql
+ALTER TABLE projects ADD COLUMN reader_group_attachment bytea;  -- opaque client-set auto-wrap policy; server never interprets
+ALTER TABLE folders  ADD COLUMN reader_group_attachment bytea;  -- inherit/specific-group/none resolved client-side ([09 §9.9](09-sharing-and-acl.md))
+```
+> The reader-group attachment rides the **existing per-project/folder/file cascade** (same inheritance as sync policy [06](06-sync.md)); the server stores it as **opaque structure metadata** and never learns which group it names.
 
 ### webauthn_credentials  (passkey / WebAuthn public credentials)
 ```sql

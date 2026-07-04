@@ -23,6 +23,7 @@
 | File keys (wrapped) | `/api/v1/files/{id}/keys` |
 | Versions / history | `/api/v1/files/{id}/versions` |
 | Shares | `/api/v1/shares` |
+| Groups (file-sharing / group-key) | `/api/v1/groups` |
 | Keys & devices | `/api/v1/keys`, `/api/v1/devices`, `/api/v1/recovery` |
 | Sync | `/api/v1/sync` |
 | Me / settings | `/api/v1/me` |
@@ -103,6 +104,18 @@ Same shape as a normal CRUD tree, but **names are ciphertext**:
 | `PATCH` | `/shares/{id}` | Change permission / expiry |
 | `DELETE` | `/shares/{id}` | Revoke (instant ACL cutoff; client rotates key separately) |
 
+### Groups (enterprise/family file-sharing)
+Group-key layer on the existing membership model ([03 §3.2b](03-data-model.md), [07 §7.2a](07-encryption.md), [09 §9.9](09-sharing-and-acl.md)). All bodies carry **opaque wrapped bytes and public keys only** — no key column, no plaintext name. Existence-hiding on `{id}` (no reach → `404`). Steps P4.4-SRV-1..4.
+| Method | Path | Purpose |
+|--------|------|---------|
+| `POST` | `/groups` | Create a file-sharing group `{ groupPubkey, ed25519Pubkey, scopeKind, maxMembers? }` (the creator generated the keypair client-side; only the public halves are sent) |
+| `GET` | `/groups` | List the file-sharing groups the caller is a member of (metadata + public keys; paginated) |
+| `POST` | `/groups/{id}/members` | **Enroll** one member: body `{ memberId, scopeId, wrappedGroupPrivkey, generation, algId }` = the group privkey **HPKE-wrapped to the member's transparency-verified public key**. Appends **one** `group_key_grants` row. The server verifies a **key-transparency inclusion proof** (Phase 4.3) for `memberId`'s pubkey **before** accepting the grant, and enforces the **member-count limit** ([12 §12.7](12-administration.md)) — both metadata-only |
+| `DELETE` | `/groups/{id}/members/{uid}` | **Soft removal** — delete the member's live grant (instant ACL cutoff). Forward secrecy is a separate scope-scoped rotation |
+| `GET` | `/groups/{id}/keys?scopeId=` | Get the caller's **wrapped** group key grant(s) + the DEK-to-group wraps for a scope (to unwrap locally) |
+| `POST` | `/groups/{id}/keys` | Upload wrapped material: DEK-to-group wraps (`file_keys` group-principal rows) and/or re-wrapped grants (used when sharing a file/subtree to the group) |
+| `POST` | `/groups/{id}/keys/rotate` | Commit a **scope-scoped** group-key rotation. Body `{ scopeId, newGeneration, grants[], dekWraps[] }`. Committed **only if** `newGeneration == current + 1` for that scope, else `409 conflict` (another rotation won); post-commit wraps tagged with the old generation → `412 key_generation_stale`. Only the named scope is touched — the Phase-2.3 machinery at the group-key level ([09 §9.9](09-sharing-and-acl.md), P4.4-SRV-3) |
+
 ### Sync
 | Method | Path | Purpose |
 |--------|------|---------|
@@ -122,7 +135,7 @@ RFC 9457 `application/problem+json`. Selected codes:
 | 401 | `unauthenticated`, `token_expired` | Missing/invalid bearer — uniform across all ids, reveals no specific resource |
 | 403 | `acl_denied`, `2fa_required` | Authz denied **only when the caller already has read reach** to the resource (existence not secret to them) or on capability/collection denials that expose no id; **no** `breakglass` |
 | 404 | `not_found` | Resource missing **or** the caller has no reach to it — **the two are indistinguishable** (existence-hiding, see below) |
-| 409 | `conflict`, `version_conflict`, `excluded_content`, `address_exists`, `idempotency_conflict` | LWW conflict / policy / write-once / rotation lost / same key + different body |
+| 409 | `conflict`, `version_conflict`, `excluded_content`, `address_exists`, `idempotency_conflict`, `group_full`, `key_not_transparent` | LWW conflict / policy / write-once / rotation lost (file or group scope) / same key + different body / group at member limit ([12 §12.7](12-administration.md)) / enrollment key failed the transparency inclusion proof ([09 §9.9](09-sharing-and-acl.md)) |
 | 410 | `share_revoked`, `link_expired` | Dead share/link |
 | 412 | `key_generation_stale` | Client used a superseded file-key generation (rotate/refetch) |
 | 413 | `payload_too_large` | Ciphertext exceeds the upload limit **or the per-user storage quota** ([§4.7](#47-limits--validation-p), [12 §12.6](12-administration.md)) |
@@ -167,6 +180,29 @@ public record KdfParams(string Alg, int M, int T, int P, byte[] Salt);   // alg 
 // Batch wrap (POST /files/keys:batch) — subtree share fan-out
 public record BatchWrapRequest(BatchGrant[] Grants);
 public record BatchGrant(Guid FileId, Guid KeyId, Guid MemberId, byte[] WrappedKey);
+
+// Enterprise/family file-sharing groups ([03 §3.2b](03-data-model.md), [09 §9.9](09-sharing-and-acl.md))
+public record CreateGroupRequest(
+    byte[] GroupPubkey, byte[] Ed25519Pubkey,      // PUBLIC halves only; private key never leaves the creator
+    string ScopeKind,                              // project|time_period
+    int? MaxMembers);                              // per-group size override (G-5); null → instance default
+public record GroupDto(
+    Guid Id, byte[] GroupPubkey, byte[] Ed25519Pubkey,
+    string ScopeKind, int? MaxMembers, int MemberCount,
+    DateTimeOffset CreatedAt);
+
+// Enroll one member — appends ONE grant; server transparency-verifies MemberId's pubkey first
+public record EnrollMemberRequest(
+    Guid MemberId, Guid ScopeId,
+    byte[] WrappedGroupPrivkey,                     // group privkey HPKE-wrapped to the member's pubkey — opaque
+    int Generation, string AlgId);                 // AlgId = wrap-algorithm identifier (crypto-agility)
+
+// Scope-scoped group-key rotation (generation-guarded per scope)
+public record GroupKeyRotateRequest(
+    Guid ScopeId, int NewGeneration,
+    GroupGrant[] Grants,                            // re-wrapped group privkey to each remaining member
+    WrappedKey[] DekWraps);                        // optional DEK re-seal to the new group key (full removal)
+public record GroupGrant(Guid MemberId, byte[] WrappedGroupPrivkey, string AlgId);
 
 // Generic paginated envelope; cursor is opaque base64url
 public record Paged<T>(IReadOnlyList<T> Items, string? NextCursor);

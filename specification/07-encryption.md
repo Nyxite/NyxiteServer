@@ -37,6 +37,21 @@ File content + CRDT updates + snapshots + encrypted name/title
 - **Device keys:** enrolling a new device gives it access to the identity private key (via device-to-device approval or recovery-key unwrap). *(Ratified in `docs/OPEN-DECISIONS.md`.)*
 - **Recovery key:** a high-entropy user-held secret (shown once as a phrase/file). A 256-bit key is derived from it via **Argon2id** and wraps the identity private key with **AES-256-GCM** (not HPKE — the recovery key is symmetric); the server stores that blob **but cannot read it**. This is the **only** recovery path — **no server escrow** ([§7.8](#78-key-recovery-decided)). *(Ratified in `docs/OPEN-DECISIONS.md`.)*
 
+## 7.2a Group-key layer (enterprise/family sharing) **[P]**
+
+Enterprise/family file-sharing groups ([03 §3.2b](03-data-model.md), [09 §9.9](09-sharing-and-acl.md)) insert **one middle layer** into the hierarchy so a file readable by a whole group is stored **once** and enrolling a reader is **one blob (O(1))** rather than a per-file re-wrap:
+
+```
+personal key  →  wraps  →  group key  →  wraps  →  DEK  →  encrypts  →  file
+```
+
+- **Group keypair** — an X25519 (HPKE) + Ed25519 pair, **generated client-side** by the group creator. Its **public** halves are published in the key directory (`groups.group_pubkey`/`ed25519_pubkey`, [03 §3.2b](03-data-model.md)) as just **another HPKE target** — **no new primitive**. Its **private** half is stored **only wrapped, once per member**, HPKE-sealed under each member's personal public key (a `group_key_grants` row). The server **never** holds a group private key.
+- **DEK-to-group wrap** — a file's DEK is HPKE-wrapped **to the group public key** (a `file_keys` group-principal row, [03 §3.2b](03-data-model.md)), in addition to or instead of individual members. A member unwraps the group private key with their personal key, then unwraps the DEK.
+- **Scoped keys (G-4)** — a group's key is **scoped per project/time-period** (`group_key_grants.scope_id`), not one key over all history; a file wraps to its **scope's** group key. Removing a keyholder re-wraps only the **affected scope**, bounding the revocation blast radius.
+- **Enterprise "manager reads all"** — a worker wraps a DEK to **own key + the managers-group public key** (public half is in the directory), needing no membership in that group; managers hold the group key and read every worker's file. Driven by the **reader-group attachment** cascade ([09 §9.9](09-sharing-and-acl.md)).
+
+Every wrapped group blob (grant and DEK-to-group wrap) carries an **`alg_id`** ([§7.3](#73-algorithms-p)) — because a group key wraps *many* DEKs it concentrates any future post-quantum blast radius, so the wrap format is algorithm-agile from day one even though v1 ships classical ([15 §15.3](15-roadmap-and-versioning.md)). Group-key **rotation** reuses the generation-guarded machinery of [§7.9](#79-rotation--revocation), applied per scope ([09 §9.9](09-sharing-and-acl.md)).
+
 ## 7.3 Algorithms **[P]**
 
 | Purpose | Algorithm |
@@ -49,7 +64,9 @@ File content + CRDT updates + snapshots + encrypted name/title
 | Recovery-key derivation | **Argon2id** — m=64 MiB, t=3, p=1 (tunable; persisted in `recovery_blobs.kdf_params`) |
 | Plaintext hashing (content address) | **BLAKE3-256** of plaintext |
 
-> **System rule — HPKE vs AES-256-GCM:** use **HPKE wherever the target is a public key** (file-key wrap to members, device enrollment to a device pubkey); use **AES-256-GCM wherever the key is symmetric** (all content + the recovery blob).
+> **System rule — HPKE vs AES-256-GCM:** use **HPKE wherever the target is a public key** (file-key wrap to members, **DEK/group-key wrap to a group pubkey**, device enrollment to a device pubkey); use **AES-256-GCM wherever the key is symmetric** (all content + the recovery blob).
+
+> **Crypto-agility — `alg_id` on group wraps.** Every enterprise/family group wrapped blob (`group_key_grants.wrapped_group_privkey` and DEK-to-group `file_keys` rows, [§7.2a](#72a-group-key-layer-enterprisefamily-sharing-p)) carries an **`alg_id`** naming the wrap primitive. v1 pins the classical HPKE suite above; the identifier lets a later hybrid-PQC swap (e.g. `X25519MLKEM768`) **re-wrap the small keys without touching content** — the same "rotation re-wraps only the small keys" property already relied on ([15 §15.3](15-roadmap-and-versioning.md)).
 
 ## 7.4 Encrypted object framing **[P]**
 

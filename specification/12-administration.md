@@ -30,7 +30,7 @@
 |--------|------|---------|
 | `GET` | `/admin/permissions` | System-defined permission catalog (read-only) |
 | `GET/POST/PATCH/DELETE` | `/admin/roles[/{id}]` | Role presets + custom roles (composed from permissions) |
-| `GET/POST/PATCH/DELETE` | `/admin/groups[/{id}]` | Create/edit groups; assign roles |
+| `GET/POST/PATCH/DELETE` | `/admin/groups[/{id}]` | Create/edit groups; assign roles. `PATCH` also sets a file-sharing group's **`max_members` override** (G-5, §12.7) |
 | `POST/DELETE` | `/admin/groups/{id}/members` | Add/remove members (bulk-capable) |
 
 ### Structure, sessions (no content, no names)
@@ -68,7 +68,8 @@ Recorded `action` values (non-exhaustive) **[P]**:
 | Auth | `auth.login`, `auth.2fa_challenge`, `auth.guest_session` |
 | Keys/devices | `device.enroll`, `device.revoke`, `key.publish`, `key.rotate`, `recovery.use` |
 | Sharing | `share.create`, `share.update`, `share.revoke`, `share.link_access` |
-| Admin | `admin.user_update`, `admin.user_block`, `admin.user_unblock`, `admin.quota_set`, `admin.bulk_update`, `admin.role_change`, `admin.group_change`, `admin.session_revoke`, `admin.config_view`, `admin.device_revoke` |
+| Admin | `admin.user_update`, `admin.user_block`, `admin.user_unblock`, `admin.quota_set`, `admin.bulk_update`, `admin.role_change`, `admin.group_change`, `admin.group_max_members_set`, `admin.session_revoke`, `admin.config_view`, `admin.device_revoke` |
+| Groups (file-sharing) | `group.enroll`, `group.enroll_rejected` (over-limit / transparency-unverified), `group.member_remove`, `group.key_rotate` |
 | Content lifecycle (structural) | `file.delete`, `file.restore`, `version.purge`, `blob.gc` |
 
 Each entry: `occurred_at`, `actor_id`/`actor_kind`, `action`, `target_type`/`target_id`, structural `detail`, `ip`, `user_agent`.
@@ -97,3 +98,10 @@ The dashboard sets these; the **server enforces** them — none require reading 
 - **Existence-hiding on `/admin/**`.** Admin resources addressed by id (`/admin/users/{id}`, `/admin/projects`, `/admin/files`, etc.) return **`404`** when the caller lacks reach — indistinguishable from a non-existent id — rather than `403`; `403` is used only for capability/collection denials that expose no id (e.g. a non-admin hitting `GET /admin/users`) or when the caller already has read reach. See [13 §13.6a](13-security.md).
 - **RBAC — per-permission guards, target-aware (AD-1).** Each protected operation is guarded **once** by the single permission key it requires (policy-based authorization, e.g. `[RequirePermission("users.block")]`); the operation→permission mapping ships **in code with the feature**, while the DB stores only role→permission (with scope) and group assignments ([03 §3.2a](03-data-model.md)). At request time the caller's effective grants resolve `token → user → group_members → group_roles → role_permissions` (union, cached per request). The guard passes when the caller holds the required key **and the target satisfies the grant's `scope`** — a `scope` (jsonb) constrains valid targets, e.g. `{ "groups": [...] }` (delegated admin over specific groups) or `{ "excludeRoles": ["admin"] }` (cannot act on other admins); a **null scope is instance-wide** (super-admin). **Roles are never checked directly** — custom roles only recombine system-defined permission keys, so they introduce **no new check site**; on role create/update the server validates every `permission_key` against the system catalog (`GET /admin/permissions`). **Response on failure follows existence-hiding (§13.6a):** no reach to the target → `404`; caller can see the target but scope/permission forbids the action → `403`. The dashboard's UI gating is **advisory only** — the server re-checks every mutation.
 - **Security policy.** MFA/passkey mandate, password policy, session timeout, and IP allowlist/geofencing are enforced at auth/session issuance ([08](08-authentication.md)); anomaly signals (mass-download, impossible-travel, brute-force) are computed from audit metadata only.
+
+## 12.7 Group-size limit & group-key health (file-sharing groups)
+
+The enterprise/family file-sharing groups ([03 §3.2b](03-data-model.md), [09 §9.9](09-sharing-and-acl.md)) add two server-owned, **metadata-only** admin concerns. Neither reads content or a key. Step P4.4-SRV-4.
+
+- **Group-size limit (G-5), admin-overridable.** An instance-wide default **`group_max_members`** (config, [14](14-deployment-and-config.md)) is enforced **server-side at enrollment** (`POST /groups/{id}/members`, [04](04-rest-api.md)) by **membership-row count only** — it reads no content and no key; an over-limit add is rejected `409 group_full` and **audited** (`group.enroll_rejected`). The `admin` dashboard **overrides it per group** via `PATCH /admin/groups/{id}` setting `groups.max_members` (nullable; **null → the instance default**), mirroring the per-user storage-quota override pattern (§12.6). Every override change is audited (`admin.group_max_members_set`). Existence-hiding applies — no reach to the group → `404` (§13.6a).
+- **Group-key & rotation health (public/opaque only).** `GET /admin/keys/health` (§12.2) also surfaces file-sharing-group health: **orphaned group-key grants** (grants for a departed member or a superseded generation), **rotation backlog** (scopes with a removal awaiting rotation, or old-generation DEK-to-group wraps not yet re-sealed), and per-scope generation counts. All are **public/opaque material only** — the view never touches a group private key, a content key, or a plaintext name; there is no break-glass ([13 §13.6b](13-security.md)).

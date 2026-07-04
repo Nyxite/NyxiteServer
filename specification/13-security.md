@@ -75,6 +75,14 @@ Authorization failures on a resource must not reveal that the resource exists. *
 - Share tokens: a never-issued/unauthorized token → `404`; a genuinely-issued but dead token → `410` `share_revoked`/`link_expired` (presenting it already proves the holder knew it existed).
 - Applies uniformly to the `/admin/**` surface ([12](12-administration.md)) and all content/ACL endpoints ([04 §4.4](04-rest-api.md), [09 §9.5](09-sharing-and-acl.md)). Avoid timing/error-shape side channels that re-introduce the distinction.
 
+## 13.6b Group zero-knowledge invariant (enterprise/family groups)
+
+The group-key layer ([07 §7.2a](07-encryption.md), [09 §9.9](09-sharing-and-acl.md)) is designed to **preserve** the right-hand column of §13.1 — it must never weaken it.
+
+- **Server holds only opaque group material.** For file-sharing groups the server stores **only**: opaque per-member grants (`group_key_grants`), DEK-to-group wraps (`file_keys` group-principal rows), membership rows, **opaque** reader-group attachments, and group **public keys**. It **never** holds a group private key, a content key, or a plaintext group name — and there is **no break-glass** ([12 §12.7](12-administration.md)). This holds even though a group key wraps *many* DEKs; the `alg_id` on every wrap keeps it re-wrappable for a future PQC swap without ever exposing a private key ([07 §7.3](07-encryption.md)).
+- **Metadata-only enforcement.** The member-count limit (G-5) and enrollment gate are enforced by **membership-row count** and a **key-transparency inclusion proof** on the member's *public* key — reading no content and no key ([09 §9.9](09-sharing-and-acl.md), [12 §12.7](12-administration.md)).
+- **Existence-hiding on group-by-id.** Any group addressed by id (`/groups/{id}`, `/groups/{id}/members`, `/groups/{id}/keys`, `/admin/groups/{id}`) returns **`404`** to a caller with no reach — indistinguishable from a non-existent id (§13.6a); a fetch-ACL failure on a group-key blob within the target-aware RBAC `scope` is treated the same. `403` only where the caller demonstrably already has reach.
+
 ## 13.7 Revocation
 
 Two-layered: **instant server-ACL cutoff** + **client-driven key rotation** for forward secrecy ([09 §9.6](09-sharing-and-acl.md)). Content a removed member already downloaded can't be recalled — inherent to any system.
@@ -91,6 +99,8 @@ Two-layered: **instant server-ACL cutoff** + **client-driven key rotation** for 
 | Lost keys | Recovery key | Lose all devices **and** recovery key → permanent loss (by design) |
 | Malicious client (bad updates) | Trusted single-tenant; client-side merge tolerates/ignores | No server-side validation possible |
 | Key-directory MITM (wrong pubkey on share) | TLS + (future) key transparency / verification | v1.0.0 trusts the directory; verification is a hardening item [15](15-roadmap-and-versioning.md) |
+| Substituted key at **group** enrollment (whole-corpus exposure) | **Key transparency inclusion proof required before wrapping** the group key (Phase 4.3, G-3) | Higher-value target than a single share, so groups **depend on** transparency, not directory trust alone [09 §9.9](09-sharing-and-acl.md) |
+| Broken group key (one key wraps many DEKs) | Scoped keys bound the blast radius (G-4); `alg_id` enables a PQC re-wrap | Harvest-now/decrypt-later on the classical X25519 wrap until PQC ships [15 §15.3](15-roadmap-and-versioning.md) |
 
 ## 13.9 Hardening checklist (build-time) **[P]**
 
