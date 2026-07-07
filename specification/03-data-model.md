@@ -19,7 +19,8 @@ CREATE TABLE users (
   id                uuid PRIMARY KEY,
   email             text NOT NULL UNIQUE,
   display_name      text NOT NULL,            -- account identity, NOT file content
-  password_verifier bytea,                    -- Argon2id verifier (m=64MiB,t=3,p=1); NULL for passkey-only / enterprise accounts
+  password_verifier bytea,                    -- Argon2id (m=64MiB,t=3,p=1) over HMAC-SHA256(password, pepper); NULL for passkey-only / enterprise accounts
+  password_pepper_version int,                -- which PASSWORD_PEPPER version this verifier used; drives lazy re-pepper at next login (§08); NULL when no verifier
   totp_secret_enc   bytea,                    -- enrolled TOTP secret, encrypted at rest; required alongside a password
   external_idp      text,                     -- enterprise IdP name (e.g. 'keycloak'); NULL for native accounts
   external_idp_sub  text,                     -- OIDC `sub` from the enterprise IdP; NULL for native accounts
@@ -32,7 +33,7 @@ CREATE TABLE users (
   UNIQUE (external_idp, external_idp_sub)     -- enterprise-linked identity, when present
 );
 ```
-> Native, server-owned account ([08](08-authentication.md)): `password_verifier` is an **Argon2id** hash (the password never feeds content-key derivation), `totp_secret_enc` the required second factor; passkeys live in `webauthn_credentials`. `external_idp`/`external_idp_sub` are populated **only** for enterprise OIDC-linked accounts. `display_name`/`email` are account identity (needed for sharing-by-account and presence), not file content. User *settings* are client-encrypted. `status='blocked'` and `storage_quota_bytes` are admin-set and **server-enforced** ([12 §12.6](12-administration.md)) — both operate on metadata/sizes only, never content.
+> Native, server-owned account ([08](08-authentication.md)): `password_verifier` is an **Argon2id hash over an HMAC-SHA256(password, pepper) pre-hash** (the password never feeds content-key derivation; the **pepper** is a server secret held outside Postgres — [14](14-deployment-and-config.md)), `password_pepper_version` records the pepper version so rotation can **re-pepper lazily at next login**, `totp_secret_enc` the required second factor; passkeys live in `webauthn_credentials`. `external_idp`/`external_idp_sub` are populated **only** for enterprise OIDC-linked accounts. `display_name`/`email` are account identity (needed for sharing-by-account and presence), not file content. User *settings* are client-encrypted. `status='blocked'` and `storage_quota_bytes` are admin-set and **server-enforced** ([12 §12.6](12-administration.md)) — both operate on metadata/sizes only, never content.
 
 ### Access control — roles, permissions, groups (admin RBAC) — §3.2a
 
@@ -77,8 +78,8 @@ A **group-key layer** inserted into the envelope hierarchy (`personal key → gr
 A file-sharing group **extends** the existing `groups` table with public material + scoping + the size override; plain RBAC groups leave these `NULL`.
 ```sql
 ALTER TABLE groups
-  ADD COLUMN group_pubkey   bytea,                 -- X25519 public half (HPKE target); private half NEVER on server
-  ADD COLUMN ed25519_pubkey bytea,                 -- group signing key (verify group-authored writes)
+  ADD COLUMN group_pubkey   bytea,                 -- hybrid X25519 + ML-KEM-768 public half (HPKE target); private half NEVER on server
+  ADD COLUMN ed25519_pubkey bytea,                 -- hybrid Ed25519 + ML-DSA-65 group signing public key (verify group-authored writes)
   ADD COLUMN scope_kind     text CHECK (scope_kind IN ('project','time_period')),  -- G-4 scope granularity
   ADD COLUMN max_members    int;                   -- per-group size override (G-5); NULL → instance default group_max_members (§12.7)
 -- group_pubkey/ed25519_pubkey are set together iff the group is key-bearing (a file-sharing group).
@@ -92,15 +93,15 @@ CREATE TABLE group_key_grants (
   group_id              uuid NOT NULL REFERENCES groups(id),
   member_id             uuid NOT NULL REFERENCES users(id),
   scope_id              uuid NOT NULL,             -- project/time-period scope this key covers (G-4)
-  wrapped_group_privkey bytea NOT NULL,            -- group X25519+Ed25519 privkey bundle, HPKE-wrapped to member pubkey — OPAQUE
+  wrapped_group_privkey bytea NOT NULL,            -- hybrid group privkey bundle (X25519+ML-KEM-768 ‖ Ed25519+ML-DSA-65), HPKE-wrapped to member pubkey — OPAQUE
   generation            int  NOT NULL DEFAULT 1,   -- rotation generation per (group, scope)
-  alg_id                text NOT NULL,             -- wrap-algorithm identifier (crypto-agility / future PQC swap)
+  alg_id                text NOT NULL,             -- wrap-suite id; v1 pins the hybrid PQC suite (crypto-agility)
   created_at            timestamptz NOT NULL DEFAULT now()
 );
 CREATE INDEX ix_group_grants_group  ON group_key_grants(group_id, scope_id, generation);
 CREATE INDEX ix_group_grants_member ON group_key_grants(member_id);
 ```
-> **Append-only** (no `deleted_at`, no UPDATE): rotation **bumps `generation` and appends**, never mutates, giving an auditable "who could read what when" history. A **soft removal** deletes the departing member's live grant row; a **rotate/full** removal appends a new-generation grant for the remaining members ([09 §9.9](09-sharing-and-acl.md)). Stored as **opaque bytes** — no key columns; the server cannot open a grant. Enrollment appends **one** row and is gated on a **transparency-verified** member public key ([09 §9.9](09-sharing-and-acl.md), P4.4-SRV-2). `alg_id` carries the wrap primitive so a PQC migration re-wraps small keys without touching content ([07 §7.3](07-encryption.md), [15 §15.3](15-roadmap-and-versioning.md)).
+> **Append-only** (no `deleted_at`, no UPDATE): rotation **bumps `generation` and appends**, never mutates, giving an auditable "who could read what when" history. A **soft removal** deletes the departing member's live grant row; a **rotate/full** removal appends a new-generation grant for the remaining members ([09 §9.9](09-sharing-and-acl.md)). Stored as **opaque bytes** — no key columns; the server cannot open a grant. Enrollment appends **one** row and is gated on a **transparency-verified** member public key ([09 §9.9](09-sharing-and-acl.md), P4.4-SRV-2). `alg_id` carries the wrap suite (v1 pins the **hybrid PQC** suite) so any later primitive change re-wraps small keys without touching content ([07 §7.3](07-encryption.md), [15 §15.3](15-roadmap-and-versioning.md)).
 
 **DEK-to-group wraps** reuse the existing `file_keys` store with a **group** principal (per scope/generation), alongside the per-member/link rows:
 ```sql
@@ -142,15 +143,16 @@ CREATE INDEX ix_webauthn_user ON webauthn_credentials(user_id);
 CREATE TABLE user_keys (
   user_id        uuid NOT NULL REFERENCES users(id),
   key_id         uuid NOT NULL,
-  public_x25519  bytea NOT NULL,           -- for HPKE wrapping to this user
-  public_ed25519 bytea NOT NULL,           -- for signature verification
+  public_x25519  bytea NOT NULL,           -- hybrid KEM public key (X25519 ‖ ML-KEM-768) for HPKE wrapping to this user
+  public_ed25519 bytea NOT NULL,           -- hybrid signing public key (Ed25519 ‖ ML-DSA-65) for signature verification
+  alg_id         text NOT NULL,            -- suite id pinning the hybrid primitives (e.g. 'X25519MLKEM768' + Ed25519ML-DSA65) — crypto-agility ([07 §7.3](07-encryption.md))
   generation     int  NOT NULL DEFAULT 1,  -- bumped on identity rotation
   created_at     timestamptz NOT NULL DEFAULT now(),
   revoked_at     timestamptz,
   PRIMARY KEY (user_id, key_id)
 );
 ```
-Only **public** keys live here. Private keys never reach the server.
+Only **public** keys live here — each a **hybrid classical + post-quantum** public key ([07 §7.3](07-encryption.md)). Private keys never reach the server.
 
 ### devices  (per-device enrollment)
 ```sql
@@ -175,7 +177,7 @@ CREATE TABLE recovery_blobs (
   user_id     uuid PRIMARY KEY REFERENCES users(id),
   version     int  NOT NULL DEFAULT 1,      -- bound into the AEAD AAD (userId ‖ version)
   blob        bytea NOT NULL,              -- AES-256-GCM frame: nonce(12B) ‖ ciphertext ‖ tag(16B);
-                                           --   plaintext = identity bundle (X25519 priv ‖ Ed25519 priv)
+                                           --   plaintext = hybrid identity bundle (X25519+ML-KEM-768 priv ‖ Ed25519+ML-DSA-65 priv)
   kdf_params  jsonb NOT NULL,              -- non-secret: { alg:"argon2id", m, t, p, salt(16B) }
   updated_at  timestamptz NOT NULL DEFAULT now()
 );

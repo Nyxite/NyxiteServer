@@ -56,7 +56,7 @@
 | `GET` | `/admin/audit/export` | Export a signed audit bundle (see below) **[P]** |
 | `GET/PUT` | `/admin/audit/stream` | Configure **SIEM streaming** (syslog/webhook) + retention |
 
-> **Signed audit bundle format [P]:** `NDJSON` of audit rows + a `manifest.json` `{ from, to, count, chainHead, alg:"ed25519", signature }`. The rows form a **rolling hash chain** (each row hashes the previous), and the manifest carries a **detached Ed25519 signature** over the final `chainHead` using a server **audit-signing key**. A verifier replays the chain and checks the signature to prove the export is complete and untampered.
+> **Signed audit bundle format [P]:** `NDJSON` of audit rows + a `manifest.json` `{ from, to, count, chainHead, alg:"ed25519+ml-dsa-65", signature }`. The rows form a **rolling hash chain** (each row hashes the previous), and the manifest carries a **detached hybrid Ed25519 + ML-DSA-65 signature** over the final `chainHead` using a server **audit-signing key** ([07 §7.3](07-encryption.md)). A verifier replays the chain and checks **both** signature halves to prove the export is complete and untampered.
 
 ## 12.3 Audit log
 

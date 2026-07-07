@@ -41,7 +41,7 @@
 - **Key-transparency log** for the public-key directory ([09 §9.3](09-sharing-and-acl.md), [13](13-security.md)) — **pulled forward from the optional Phase 6 hardening item into the required v1.0.0 band** because enterprise/family groups depend on it (decision G-3): one substituted key would expose a whole group's corpus, so group enrollment wraps **only to transparency-log-verified public keys**. Blocks Phase 4.4.
 
 ### Phase 4.4 — Enterprise/family file-sharing groups
-- **Group-key layer** on the envelope hierarchy (`personal key → group key → DEK → file`, [07 §7.2a](07-encryption.md)): a client-generated group keypair whose private half is **wrapped once per member** (`group_key_grants`, [03 §3.2b](03-data-model.md)) and file DEKs **wrapped to a group public key** — enrollment is **O(1) per member**, no file duplication. **No new primitive** (reuses the pinned HPKE/AES/Ed25519 suite); every wrap carries an **`alg_id`** for crypto-agility ([§15.3](#153-versioning-policy-p)).
+- **Group-key layer** on the envelope hierarchy (`personal key → group key → DEK → file`, [07 §7.2a](07-encryption.md)): a client-generated group keypair whose private half is **wrapped once per member** (`group_key_grants`, [03 §3.2b](03-data-model.md)) and file DEKs **wrapped to a group public key** — enrollment is **O(1) per member**, no file duplication. **No new primitive** (reuses the pinned **hybrid** HPKE/AES/signature suite — X25519 + ML-KEM-768, AES-256-GCM, Ed25519 + ML-DSA-65); every wrap carries an **`alg_id`** for crypto-agility ([§15.3](#153-versioning-policy-p)).
 - Serves **family** (all members read shared data) and **enterprise** (a *managers* group reads all of a team's files via a per-project/folder **reader-group attachment**; a worker reads only their own).
 - **Transparency-gated enrollment** (Phase 4.3, G-3); **scope-scoped rotation** on removal (G-4, generation-guarded — `409`/`412` reusing the Phase-2.3 machinery, [09 §9.9](09-sharing-and-acl.md)); **server-enforced group-size limit** (metadata-only), **overridable per group** from `admin` (G-5, [12 §12.7](12-administration.md)).
 - **Zero-knowledge preserved:** the server stores only opaque grants, DEK-to-group wraps, membership rows, opaque reader-group attachments, and public keys — no group private key, content key, or plaintext name; no break-glass ([13 §13.6b](13-security.md)). Server steps P4.4-SRV-1..4.
@@ -68,7 +68,8 @@
 - **API:** URL-versioned (`/api/v1`); OpenAPI is the published contract.
 - **Server releases:** SemVer; v1.0.0 is the first complete release; pre-1.0 tags track phases.
 - **Schema:** forward-only EF Core migrations.
-- **Crypto agility:** algorithm identifiers in object framing and `key_id`/`generation` markers allow rotating primitives and keys without a format break ([07 §7.4](07-encryption.md)); the enterprise/family group wraps additionally carry an **`alg_id`** ([07 §7.3](07-encryption.md), [03 §3.2b](03-data-model.md)) so a future hybrid-PQC swap re-wraps small keys without touching content.
+- **Post-quantum crypto:** every **asymmetric** seam ships **hybrid classical + PQC** at **v1.0.0** — **X25519 + ML-KEM-768** for HPKE wraps/key agreement and **Ed25519 + ML-DSA-65** for signatures, NIST **level 3** ([07 §7.3](07-encryption.md)). Symmetric primitives (AES-256-GCM, Argon2id, BLAKE3) are unchanged. This is **not a deferred/future item** — hybrid is the v1 default; the agility tag below just future-proofs the suite id.
+- **Crypto agility:** algorithm identifiers in object framing and `key_id`/`generation` markers allow rotating primitives and keys without a format break ([07 §7.4](07-encryption.md)); the enterprise/family group wraps additionally carry an **`alg_id`** ([07 §7.3](07-encryption.md), [03 §3.2b](03-data-model.md)) so any future primitive change re-wraps small keys without touching content.
 - **CRDT wire protocol:** pinned by conformance tests across `ydotnet`/Yjs/android `yrs/UniFFI` ([05 §5.11](05-realtime-collaboration.md)).
 
 ## 15.4 Risk register (server-relevant)
@@ -80,7 +81,7 @@
 | Key-directory trust (pubkey MITM) | [09](09-sharing-and-acl.md) | TLS now; key transparency/verification in Phase 6 |
 | Weak web/Android search | [11](11-search.md) | Desktop is the full-search surface; accepted trade for privacy |
 | Metadata leakage (structure/sizes/timestamps) | [13 §13.1](13-security.md) | Names encrypted; optional structure-hiding in Phase 6 |
-| Relay tampering/withholding by server | [13](13-security.md) | Signed updates/directory entries (Ed25519) to detect |
+| Relay tampering/withholding by server | [13](13-security.md) | Signed updates/directory entries (hybrid Ed25519 + ML-DSA-65) to detect |
 
 ## 15.5 Decisions & canonical docs
 

@@ -4,9 +4,11 @@
 
 ## 8.1 Identity model (native by default; pluggable IdP seam)
 
-- **Nyxite-native, server-owned authentication is the default for all tiers.** The server keeps a real account store, not a thin IdP projection: per user a **password verifier** (Argon2id), an enrolled **TOTP secret**, and zero or more **WebAuthn/passkey credentials** ([02](02-domain-model.md), [03](03-data-model.md)).
+- **Nyxite-native, server-owned authentication is the default for all tiers.** The server keeps a real account store, not a thin IdP projection: per user a **password verifier** (Argon2id over a peppered HMAC pre-hash — [§8.1(a)](#81-identity-model-native-by-default-pluggable-idp-seam)), an enrolled **TOTP secret**, and zero or more **WebAuthn/passkey credentials** ([02](02-domain-model.md), [03](03-data-model.md)).
 - **Two co-equal primary methods** from day one:
-  - **(a) Password + required TOTP** — the password is verified against an **Argon2id** hash (pinned params m=64 MiB, t=3, p=1 — [07](07-encryption.md)); a TOTP second factor is **mandatory**, not optional. The server sees the password only **transiently** over TLS at login and stores only the verifier, never the password.
+  - **(a) Password + required TOTP** — the password verifier is **Argon2id over an HMAC-SHA256(password, pepper) pre-hash** (pinned Argon2id params m=64 MiB, t=3, p=1 — [07](07-encryption.md)); a TOTP second factor is **mandatory**, not optional. The server sees the password only **transiently** over TLS at login and stores only the verifier, never the password.
+    - **Pepper (defense-in-depth):** the **pepper** is a **versioned, rotatable server secret held OUTSIDE Postgres** — a deploy secret `PASSWORD_PEPPER` alongside the DB credentials ([14](14-deployment-and-config.md)) — so a **DB-only leak yields uncrackable verifiers** (the attacker lacks the pepper). The per-hash Argon2id **salt is unchanged** (already inside each verifier). Rotation **re-peppers lazily at each user's next successful login** (the HMAC pre-hash cannot be recomputed without the plaintext, transiently available only then); the verifier records its pepper version.
+    - **Boundaries:** the pepper is **account-auth defense-in-depth only** — the login password still **NEVER** feeds any content-key derivation (see the load-bearing rule below), the pepper is symmetric so it has **no PQC dimension**, and it is **NOT** applied to the recovery-phrase Argon2id path (that key is user-held and server-blind — a pepper there would break offline self-recovery, [07 §7.8](07-encryption.md)).
   - **(b) Passkeys (WebAuthn)** — phishing-resistant public-key credentials, **sufficient on their own** (no separate TOTP needed). The server stores only the credential's **public** key + signature counter.
 - **Load-bearing rule: the login password (or passkey) NEVER feeds any content-key derivation.** Account auth and content access are independent secrets — content keys come only from the identity / device / recovery-phrase path ([07 §7.8](07-encryption.md)). So an account/password compromise yields **no content**.
 - **Property restatement:** "no passwords on the server" → **"no content-derivable secrets on the server."** Argon2id password verifiers and passkey public credentials unlock an **API token, never a key**.
@@ -20,7 +22,7 @@ All under `/api/v1/auth` (unauthenticated except where noted); they issue/refres
 
 | Method | Path | Purpose |
 |--------|------|---------|
-| `POST` | `/auth/register` | Create a native account: `{ email, displayName, password }` → user row with an Argon2id verifier; TOTP enrollment is then required before first full login |
+| `POST` | `/auth/register` | Create a native account: `{ email, displayName, password }` → user row with a peppered Argon2id verifier ([§8.1(a)](#81-identity-model-native-by-default-pluggable-idp-seam)); TOTP enrollment is then required before first full login |
 | `POST` | `/auth/login` | Password login: `{ email, password }` → `{ challenge: "totp_required", mfaToken }` (password-only never yields a full token; TOTP is mandatory) |
 | `POST` | `/auth/login/totp` | Complete login: `{ mfaToken, totpCode }` → `{ accessToken, refreshToken }` |
 | `POST` | `/auth/totp/enroll` | (auth'd) Begin TOTP enrollment → `{ secret, otpauthUri }`; secret stored only after verify |
@@ -32,7 +34,7 @@ All under `/api/v1/auth` (unauthenticated except where noted); they issue/refres
 | `POST` | `/auth/refresh` | Exchange a valid refresh token → a new `{ accessToken, refreshToken }` |
 | `POST` | `/auth/logout` | Revoke the presented refresh token (and current session) |
 | `POST` | `/auth/password/forgot` | Start email-based reset → emailed token (**restores login only**, never content) |
-| `POST` | `/auth/password/reset` | Complete reset `{ resetToken, newPassword }` → new Argon2id verifier |
+| `POST` | `/auth/password/reset` | Complete reset `{ resetToken, newPassword }` → new peppered Argon2id verifier (current pepper version) |
 
 - **Account auth ≠ content access.** A successful login (any method) yields an access token for the API but **no content key**. Content keys come from the user's **identity private key**, held on devices ([§8.3](#83-device--identity-keys-the-e2ee-layer)).
 
@@ -46,7 +48,7 @@ All under `/api/v1/auth` (unauthenticated except where noted); they issue/refres
 
 ## 8.3 Device & identity keys (the E2EE layer)
 
-- On first sign-in a client **enrolls a device** and ensures the user has an **identity keypair** (X25519 + Ed25519). The **public** keys go to the server directory (`user_keys`); private keys stay on the device ([03](03-data-model.md), [07](07-encryption.md)).
+- On first sign-in a client **enrolls a device** and ensures the user has an **identity keypair** (hybrid **X25519 + ML-KEM-768** for wrapping, **Ed25519 + ML-DSA-65** for signing — [07 §7.3](07-encryption.md)). The **public** keys go to the server directory (`user_keys`); private keys stay on the device ([03](03-data-model.md), [07](07-encryption.md)).
 - **Enrolling a device:** `POST /devices { label, pubkey }` → `{ deviceId, status:"pending", pairingCode, qrPayload }`. An enrolled device approves it via `POST /devices/{id}/approve { wrappedIdentityKey }` — the identity bundle **HPKE-sealed** to the pending device's `pubkey`, stored in `pending_key_blob`. The new device then calls `GET /devices/me/enrollment` to fetch `{ wrappedIdentityKey }` **once** (single-use; the server clears the blob and marks the device `active`). Alternatively the device recovers the identity private key via **recovery-phrase** unwrap ([07 §7.8](07-encryption.md)).
 - **Recovery key** (user-held, shown once) derives an Argon2id key that unwraps the **AES-256-GCM** recovery blob (`recovery_blobs`); it is the **only** way back in if all devices are lost ([07 §7.8](07-encryption.md)). No server/admin escrow.
 

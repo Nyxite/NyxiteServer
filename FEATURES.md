@@ -46,13 +46,14 @@ ASP.NET Core (C#) backend. The core service: API, sync engine, real-time collabo
 ## Encryption
 
 - End-to-end encryption (zero-knowledge), default from Phase 0; **no server-held KEK**
-- Per-file AES-256-GCM content keys generated client-side, stored only wrapped (to member public keys via HPKE, or carried in a share-link URL fragment)
-- Identity keypair per user (public key in a server directory, private key never on the server); per-device enrollment; recovery via a client-encrypted recovery blob (identity private key wrapped under an Argon2id-derived key with AES-256-GCM, stored but unreadable by the server) — no server-readable escrow and no admin escrow
+- Per-file AES-256-GCM content keys generated client-side, stored only wrapped (to member public keys via **hybrid post-quantum HPKE — X25519 + ML-KEM-768**, or carried in a share-link URL fragment)
+- **Hybrid classical + post-quantum crypto (NIST level 3) on every asymmetric seam from v1.0.0** — X25519 + ML-KEM-768 for key wrap/agreement, Ed25519 + ML-DSA-65 for signatures; symmetric primitives (AES-256-GCM, Argon2id, BLAKE3) unchanged. Carried on the per-blob `alg_id`, so re-wraps touch only small keys, never content. Closes harvest-now-decrypt-later on the indefinitely-stored ciphertext.
+- Identity keypair per user (hybrid X25519+ML-KEM-768 / Ed25519+ML-DSA-65 public key in a server directory, private key never on the server); per-device enrollment; recovery via a client-encrypted recovery blob (identity private bundle wrapped under an Argon2id-derived key with AES-256-GCM, stored but unreadable by the server) — no server-readable escrow and no admin escrow
 - Plaintext-hash addressing with ciphertext stored under it; no convergent encryption
 
 ## Authentication
 
-- **Native, server-owned auth** — password (Argon2id verifier) + required TOTP, plus co-equal **passkeys (WebAuthn)**; the server **issues its own access + refresh tokens**. The login password never feeds content-key derivation; decryption is governed by device/identity keys. **Keycloak/OIDC is a pluggable enterprise IdP** resolving to the same internal token — a **licensed enterprise feature** (gated off in community mode; see *Licensing & enterprise entitlement* below). (See [SPECIFICATION §10](../docs/SPECIFICATION.md).)
+- **Native, server-owned auth** — password (**Argon2id over a secret HMAC-SHA256 pepper**, rotatable, held outside the DB) + required TOTP, plus co-equal **passkeys (WebAuthn)**; the server **issues its own access + refresh tokens**. The login password never feeds content-key derivation; decryption is governed by device/identity keys. **Keycloak/OIDC is a pluggable enterprise IdP** resolving to the same internal token — a **licensed enterprise feature** (gated off in community mode; see *Licensing & enterprise entitlement* below). (See [SPECIFICATION §10](../docs/SPECIFICATION.md).)
 
 ## Admin API & audit
 
@@ -71,6 +72,6 @@ ASP.NET Core (C#) backend. The core service: API, sync engine, real-time collabo
 
 ## Open questions
 
-See [../docs/OPEN-DECISIONS.md](../docs/OPEN-DECISIONS.md). The server-owned items are now **resolved** there: native auth (server-owned password+TOTP / passkeys, server-issued tokens, Keycloak as a pluggable enterprise IdP — #9), key recovery (client-encrypted recovery blob, no server/admin escrow), metadata boundary (encrypted names; structure-hiding deferred to Phase 6), multi-device enrollment, fragment-key sharing, rotation-based revocation, key-directory trust (TLS + Ed25519 self-signature for v1), sync-policy semantics (`{ server-default, excluded }`), background auto-sync relay (#11), and the CRDT/LWW split.
+See [../docs/OPEN-DECISIONS.md](../docs/OPEN-DECISIONS.md). The server-owned items are now **resolved** there: native auth (server-owned password+TOTP / passkeys, server-issued tokens, Keycloak as a pluggable enterprise IdP — #9), key recovery (client-encrypted recovery blob, no server/admin escrow), metadata boundary (encrypted names; structure-hiding deferred to Phase 6), multi-device enrollment, fragment-key sharing, rotation-based revocation, key-directory trust (TLS + hybrid Ed25519 + ML-DSA-65 self-signature for v1), sync-policy semantics (`{ server-default, excluded }`), background auto-sync relay (#11), and the CRDT/LWW split.
 
 All raised decisions (#1–#11) are now resolved; nothing is pending ratification.

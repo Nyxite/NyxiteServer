@@ -12,8 +12,8 @@
 
 ```
 User identity keypair (per user)            ── public key on server; private key NEVER on server
-   ├─ X25519  (key agreement / wrapping, via HPKE)
-   └─ Ed25519 (signing)                       [P]
+   ├─ X25519 + ML-KEM-768  (hybrid key agreement / wrapping, via a hybrid-KEM HPKE)
+   └─ Ed25519 + ML-DSA-65  (hybrid signing)   [P]
         │
 Device keys (per device)                     ── enrolled copies of/access to the identity private key
         │
@@ -45,28 +45,32 @@ Enterprise/family file-sharing groups ([03 §3.2b](03-data-model.md), [09 §9.9]
 personal key  →  wraps  →  group key  →  wraps  →  DEK  →  encrypts  →  file
 ```
 
-- **Group keypair** — an X25519 (HPKE) + Ed25519 pair, **generated client-side** by the group creator. Its **public** halves are published in the key directory (`groups.group_pubkey`/`ed25519_pubkey`, [03 §3.2b](03-data-model.md)) as just **another HPKE target** — **no new primitive**. Its **private** half is stored **only wrapped, once per member**, HPKE-sealed under each member's personal public key (a `group_key_grants` row). The server **never** holds a group private key.
+- **Group keypair** — a hybrid **X25519 + ML-KEM-768** (HPKE) + **Ed25519 + ML-DSA-65** (signing) pair, **generated client-side** by the group creator. Its **public** halves are published in the key directory (`groups.group_pubkey`/`ed25519_pubkey`, [03 §3.2b](03-data-model.md)) as just **another HPKE target** — **no new primitive** (it reuses the pinned hybrid suite, [§7.3](#73-algorithms-p)). Its **private** half is stored **only wrapped, once per member**, HPKE-sealed under each member's personal public key (a `group_key_grants` row). The server **never** holds a group private key.
 - **DEK-to-group wrap** — a file's DEK is HPKE-wrapped **to the group public key** (a `file_keys` group-principal row, [03 §3.2b](03-data-model.md)), in addition to or instead of individual members. A member unwraps the group private key with their personal key, then unwraps the DEK.
 - **Scoped keys (G-4)** — a group's key is **scoped per project/time-period** (`group_key_grants.scope_id`), not one key over all history; a file wraps to its **scope's** group key. Removing a keyholder re-wraps only the **affected scope**, bounding the revocation blast radius.
 - **Enterprise "manager reads all"** — a worker wraps a DEK to **own key + the managers-group public key** (public half is in the directory), needing no membership in that group; managers hold the group key and read every worker's file. Driven by the **reader-group attachment** cascade ([09 §9.9](09-sharing-and-acl.md)).
 
-Every wrapped group blob (grant and DEK-to-group wrap) carries an **`alg_id`** ([§7.3](#73-algorithms-p)) — because a group key wraps *many* DEKs it concentrates any future post-quantum blast radius, so the wrap format is algorithm-agile from day one even though v1 ships classical ([15 §15.3](15-roadmap-and-versioning.md)). Group-key **rotation** reuses the generation-guarded machinery of [§7.9](#79-rotation--revocation), applied per scope ([09 §9.9](09-sharing-and-acl.md)).
+Every wrapped group blob (grant and DEK-to-group wrap) carries an **`alg_id`** ([§7.3](#73-algorithms-p)) — because a group key wraps *many* DEKs it concentrates blast radius, so the wrap format is algorithm-agile from day one; v1 ships the **hybrid post-quantum suite** and the tag keeps any later primitive change re-wrappable without touching content ([15 §15.3](15-roadmap-and-versioning.md)). Group-key **rotation** reuses the generation-guarded machinery of [§7.9](#79-rotation--revocation), applied per scope ([09 §9.9](09-sharing-and-acl.md)).
 
 ## 7.3 Algorithms **[P]**
 
+The **asymmetric** seams ship **hybrid classical + post-quantum (concatenated)** at **NIST security level 3** from v1.0.0 — safe unless **both** halves break. **Symmetric primitives are unchanged** (already quantum-safe — only Grover-halved).
+
 | Purpose | Algorithm |
 |---------|-----------|
-| Symmetric AEAD everywhere (content / CRDT / snapshots / names / recovery blob) | **AES-256-GCM**, 96-bit (12B) nonce, 128-bit (16B) tag |
-| Public-key wrap to a recipient public key (file-key to members; device enrollment to a device pubkey) | **HPKE base mode**, suite = DHKEM(X25519, HKDF-SHA256) / HKDF-SHA256 / AES-256-GCM — RFC 9180 suite IDs **KEM=0x0020, KDF=0x0001, AEAD=0x0002** |
-| Recovery blob wrap | **AES-256-GCM** under an **Argon2id**-derived key (NOT HPKE — see the rule below) |
-| Identity key agreement | X25519 |
-| Signing (updates, key directory entries) | Ed25519 |
-| Recovery-key derivation | **Argon2id** — m=64 MiB, t=3, p=1 (tunable; persisted in `recovery_blobs.kdf_params`) |
-| Plaintext hashing (content address) | **BLAKE3-256** of plaintext |
+| Symmetric AEAD everywhere (content / CRDT / snapshots / names / recovery blob) | **AES-256-GCM**, 96-bit (12B) nonce, 128-bit (16B) tag *(unchanged — quantum-safe)* |
+| Public-key wrap to a recipient public key (file-key to members; device enrollment to a device pubkey) | **HPKE base mode** with a **hybrid KEM** — DHKEM(X25519, HKDF-SHA256) **concatenated with ML-KEM-768** / HKDF-SHA256 / AES-256-GCM. Hybrid suite id **`X25519MLKEM768`** (carried on `alg_id`) |
+| Recovery blob wrap | **AES-256-GCM** under an **Argon2id**-derived key (NOT HPKE — see the rule below) *(unchanged)* |
+| Identity key agreement | **X25519 + ML-KEM-768** (hybrid; classical DHKEM(X25519) half retained, ML-KEM-768 concatenated) |
+| Signing (updates, key directory entries, device enrollment, key transparency, audit) | **Ed25519 + ML-DSA-65** (hybrid dual signature) |
+| Recovery-key derivation | **Argon2id** — m=64 MiB, t=3, p=1 (tunable; persisted in `recovery_blobs.kdf_params`) *(unchanged)* |
+| Plaintext hashing (content address) | **BLAKE3-256** of plaintext *(unchanged)* |
+
+> **Size consequence.** Hybrid enlarges the small key material only, never content ciphertext: each wrapped-key row grows by the **ML-KEM-768 ciphertext (~+1.1 KB)** and each signature by the **ML-DSA-65 signature (≈ 3.3 KB)**. Level 3 (not level 5) was chosen partly to keep signatures smaller on the signed-CRDT-update hot path.
 
 > **System rule — HPKE vs AES-256-GCM:** use **HPKE wherever the target is a public key** (file-key wrap to members, **DEK/group-key wrap to a group pubkey**, device enrollment to a device pubkey); use **AES-256-GCM wherever the key is symmetric** (all content + the recovery blob).
 
-> **Crypto-agility — `alg_id` on group wraps.** Every enterprise/family group wrapped blob (`group_key_grants.wrapped_group_privkey` and DEK-to-group `file_keys` rows, [§7.2a](#72a-group-key-layer-enterprisefamily-sharing-p)) carries an **`alg_id`** naming the wrap primitive. v1 pins the classical HPKE suite above; the identifier lets a later hybrid-PQC swap (e.g. `X25519MLKEM768`) **re-wrap the small keys without touching content** — the same "rotation re-wraps only the small keys" property already relied on ([15 §15.3](15-roadmap-and-versioning.md)).
+> **Crypto-agility — `alg_id` on group wraps.** Every enterprise/family group wrapped blob (`group_key_grants.wrapped_group_privkey` and DEK-to-group `file_keys` rows, [§7.2a](#72a-group-key-layer-enterprisefamily-sharing-p)) carries an **`alg_id`** naming the wrap primitive. v1 pins the **hybrid** HPKE suite above (`X25519MLKEM768`); because wraps cover only the **small** keys, a future primitive change **re-wraps the keys without touching content ciphertext** — the same "rotation re-wraps only the small keys" property already relied on ([15 §15.3](15-roadmap-and-versioning.md)).
 
 ## 7.4 Encrypted object framing **[P]**
 
@@ -77,7 +81,7 @@ magic(4) | version(1) | key_id(16) | nonce(12) | ciphertext(...) | gcm_tag(16)
 - **magic** = ASCII `"NYXC"` (`0x4E 0x59 0x58 0x43`); **version** = `0x01`.
 - **AAD** = `magic ‖ version ‖ key_id ‖ file_id(16) ‖ object_kind(1)` — binds the frame to its file and kind.
 - **`object_kind`** enum: `blob=1`, `snapshot=2`, `crdt=3`, `name=4`, `metadata=5`, `awareness=6`, `settings=7`.
-- **HPKE wrap output framing** (a wrapped file-key): `enc(32, HPKE encapsulated key) ‖ ciphertext ‖ tag(16)`.
+- **HPKE wrap output framing** (a wrapped file-key): `enc(HPKE encapsulated key) ‖ ciphertext ‖ tag(16)`. Under the hybrid KEM `enc` is the **X25519 share (32B) concatenated with the ML-KEM-768 ciphertext (~1088B)** rather than a bare 32B share; the `alg_id` fixes its length.
 
 `key_id` identifies which **file key** (and its 1:1 rotation generation) was used; the server cannot resolve it to a usable key.
 
@@ -116,7 +120,7 @@ E2EE "in all places" is pushed as far as practical while keeping the server able
 
 ## 7.8 Key recovery (decided)
 
-- **Decision: user-held recovery phrase, no server escrow.** At enrollment the client generates a high-entropy **recovery phrase** (shown once). A 256-bit key is derived from it via **Argon2id** (m=64 MiB, t=3, p=1; params persisted in `recovery_blobs.kdf_params`), and that key wraps the identity bundle (X25519 priv ‖ Ed25519 priv) with **AES-256-GCM** — **not** HPKE, because the recovery key is symmetric. The server stores the resulting **opaque** blob `{ version, kdf, nonce, ciphertext, tag }` (AAD = `userId ‖ version`) and cannot open it ([03 `recovery_blobs`](03-data-model.md)).
+- **Decision: user-held recovery phrase, no server escrow.** At enrollment the client generates a high-entropy **recovery phrase** (shown once). A 256-bit key is derived from it via **Argon2id** (m=64 MiB, t=3, p=1; params persisted in `recovery_blobs.kdf_params`), and that key wraps the identity bundle (the hybrid X25519 + ML-KEM-768 priv ‖ Ed25519 + ML-DSA-65 priv) with **AES-256-GCM** — **not** HPKE, because the recovery key is symmetric. The recovery path itself is **unchanged** (symmetric, already quantum-safe, and **never peppered** — see [08 §8.1](08-authentication.md)); only the private-key material it wraps grows. The server stores the resulting **opaque** blob `{ version, kdf, nonce, ciphertext, tag }` (AAD = `userId ‖ version`) and cannot open it ([03 `recovery_blobs`](03-data-model.md)).
 - **Consequence:** losing **all** devices **and** the recovery phrase = permanent data loss. The server has no master key and cannot reset content. This is the honest cost of zero-knowledge.
 - **Alternative (not chosen):** server-side or admin escrow would enable recovery but reintroduce a key the operator holds — rejected as contrary to the privacy-first principle. Flagged here so it can be revisited as an explicit, less-private opt-in.
 

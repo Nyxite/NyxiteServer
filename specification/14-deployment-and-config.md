@@ -1,6 +1,6 @@
 # 14 — Deployment & Configuration
 
-> **E2EE.** The server stores ciphertext and holds **no content KEK** — the server-side secrets are the **native-auth token-signing key** and DB credentials (plus the Keycloak client secret **only** under the optional `enterprise` profile). There is **no server search service**. Deploy stack graduates to the `deploy` repo; this section is the server's deployment contract. Values are **[P]**.
+> **E2EE.** The server stores ciphertext and holds **no content KEK** — the server-side secrets are the **native-auth token-signing key**, the account-password **pepper** (`PASSWORD_PEPPER`, held outside the DB — [08 §8.1](08-authentication.md)), and DB credentials (plus the Keycloak client secret **only** under the optional `enterprise` profile). There is **no server search service**. Deploy stack graduates to the `deploy` repo; this section is the server's deployment contract. Values are **[P]**.
 
 ## 14.1 Runtime packaging
 
@@ -34,6 +34,7 @@
 | `NYXITE__BlobStore__RootPath` | Filesystem blob root (content-addressed, sharded) |
 | `NYXITE__BlobStore__S3__*` | Endpoint/bucket/credentials when `s3` |
 | `NYXITE__Auth__TokenSigningKey` (secret) | **Native** token-signing key — signs/validates the server's own access + refresh tokens (always required) |
+| `NYXITE__Auth__PasswordPepper` (secret; deploy secret `PASSWORD_PEPPER`) | **Versioned, rotatable** account-password **pepper** — the HMAC-SHA256 key applied as a pre-hash before Argon2id ([08 §8.1](08-authentication.md)). Held **outside Postgres** (alongside DB creds) so a **DB-only leak yields uncrackable verifiers**. Format `{version}:{key}` (or a versioned set); rotation adds a new version and **re-peppers lazily at each user's next login**. Account-auth only — **not** applied to the recovery-phrase KDF |
 | `NYXITE__Auth__Audience` | Expected token audience |
 | `NYXITE__Auth__Enterprise__Enabled` | `true` to enable the enterprise OIDC IdP (default `false` = native only) |
 | `NYXITE__Auth__Enterprise__Authority` | Keycloak issuer URL (**enterprise profile only**) |
@@ -51,7 +52,7 @@
 ## 14.4 Startup & lifecycle
 
 - **Migrations** run as a discrete deploy step (separate DB role), not at app startup in prod. **[P]**
-- Boot validation: DB reachable + migrated, native **token-signing key** present, blob store writable. The **Keycloak JWKS reachable** check applies **only under the `enterprise` profile** (native auth validates its own tokens with the signing key). (No KEK probe — there is none.) Fail fast otherwise.
+- Boot validation: DB reachable + migrated, native **token-signing key** present, **password pepper** present (native-auth profile), blob store writable. The **Keycloak JWKS reachable** check applies **only under the `enterprise` profile** (native auth validates its own tokens with the signing key). (No KEK probe — there is none.) Fail fast otherwise.
 - Background hosted services: blob GC, share-token/expiry sweeps, audit retention. **No** snapshotting/indexing (client-side).
 
 ## 14.5 Health & observability

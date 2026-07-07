@@ -47,7 +47,7 @@ The text/ink split — CRDT (Yrs) for text (`markdown`/`plaintext`/`sourcecode`)
 - **Sharing** — server-side ACLs; account shares wrap the file key to the recipient's public key; link shares carry the key in the URL fragment. Revocation = ACL cutoff + client-driven key rotation.
 - **Version history** — full history of **encrypted** snapshots; **client-side** diffs and restore; content-addressed dedup.
 - **Search** — **client-side** full-text (desktop indexes the full local corpus; web/Android over their local subset). No server index.
-- **Encryption** — full E2EE; per-file AES-256-GCM keys generated and held on clients; wrapped to members via HPKE.
+- **Encryption** — full E2EE; per-file AES-256-GCM keys generated and held on clients; wrapped to members via **hybrid post-quantum HPKE** (X25519 + ML-KEM-768). Asymmetric seams are hybrid classical + PQC (signatures Ed25519 + ML-DSA-65, NIST level 3); symmetric primitives unchanged.
 - **Authentication** — native auth (password + required TOTP, or passkeys) with the server issuing its own tokens; pluggable enterprise Keycloak/OIDC IdP; per-device key enrollment; user-held recovery key.
 - **Administration** — instance/user management; structure/usage/audit only; **no content access path exists** (no break-glass — there is nothing to break into).
 
@@ -68,7 +68,7 @@ The text/ink split — CRDT (Yrs) for text (`markdown`/`plaintext`/`sourcecode`)
 - **E2EE / zero-knowledge** — content keys live only on clients; the server cannot decrypt.
 - **CRDT** — Conflict-free Replicated Data Type (Yjs/Yrs family). Merged **on clients**; the server relays encrypted updates.
 - **File key (FK)** — per-file AES-256-GCM key, client-generated, stored only wrapped.
-- **Identity keypair** — per-user X25519+Ed25519; public key in the server directory, private key never on the server.
+- **Identity keypair** — per-user hybrid **X25519 + ML-KEM-768** (wrapping) and **Ed25519 + ML-DSA-65** (signing); public key in the server directory, private key never on the server.
 - **Recovery key** — user-held secret (recovery phrase) that unlocks a client-encrypted recovery blob (AES-256-GCM under Argon2id); the **only** recovery path (no server escrow).
 - **HPKE** — Hybrid Public Key Encryption, used to wrap file keys to member public keys.
 - **Fragment key** — a file key carried in a share-link URL fragment (`#key=…`), never sent to the server.

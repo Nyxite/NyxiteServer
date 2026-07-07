@@ -36,7 +36,7 @@
 Native, server-owned auth ([08 §8.1](08-authentication.md)); these endpoints issue/refresh **the server's own tokens**. Unauthenticated except where marked (auth'd). The enterprise profile adds `GET /auth/oidc/authorize` + `/auth/oidc/callback`, which resolve to the same internal token.
 | Method | Path | Purpose |
 |--------|------|---------|
-| `POST` | `/auth/register` | Create a native account `{ email, displayName, password }` (Argon2id verifier); TOTP enrollment required before full login |
+| `POST` | `/auth/register` | Create a native account `{ email, displayName, password }` (peppered Argon2id verifier — [08 §8.1](08-authentication.md)); TOTP enrollment required before full login |
 | `POST` | `/auth/login` | Password step `{ email, password }` → `{ challenge:"totp_required", mfaToken }` (password alone never yields a full token) |
 | `POST` | `/auth/login/totp` | Complete login `{ mfaToken, totpCode }` → `{ accessToken, refreshToken }` |
 | `POST` | `/auth/totp/enroll` / `/auth/totp/verify` | (auth'd) Enroll/confirm the required TOTP factor |
@@ -171,7 +171,8 @@ public record CreateShareRequest(
     byte[]? LinkTokenHash,                          // link share: hash only; KEY stays in the URL fragment
     DateTimeOffset? ExpiresAt);
 
-public record PublicKeyDto(Guid KeyId, byte[] X25519, byte[] Ed25519, int Generation);
+// X25519/Ed25519 byte[]s carry the HYBRID public keys (X25519 ‖ ML-KEM-768, Ed25519 ‖ ML-DSA-65); AlgId pins the suite ([07 §7.3](07-encryption.md))
+public record PublicKeyDto(Guid KeyId, byte[] X25519, byte[] Ed25519, string AlgId, int Generation);
 
 // Recovery blob (GET/PUT /recovery): AES-256-GCM under an Argon2id-derived key ([07 §7.8](07-encryption.md))
 public record RecoveryBlobDto(int Version, KdfParams Kdf, byte[] Nonce, byte[] Ciphertext, byte[] Tag);
@@ -183,7 +184,7 @@ public record BatchGrant(Guid FileId, Guid KeyId, Guid MemberId, byte[] WrappedK
 
 // Enterprise/family file-sharing groups ([03 §3.2b](03-data-model.md), [09 §9.9](09-sharing-and-acl.md))
 public record CreateGroupRequest(
-    byte[] GroupPubkey, byte[] Ed25519Pubkey,      // PUBLIC halves only; private key never leaves the creator
+    byte[] GroupPubkey, byte[] Ed25519Pubkey,      // PUBLIC halves only (hybrid X25519+ML-KEM-768 / Ed25519+ML-DSA-65); private key never leaves the creator
     string ScopeKind,                              // project|time_period
     int? MaxMembers);                              // per-group size override (G-5); null → instance default
 public record GroupDto(

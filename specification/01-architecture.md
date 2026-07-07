@@ -17,7 +17,7 @@
 | Search | **Client-side** (no server index) | Privacy decision |
 | Cache / backplane | Redis 7 (later; encrypted relay backplane + presence) | Master spec §2.2 |
 | Auth | **Native** (password+TOTP / passkeys, server-issued tokens) + per-device key enrollment; enterprise Keycloak/OIDC pluggable | Master spec §2.1, §10 + E2EE |
-| Crypto | AES-256-GCM, HPKE (X25519), Ed25519, BLAKE3, Argon2id | [07](07-encryption.md) **[P]** |
+| Crypto | AES-256-GCM, BLAKE3, Argon2id (symmetric — unchanged); **hybrid PQC** on asymmetric seams — HPKE with a hybrid KEM (X25519 + ML-KEM-768), hybrid signatures (Ed25519 + ML-DSA-65), NIST level 3 | [07](07-encryption.md) **[P]** |
 | Reverse proxy / packaging | nginx behind Cloudflare; Docker Compose on Hetzner ARM64 | INFRASTRUCTURE.md |
 
 ## 1.2 Solution and project layout **[P]**

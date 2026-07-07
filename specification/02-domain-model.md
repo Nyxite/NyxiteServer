@@ -19,13 +19,13 @@ User ──owns──┐    User ──has──► IdentityKeypair (public on s
 ## 2.2 Entities
 
 ### 2.2.1 User
-A **native, server-owned account** (not a thin IdP projection). The server holds the credentials needed for native auth — an Argon2id **password verifier**, a **TOTP secret**, and any **WebAuthn/passkey credentials** ([08](08-authentication.md)) — none of which is content-derivable. Account identity (`display_name`, `email`) is server-visible — needed for sharing-by-account and presence — and is **not** file content. An external IdP subject is recorded **only** for enterprise-linked accounts.
+A **native, server-owned account** (not a thin IdP projection). The server holds the credentials needed for native auth — a **password verifier** (Argon2id over a peppered HMAC pre-hash — [08 §8.1](08-authentication.md)), a **TOTP secret**, and any **WebAuthn/passkey credentials** ([08](08-authentication.md)) — none of which is content-derivable. Account identity (`display_name`, `email`) is server-visible — needed for sharing-by-account and presence — and is **not** file content. An external IdP subject is recorded **only** for enterprise-linked accounts.
 
 | Field | Type | Notes |
 |-------|------|-------|
 | `id` | UUIDv7 | |
 | `display_name`, `email` | string | Account identity |
-| `password_verifier` | bytea? | Argon2id verifier; **nullable** for passkey-only or enterprise-linked accounts |
+| `password_verifier` | bytea? | Argon2id-over-peppered-HMAC verifier (with `password_pepper_version`); **nullable** for passkey-only or enterprise-linked accounts |
 | `totp_secret_enc` | bytea? | Enrolled TOTP secret (encrypted at rest); required alongside a password |
 | `external_idp` | string? | Enterprise IdP name (e.g. `keycloak`); **null** for native accounts |
 | `external_idp_sub` | string? | OIDC `sub` from the enterprise IdP; **null** for native accounts |
@@ -36,7 +36,7 @@ A **native, server-owned account** (not a thin IdP projection). The server holds
 WebAuthn/passkey credentials are a separate per-user collection (**WebAuthnCredential**: `credential_id`, `public_key`, `sign_count`, …) — see [03 §3.2](03-data-model.md).
 
 ### 2.2.2 IdentityKeypair / Device / RecoveryBlob (E2EE additions)
-- **IdentityKeypair** — per user: X25519 (wrapping) + Ed25519 (signing). **Public** keys published to the server directory (`user_keys`); private keys never leave devices.
+- **IdentityKeypair** — per user: hybrid **X25519 + ML-KEM-768** (wrapping) + **Ed25519 + ML-DSA-65** (signing) ([07 §7.3](07-encryption.md)). **Public** keys published to the server directory (`user_keys`); private keys never leave devices.
 - **Device** — a user's enrolled device with its own key; enrollment grants access to the identity private key (device-approval or recovery-key unwrap).
 - **RecoveryBlob** — the identity private key wrapped by the user's **recovery key**, stored server-opaque; the only recovery path ([07 §7.8](07-encryption.md)).
 
