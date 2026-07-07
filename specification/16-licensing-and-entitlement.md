@@ -10,14 +10,14 @@
 
 ## 16.2 Token & embedded keys (L-2/L-5)
 
-- The server embeds **two license Ed25519 public keys** (rotation slots). A token is authentic if it verifies under **either**.
-- Token format is defined by `license 01 §1.2` (`{v, instance_id, email, tier, mode, issued_at, entitlement_exp}` + Ed25519 sig). The server treats it as **opaque config** supplied via `NYXITE_LICENSE_TOKEN` (deploy `14`), not a secret to protect (it is per-instance and non-sensitive).
+- The server embeds **two license hybrid public keys** (rotation slots) — each an **(Ed25519, ML-DSA-65)** pair (NIST level 3, per OPEN-DECISIONS PQ-2). A token is authentic if its **dual signature** verifies under **either** slot.
+- Token format is defined by `license 01 §1.2` (`{v, instance_id, email, tier, mode, issued_at, entitlement_exp}` + a **hybrid Ed25519 + ML-DSA-65** dual sig). The server treats it as **opaque config** supplied via `NYXITE_LICENSE_TOKEN` (deploy `14`), not a secret to protect (it is per-instance and non-sensitive).
 - **Signing keys are never on the server** — only public keys are embedded; the vendor signs out-of-band.
 
 ## 16.3 Offline verification (no network) — startup + timer
 
 1. Read `NYXITE_LICENSE_TOKEN`. Absent ⇒ community.
-2. **Ed25519 verify** against the embedded public keys. Fail ⇒ community (log `license_invalid`), **never block boot**.
+2. **Hybrid verify** — both the **Ed25519** and the **ML-DSA-65** signature halves must pass — against the embedded public keys. Fail ⇒ community (log `license_invalid`), **never block boot**.
 3. Determine the authenticity layer; entitlement then comes from the **lease** (online, §16.4) or `entitlement_exp` (offline, §16.7).
 
 ## 16.4 Check-in client & lease (L-7) **[P]**
@@ -25,7 +25,7 @@
 Online tokens only. Best-effort, off the request path.
 
 - **Call:** `POST {pinned license origin}/register` with `{token, instance_fingerprint}` on a ~daily timer (jittered) — see `license 01 §1.5`. The **origin + TLS pin are embedded** (L-5); redirecting requires source edits.
-- **On success:** cache the returned signed **lease** `{instance_id, tier, lease_exp≈now+30d, revoked, sig}`. Enterprise stays enabled while `now < lease_exp`; each renewal slides `lease_exp` forward.
+- **On success:** verify the lease's **hybrid Ed25519 + ML-DSA-65** signature (both halves) and cache the returned signed **lease** `{instance_id, tier, lease_exp≈now+30d, revoked, sig}`. Enterprise stays enabled while `now < lease_exp`; each renewal slides `lease_exp` forward.
 - **On any failure** (timeout, 5xx, DNS, offline): **no-op** — the cached lease continues until it expires; the escalation clock (§16.6) is simply time-since-last-renewal.
 - `instance_fingerprint` = a first-boot random UUID persisted locally; carries no user or host-identifying data.
 - **Community never checks in** (zero telemetry). **GDPR:** only `{token, operator-email (in token), fingerprint}` leave the instance; disclosed at issuance + deploy docs.
@@ -68,7 +68,7 @@ Applies **only** to an instance whose token is present but whose lease/entitleme
 ## 16.8 Revocation **[P]**
 
 - **At check-in:** a `revoked:true` lease (or short/empty lease) from `/register` degrades the instance.
-- **Signed revocation feed:** the server may pull an Ed25519-signed revoked-`instance_id` list (`license 01 §1.10`) and honor it on fetch.
+- **Signed revocation feed:** the server may pull a **hybrid Ed25519 + ML-DSA-65**-signed revoked-`instance_id` list (`license 01 §1.10`), verify **both** halves, and honor it on fetch.
 - **Best-effort:** firewalled/air-gapped instances are unreachable before lease/`entitlement_exp` — legal terms are the ultimate recourse (§16.9).
 
 ## 16.9 Anti-bypass & honest limit (L-5)
@@ -79,5 +79,5 @@ Applies **only** to an instance whose token is present but whose lease/entitleme
 ## 16.10 Config & operations
 
 - `NYXITE_LICENSE_TOKEN` (optional; absent = community) — deploy `14`.
-- No new server-held secret (only embedded **public** keys). Health/status of entitlement (tier, lease_exp, degrade state) is exposed to the **admin API** (`12`) read-only for the dashboard's license-status view; it is **not** an enforcement input (the server enforces).
+- No new server-held secret (only embedded **hybrid public** keys — two **(Ed25519, ML-DSA-65)** rotation slots). Health/status of entitlement (tier, lease_exp, degrade state) is exposed to the **admin API** (`12`) read-only for the dashboard's license-status view; it is **not** an enforcement input (the server enforces).
 - Audit events: `license_invalid`, `license_degraded`, `license_readonly`, `license_restored`, `license_revoked` — metadata only, never content.
