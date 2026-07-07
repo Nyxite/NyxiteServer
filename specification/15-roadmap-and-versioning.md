@@ -34,6 +34,7 @@
 ### Phase 4 — Admin & polish
 - Admin APIs (structure/usage/audit, **no content, no break-glass**) ([12](12-administration.md)).
 - Device/key admin (revocation, directory health); audit-log surfacing.
+- **Licensing & entitlement** ([16](16-licensing-and-entitlement.md), L-1–L-7): the Phase-0 shell embeds the license public key(s) and defaults to **community mode**; Phase 4 wires offline token verify, the best-effort check-in/lease client, the enterprise feature-flag gates (SSO, reader-groups, admin overrides, signed audit export, groups > 16), and the **degrade → read-only** enforcement. The **vendor-side `NyxiteLicense`** server (separate repo) is built alongside; a licensed instance checks in to it, community instances send nothing.
 - Rich **client-encrypted** per-user/per-file config ([04](04-rest-api.md)).
 
 ### Phase 4.3 — Key transparency (pulled into v1.0.0)

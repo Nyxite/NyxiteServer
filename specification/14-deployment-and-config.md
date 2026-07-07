@@ -43,6 +43,7 @@
 | `NYXITE__Limits__*` | Upload sizes, rate-limit buckets ([13](13-security.md)) |
 | `NYXITE__Relay__PruneAfterSnapshotSeq` | How long to keep encrypted updates past a client snapshot ([05](05-realtime-collaboration.md)) |
 | `NYXITE__Retention__*` | History/audit retention ([10](10-version-history.md), [12](12-administration.md)) |
+| `NYXITE_LICENSE_TOKEN` | **Optional** per-instance license token — absent = community mode (free non-commercial). Verified **offline** against embedded license public keys; unlocks enterprise gates. Not a secret to protect (per-instance, non-sensitive). ([16](16-licensing-and-entitlement.md)) |
 
 > **Removed vs prior model:** `NYXITE__Kek__*` (no server KEK) and `NYXITE__Search__*` (no server search).
 > **No server crypto config:** AEAD/HPKE primitives are fixed in the wire format ([07 §7.3–7.4](07-encryption.md)); **Argon2id recovery params** (m/t/p/salt) are **client-chosen and persisted per blob** in `recovery_blobs.kdf_params` ([03](03-data-model.md)), not server configuration.

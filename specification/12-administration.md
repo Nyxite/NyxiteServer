@@ -24,6 +24,7 @@
 | `POST` | `/admin/users/import` · `GET /admin/users/export` | CSV import/export; SCIM (`/scim/v2/**`) drives IdP lifecycle |
 | `GET` | `/admin/instance` | Status: storage, DB, blob store, relay, key directory health |
 | `GET` | `/admin/instance/config` | Effective **non-secret** configuration |
+| `GET` | `/admin/license` | **Read-only** license/entitlement status (§12.8) — tier, licensed-to email, registered/active, lease expiry, degrade/read-only state |
 
 ### Roles, permissions & groups
 | Method | Path | Purpose |
@@ -104,4 +105,11 @@ The dashboard sets these; the **server enforces** them — none require reading 
 The enterprise/family file-sharing groups ([03 §3.2b](03-data-model.md), [09 §9.9](09-sharing-and-acl.md)) add two server-owned, **metadata-only** admin concerns. Neither reads content or a key. Step P4.4-SRV-4.
 
 - **Group-size limit (G-5), admin-overridable.** An instance-wide default **`group_max_members`** (config, [14](14-deployment-and-config.md)) is enforced **server-side at enrollment** (`POST /groups/{id}/members`, [04](04-rest-api.md)) by **membership-row count only** — it reads no content and no key; an over-limit add is rejected `409 group_full` and **audited** (`group.enroll_rejected`). The `admin` dashboard **overrides it per group** via `PATCH /admin/groups/{id}` setting `groups.max_members` (nullable; **null → the instance default**), mirroring the per-user storage-quota override pattern (§12.6). Every override change is audited (`admin.group_max_members_set`). Existence-hiding applies — no reach to the group → `404` (§13.6a).
+- **Enterprise-gated (L-3).** The per-group `max_members` override is one of the **advanced admin overrides** unlocked only by a valid license ([16 §16.5](16-licensing-and-entitlement.md), flag `ent.admin_overrides`) — together with the per-user quota override (§12.6) and scoped/custom RBAC. In **community mode** the override is refused and `group_max_members` is pinned to **16** (`ent.large_groups` off); enrollment past 16 returns `409 group_full`. The admin API still exposes the control, but a mutation while unlicensed returns `409 license_degraded`.
 - **Group-key & rotation health (public/opaque only).** `GET /admin/keys/health` (§12.2) also surfaces file-sharing-group health: **orphaned group-key grants** (grants for a departed member or a superseded generation), **rotation backlog** (scopes with a removal awaiting rotation, or old-generation DEK-to-group wraps not yet re-sealed), and per-scope generation counts. All are **public/opaque material only** — the view never touches a group private key, a content key, or a plaintext name; there is no break-glass ([13 §13.6b](13-security.md)).
+
+## 12.8 Licensing & entitlement status (read-only)
+
+- `GET /admin/license` returns the instance's **self-hosting license status** for the dashboard's read-only view (`admin` spec §1.9a): `{ mode: "community"|"licensed", tier, email, registered, active, lease_exp, entitlement_exp, state: "in_lease"|"degraded"|"readonly", enterprise_flags[] }`. Values derive from the server's **offline** token verification and cached lease ([16](16-licensing-and-entitlement.md)); the endpoint is **status only — never an enforcement input** (the server enforces at each gated site and the write path).
+- The endpoint exposes **no secret** — only the public tier/lease state and the operator email baked in the token. It is not a licensing control surface: **issuance/registration/revocation live in the separate vendor-side `NyxiteLicense` service** ([license repo](https://github.com/Nyxite/NyxiteLicense)), not here.
+- Entitlement transitions emit audit events (`license_degraded`, `license_readonly`, `license_restored`, `license_revoked`) — metadata only ([16 §16.10](16-licensing-and-entitlement.md)).

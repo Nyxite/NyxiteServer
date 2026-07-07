@@ -1,6 +1,6 @@
 # Nyxite Server — Specification (v1.0.0)
 
-This folder is the detailed, implementation-level specification for the **Nyxite Server** — the ASP.NET Core (C#) backend that provides the API, sync engine, real-time collaboration relay, access control, and the admin API for the Nyxite platform. (The operator dashboard itself is a separate component — the [`admin`](https://github.com/Nyxite/admin) repo.)
+This folder is the detailed, implementation-level specification for the **Nyxite Server** — the ASP.NET Core (C#) backend that provides the API, sync engine, real-time collaboration relay, access control, and the admin API for the Nyxite platform. (The operator dashboard itself is a separate component — the [`admin`](https://github.com/Nyxite/NyxiteAdmin) repo.)
 
 It expands the architectural planning documents in the central [`Nyxite`](https://github.com/Nyxite/Nyxite) repository into a concrete server build specification covering the full v1.0.0 product across all roadmap phases.
 
@@ -47,6 +47,7 @@ Two privacy-maximal **[P]** defaults to note explicitly:
 | 13 | [security.md](13-security.md) | What the server can/can't see, threat model, rate limiting |
 | 14 | [deployment-and-config.md](14-deployment-and-config.md) | Docker Compose, config (no KEK/no search), operations |
 | 15 | [roadmap-and-versioning.md](15-roadmap-and-versioning.md) | Phase mapping, versioning, canonical-doc updates |
+| 16 | [licensing-and-entitlement.md](16-licensing-and-entitlement.md) | Client side of self-hosting licensing: offline token verify, best-effort check-in/lease, enterprise feature gates, degrade/read-only enforcement (L-1–L-7) |
 
 ## Status
 
