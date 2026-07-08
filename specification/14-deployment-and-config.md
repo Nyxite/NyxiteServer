@@ -45,6 +45,9 @@
 | `NYXITE__Relay__PruneAfterSnapshotSeq` | How long to keep encrypted updates past a client snapshot ([05](05-realtime-collaboration.md)) |
 | `NYXITE__Retention__*` | History/audit retention ([10](10-version-history.md), [12](12-administration.md)) |
 | `NYXITE_LICENSE_TOKEN` | **Optional** per-instance license token — absent = community mode (free non-commercial). Verified **offline** against embedded license public keys; unlocks enterprise gates. Not a secret to protect (per-instance, non-sensitive). ([16](16-licensing-and-entitlement.md)) |
+| `NYXITE__Support__Enabled` | **Capability flag** for the in-app bug-reporting relay ([§14.9](#149-support-relay), [04 §4.9](04-rest-api.md)). Default `false`; in v1 set `true` **only on the maintainer's official instance(s)** (SUP-9). When `false` the `/support/**` routes are absent and clients show no reporting surface |
+| `NYXITE__Support__ServiceBaseUrl` | Base URL of the central vendor-side `NyxiteSupport` service the relay forwards `POST /reports` to (only used when `Support__Enabled`) |
+| `NYXITE__Support__InstanceCredential` (secret) | Instance credential / fingerprint used to **authenticate this relay to `NyxiteSupport`** (analogous to the `NyxiteLicense /register` instance anchor) — proves the forwarded report comes from a recognized, enabled instance |
 
 > **Removed vs prior model:** `NYXITE__Kek__*` (no server KEK) and `NYXITE__Search__*` (no server search).
 > **No server crypto config:** AEAD/HPKE primitives are fixed in the wire format ([07 §7.3–7.4](07-encryption.md)); **Argon2id recovery params** (m/t/p/salt) are **client-chosen and persisted per blob** in `recovery_blobs.kdf_params` ([03](03-data-model.md)), not server configuration.
@@ -81,3 +84,12 @@ Structured logs to stdout; security events → audit log; **never content** (non
 
 - **dev/test:** Testcontainers for Postgres (and Keycloak only when exercising the `enterprise` profile); filesystem blob store; throwaway test client keypairs.
 - **prod:** the Compose stack on the ARM64 VPS.
+
+## 14.9 Support relay
+
+> The in-app bug-reporting helpdesk (feature [`support.md`](https://github.com/Nyxite/Nyxite), OPEN-DECISIONS **SUP-1..SUP-9**). The server participates only as an **authenticating relay — it stores no ticket** (SUP-7). The helpdesk itself is the **central vendor-side `NyxiteSupport`** service (ASP.NET Core + PostgreSQL, its own operator UI); like `NyxiteLicense` it is **maintainer-run vendor infrastructure and is not part of the self-hosted stack** — it has **no Compose entry** and no operator deploys it (SUP-5).
+
+- **`support.enabled` capability flag** (`NYXITE__Support__Enabled`, §14.3). Off by default; in v1 turned on **only on the maintainer's official instance(s)** (SUP-9). When off, the relay endpoints ([04 §4.9](04-rest-api.md)) are absent and clients advertise no reporting surface.
+- **Relay target** — `NYXITE__Support__ServiceBaseUrl` points at the central `NyxiteSupport` service; the enabled server forwards authenticated reports there over TLS.
+- **Relay credential** — `NYXITE__Support__InstanceCredential` (secret) authenticates this instance to `NyxiteSupport` and lets it attribute/rate-limit and reject junk by instance; the server also tags each forwarded report with the `instance_fingerprint` + an opaque `user_ref` (SUP-6/SUP-7).
+- **Non-E2EE plane.** This is the project's one consensual exception to zero-knowledge (SUP-1); it is disjoint from the content plane and carries no content key — the server-side content secrets above (§14 header) are untouched.

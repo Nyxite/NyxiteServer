@@ -29,6 +29,7 @@
 | Me / settings | `/api/v1/me` |
 | Admin | `/api/v1/admin/**` |
 | Public share | `/share/**` (unauthenticated, token-scoped) |
+| Support relay (only when `support.enabled`) | `/api/v1/support/**` ([§4.9](#49-support-relay-endpoints)) |
 
 ## 4.3 Endpoints
 
@@ -232,3 +233,18 @@ Unauthenticated, token-scoped; the **decryption key is in the URL fragment**, ne
 | `WS` | `/share/{token}/ws` | Guest WebSocket into the encrypted relay — serves **both read and write links**. Read-only guests receive `OnUpdate`/`OnAwareness` but are rejected (`OnError`) on `SubmitUpdate` ([05 §5.8](05-realtime-collaboration.md)) |
 
 `{token}` validated against `shares.link_token_hash`; expired/revoked → `410`. Guests get a short-lived relay-scoped session token; they **never** receive a key from the server ([09 §9.4](09-sharing-and-acl.md)).
+
+## 4.9 Support relay endpoints
+
+> **Consensual, non-E2EE support plane — disjoint from the content plane.** These endpoints belong to the in-app bug-reporting helpdesk (feature: [Nyxite `features/support.md`](https://github.com/Nyxite/Nyxite), OPEN-DECISIONS **SUP-1..SUP-9**). The server here is an **authenticating relay only — it stores no ticket** (SUP-7); the ticket store, lifecycle, and all operator/management endpoints live on the central vendor-side `NyxiteSupport` service (its [`specification/02`](https://github.com/Nyxite/NyxiteSupport) and [`04`](https://github.com/Nyxite/NyxiteSupport)), which is **not** part of the self-hosted stack. A report carries **no content key and no content-plane ciphertext**; the content-plane zero-knowledge guarantee is untouched (SUP-1).
+
+**Exposed only when the instance advertises `support.enabled`** ([14 §14.9](14-deployment-and-config.md)). In v1 this is true **only on the maintainer's official instance(s)**; a third-party self-hosted instance has **no** reporting surface and these routes are absent (SUP-9). Where present they are the **only** support endpoints on the server.
+
+| Method | Path | Purpose |
+|--------|------|---------|
+| `POST` | `/support/reports` | **Authenticated report intake + relay** (SUP-7). Authenticates the submitter — an **account session** or a valid **guest-share session** (SUP-6) — then forwards the composed report (multipart: JSON body + flattened, destructively client-redacted screenshot blobs — SUP-2) to the central `NyxiteSupport` service, tagged server-side with the **`instance_fingerprint`** (the same opaque per-instance anchor used for `NyxiteLicense /register`) and an **opaque `user_ref`** the client cannot forge. Best-effort, off the critical path; no partial report is persisted (`NyxiteSupport specification/02 §2.5`) |
+| `GET` | `/support/tickets` | List the **reporter's own** tickets (status + replies for the "My tickets" view), proxied to `NyxiteSupport`'s reporter API scoped to the caller's `user_ref` — never another reporter's tickets |
+| `GET` | `/support/tickets/{id}` | Read one of the reporter's own tickets (existence-hiding applies — no reach → `404`, [§4.4](#44-error-model)) |
+| `POST` | `/support/tickets/{id}/replies` | Reporter reply on their own ticket, proxied by `user_ref` |
+
+All operator surfaces — triage, tags, priority, assignee, internal notes, transitions, merge/close/reopen, webhooks, API tokens — are **never** exposed by a self-hosted instance; they live only on `NyxiteSupport` (its `specification/04`, SUP-4/SUP-5).
