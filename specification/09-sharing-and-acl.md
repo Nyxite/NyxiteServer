@@ -36,7 +36,7 @@ Backed by `shares` ([03](03-data-model.md)); wrapped keys for account shares liv
 
 > **Completeness rule:** a subtree share is **"fully granted"** only once **every current file-key in the subtree** has a wrapped row for the grantee. Until then the client keeps draining its (resumable) batch queue.
 
-> **Trust note:** the sharer trusts the directory's public key for the grantee. Key-transparency / verification (e.g. safety numbers) is a hardening item ([15](15-roadmap-and-versioning.md)).
+> **Trust note:** for a single share the sharer trusts the directory's public key (TLS + the directory's hybrid Ed25519 + ML-DSA-65 self-signature) for the grantee. The **key-transparency log is required at Phase 4.3** (G-3, v1.0.0) because group enrollment depends on it — a substituted key would expose a whole group's corpus — so group grants wrap **only to transparency-log-verified keys** (§9.9). Client-facing **safety-number verification** remains an optional Phase-6 hardening affordance ([15](15-roadmap-and-versioning.md)).
 
 ## 9.4 Link & guest shares — fragment key
 

@@ -78,7 +78,7 @@
 |------|--------|------------|
 | Key loss = data loss | [07 §7.8](07-encryption.md) | Recovery key UX; multi-device enrollment; clear user warnings |
 | `ydotnet` / android `yrs/UniFFI` maturity (now client-only) | OPEN-DECISIONS | Conformance tests; server runs no live CRDT engine, shrinking the blast radius |
-| Key-directory trust (pubkey MITM) | [09](09-sharing-and-acl.md) | TLS now; key transparency/verification in Phase 6 |
+| Key-directory trust (pubkey MITM) | [09](09-sharing-and-acl.md) | TLS + hybrid Ed25519 + ML-DSA-65 self-signature now; the key-transparency **log** is required in **Phase 4.3** (G-3, v1.0.0); client-facing safety-number **verification** stays optional in Phase 6 |
 | Weak web/Android search | [11](11-search.md) | Desktop is the full-search surface; accepted trade for privacy |
 | Metadata leakage (structure/sizes/timestamps) | [13 §13.1](13-security.md) | Names encrypted; optional structure-hiding in Phase 6 |
 | Relay tampering/withholding by server | [13](13-security.md) | Signed updates/directory entries (hybrid Ed25519 + ML-DSA-65) to detect |

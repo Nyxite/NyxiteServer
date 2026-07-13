@@ -60,7 +60,7 @@
 
 ## 12.3 Audit log
 
-Append-only `audit_log` ([03](03-data-model.md)), distinct from app logs. Covers **auth events, device/key lifecycle, shares created/revoked, key rotations, admin actions, and purges** — **never content or keys** (there is no content to log).
+Append-only `audit_log` ([03](03-data-model.md)), distinct from app logs. Covers **auth events, device/key lifecycle, shares created/revoked, key rotations, admin actions, deletion-lifecycle transitions (soft-delete to Trash, restore, admin grace-tier restore, scheduled/forced purge — DL-1–DL-5, [03 §3.3](03-data-model.md)), and purges** — **never content or keys** (there is no content to log).
 
 Recorded `action` values (non-exhaustive) **[P]**:
 

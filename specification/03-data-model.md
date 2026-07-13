@@ -6,7 +6,7 @@
 
 - Primary keys: `uuid` (UUIDv7, app-generated).
 - Timestamps: `timestamptz`, UTC.
-- Soft delete: nullable `deleted_at`; partial indexes filter `WHERE deleted_at IS NULL`.
+- Soft delete: nullable `deleted_at`; partial indexes filter `WHERE deleted_at IS NULL`. `deleted_at` is the single timestamp that drives the **staged deletion lifecycle** (Trash → grace → purge, cluster DL-1–DL-5) — see the deletion-lifecycle note under §3.3.
 - Ciphertext / wrapped keys / hashes: `bytea`.
 - Encrypted display names: `bytea` (`*_name_enc`) — the server never holds the plaintext name.
 - FKs `ON DELETE RESTRICT` (deletion is soft or via explicit purge), except audit/append tables.
@@ -242,6 +242,13 @@ CREATE INDEX ix_files_folder  ON files(folder_id)  WHERE deleted_at IS NULL;
 CREATE INDEX ix_files_owner   ON files(owner_id)   WHERE deleted_at IS NULL;
 ```
 > `content_type` and sizes stay visible (needed to route sync and pick the client decoder); everything content-bearing is encrypted. The former `zk` hook is gone — **E2EE is the default**, not an opt-in.
+
+> **Deletion lifecycle — staged retention (DL-1–DL-5).** A delete never hard-deletes immediately: setting `deleted_at` starts a fixed, timestamp-driven **three-stage timeline** the server runs over opaque blobs (it stores only `deleted_at`, learns no content, and cannot distinguish stages beyond timestamps — DL-2):
+> - **Trash** — for the configured trash window (default **30 days**, [14 §14.3](14-deployment-and-config.md)): the row is hidden from live queries (partial indexes) but **client-visible in a Trash view** with one-click restore (clears `deleted_at`). Restore brings back version history intact.
+> - **Grace** — for the configured grace window past Trash (default **30 days**): the row leaves the normal client UI entirely; ciphertext + wrapped keys are still retained, restorable **only by an explicit admin action** (DL-4).
+> - **Purge** — at the end (~**60 days** total): a scheduled job hard-deletes the metadata row, ciphertext, wrapped keys, and the file's version-history snapshots **together** ([10 §10.6](10-version-history.md)); irreversible. **Every** delete runs the full timeline — there is **no early/permanent-now purge** (DL-5).
+>
+> Both windows are an **instance-wide admin default with a per-user override** (same mechanism as the storage quota / `group_max_members`, [14 §14.3](14-deployment-and-config.md), [12 §12.7](12-administration.md)). **Scope (DL-3):** a share-**recipient's** delete removes only their own `shares` row (their reference), leaving the file live for everyone else; the file **owner's** delete sets `files.deleted_at` and runs the timeline **globally** for all members.
 
 ### shares  (ACL — see [09](09-sharing-and-acl.md))
 > Defined **before** `file_keys`, which references `shares(id)`.

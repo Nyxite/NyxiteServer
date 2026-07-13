@@ -38,9 +38,10 @@ The server records `content_hash` (client-computed), `blob_ref`, `size_cipher`, 
 
 ## 10.6 Retention & garbage collection
 
-- **Default:** keep full history.
+- **Default:** keep full history for a live file.
+- **Deletion lifecycle:** when a file is deleted it runs the staged **Trash → grace → purge** timeline ([03 §3.3](03-data-model.md), DL-1–DL-5). A delete **never rewrites history**, and a Trash restore brings the history back intact. At the end of the timeline (~60 days) the file's **version-history snapshots are purged together with the file** — the scheduled purge job hard-deletes `file_versions`/`crdt_updates` for that file as part of the same operation (DL-2).
 - **GC:** background job removes blobs whose **last referencing version** is purged (no live `file_versions`/`crdt_updates`/head reference across **any** file). Operates purely on references — no content needed.
-- **Purge** (admin/retention) hard-deletes versions + now-unreferenced blobs; audited ([12](12-administration.md)).
+- **Purge** (staged-deletion timer or admin/retention action) hard-deletes versions + now-unreferenced blobs; audited ([12](12-administration.md)).
 
 ## 10.7 Guarantees
 
