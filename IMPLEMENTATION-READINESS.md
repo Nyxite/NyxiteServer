@@ -6,7 +6,7 @@
 
 The server specification is exceptionally detailed and internally consistent. The **required v1.0.0 band is buildable end-to-end for Phases 0.1, 0.2, 1.1, 1.2, 2.1, 2.2, 2.3, 2.4, 3.1, 4.1, 4.2, and 4.5** — every `-SRV-` step in those phases maps cleanly to a concrete chapter (schema, endpoints, DTOs, status codes, wire framing, crypto suite IDs, rate limits, config keys). However there are **2 hard blockers** (one of them in the required v1.0.0 band), **2 intentionally-deferred Phase-6 research tracks** whose design is by admission not written, and a handful of moderate/minor gaps. A developer could start today and get most of the way through v1.0.0, but would hit a wall at **Phase 4.3 (key transparency)** and could not build **Phase 5.1 (chunked upload)** or **Phase 6.x** without new design work.
 
-The reason the count is low: the server repo's `specification/` (00–15) is a genuinely complete build spec for the core platform, and `docs/OPEN-DECISIONS.md` lists **zero** live-open decisions (#1–#12, AD-1–AD-5, G-1–G-5 all resolved). The gaps below are places where a **required capability is referenced but its concrete server-buildable design was never written into any spec** — typically because it depends on a cross-cutting `-CORE-` fixture step that itself says the format is still "to be defined."
+The reason the count is low: the server repo's `specification/` (00–15) is a genuinely complete build spec for the core platform, and `docs/OPEN-DECISIONS.md` lists **zero** live-open decisions (#1–#12, AD-1–AD-5, G-1–G-5 all resolved). The gaps below are places where a **required capability is referenced but its concrete server-buildable design was never written into any spec** — typically because it depends on a cross-cutting `-CORE-` fixture step that itself says the format is still "to be defined." One gap (MG-2) is a different category: the design exists, but the **highest-leverage server-owned artifact — the frozen `/openapi/v1.json` wire contract every client validates against — has not been produced on disk yet**, and the sync payload shapes it depends on are still loose.
 
 ---
 
@@ -54,7 +54,17 @@ These are Phase-6 optional hardening tracks whose design the plan itself treats 
 ### MG-1 — Server-side session / refresh-token / idempotency persistence is absent from the data model
 **Affects:** `P0.1-SRV-3` (refresh tokens), `/auth/logout`, `P4.2-SRV-1b` (`GET/DELETE /admin/users/{id}/sessions`), and the `Idempotency-Key` store.
 
-The spec requires **revocable** refresh tokens (`08 §8.7`: "refresh tokens rotate on use and can be revoked"), a `/auth/logout` that "revoke[s] the presented refresh token / session," an admin **sessions list + force-logout**, and an idempotency store ("`key → response` for 24h scoped to `(user, endpoint)`", `01 §1.5` / `04 §4.1`). All of these require **server-side state**, but `03-data-model.md §3.2` defines **no `sessions`, `refresh_tokens`, or `idempotency_keys` table** (the schema lists users, RBAC tables, webauthn_credentials, user_keys, devices, recovery_blobs, structure, shares, file_keys, file_versions, crdt_updates, audit_log — and nothing else). Likewise the ephemeral `mfaToken` (interim password→TOTP token), device `pairingCode`, single-use 60 s **socket ticket**, and 15 min **guest share-session token** have no specified storage tier (Redis? DB? in-memory?). A senior dev can add standard tables/cache, but the persistence model is genuinely unspecified and should be pinned so migrations and revocation semantics are correct.
+The spec requires **revocable** refresh tokens (`08 §8.7`: "refresh tokens rotate on use and can be revoked"), a `/auth/logout` that "revoke[s] the presented refresh token / session," an admin **sessions list + force-logout**, and an idempotency store ("`key → response` for 24h scoped to `(user, endpoint)`", `01 §1.5` / `04 §4.1`). All of these require **server-side state**, but `03-data-model.md §3.2` defines **no `sessions`, `refresh_tokens`, or `idempotency_keys` table** (the schema lists users, RBAC tables, webauthn_credentials, user_keys, devices, recovery_blobs, structure, shares, file_keys, file_versions, crdt_updates, audit_log — and nothing else). Likewise the ephemeral `mfaToken` (interim password→TOTP token), device `pairingCode`, single-use 60 s **socket ticket**, and 15 min **guest share-session token** have no specified storage tier (Redis? DB? in-memory?). A senior dev can add standard tables/cache, but the persistence model is genuinely unspecified and should be pinned so migrations and revocation semantics are correct — **resolve this before writing the first migration.**
+
+### MG-2 — Canonical OpenAPI wire contract does not exist yet; sync payload shapes still loose (cross-cutting, server-owned)
+**Affects:** every client component (which validates against the frozen contract in CI) and the Phase 2.x sync steps (`P2.2-SRV-*`).
+
+Two **server-owned** artifacts are still outstanding and are the single highest-leverage items to produce early:
+
+- **The frozen `/openapi/v1.json` does not exist on disk.** This is the canonical machine-readable wire contract that every other Nyxite client validates against in CI. Until it is authored/generated and frozen, no client can pin against a stable server contract. The prose REST surface (`04`) is complete enough to *derive* it, so this is production work rather than missing design — but because it is server-owned and gates every downstream client, it should be the **first foundational deliverable**, not a late-phase cleanup.
+- **The `GET /sync/manifest` and `POST /sync/changes` payload shapes are still loose.** `06` specifies the sync *flow*, but the concrete request/response payload schemas and the **per-kind ref formats** (`structure` / `blob` / `crdt` / `delete` / `keyrotate`) are not fully pinned. These must be nailed down before `/openapi/v1.json` can be frozen, and they are likewise server-owned.
+
+Neither requires new cryptographic or protocol design — the inputs exist — but both are prerequisites for a stable, client-consumable contract and should be locked before broad client work begins.
 
 ---
 
@@ -76,7 +86,7 @@ To keep the "NO" honest: the following are pinned to genuine implementation dept
 - **REST surface** (`04`): routes, methods, representative DTOs, RFC 9457 error model with a full code table, pagination/idempotency/existence-hiding (`404` vs `403`) rules.
 - **Crypto** (`07`): AES-256-GCM framing (`magic "NYXC" | 0x01 | key_id | nonce | ct | tag`, AAD construction, `object_kind` enum), hybrid HPKE KEM suite id `X25519MLKEM768` (X25519 + ML-KEM-768) / HKDF-SHA256 / AES-256-GCM, hybrid Ed25519 + ML-DSA-65 signatures / BLAKE3-256 / Argon2id params, recovery-blob format, content addressing.
 - **Relay** (`05`): SignalR hub contract, MessagePack wire encoding, join/update/awareness flow, snapshot triggers + prune safety-tail (7 days OR 1000 updates).
-- **Sync** (`06`), **sharing/ACL + rotation** (`09`, incl. `409`/`412` generation-guard), **version history** (`10`), **admin API + signed audit bundle + RBAC scope** (`12`), **security/rate-limits/existence-hiding** (`13`), **deploy/config keys** (`14`).
+- **Sync** (`06`, the flow — but see MG-2: the `/sync/manifest` + `/sync/changes` payload shapes and per-kind ref formats still need pinning), **sharing/ACL + rotation** (`09`, incl. `409`/`412` generation-guard), **version history** (`10`), **admin API + signed audit bundle + RBAC scope** (`12`), **security/rate-limits/existence-hiding** (`13`), **deploy/config keys** (`14`).
 - **Auth** (`08`): native password+TOTP / passkey flows, endpoint list, token lifetimes (access ~5 min, socket ticket 60 s, guest session 15 min), two-gate authz model.
 
 Phases 0.1 → 4.2 (server steps), plus 2.1–2.4, 3.1, 4.1, and 4.5, are implementable directly from the current documents; the block is concentrated at **4.3 (key transparency)**, cascading into **4.4 enrollment verification**, and at the optional **5.x / 6.x** bands.
@@ -87,8 +97,9 @@ Phases 0.1 → 4.2 (server steps), plus 2.1–2.4, 3.1, 4.1, and 4.5, are implem
 
 | Phase | Gap | Severity |
 |-------|-----|----------|
+| Cross-cutting | Canonical `/openapi/v1.json` not authored on disk; `/sync/manifest` + `/sync/changes` payload shapes and per-kind ref formats loose (MG-2) — server-owned, highest-leverage | Moderate (high-leverage) |
 | 0.1 | Session/refresh-token/idempotency persistence tables absent (MG-1); token format not pinned (MA-1) | Moderate / Minor |
-| 0.2–2.4, 3.1, 4.1 | None (fully specified) | — |
+| 0.2–2.4, 3.1, 4.1 | Sync payload shapes/ref formats need pinning (part of MG-2); otherwise fully specified | Moderate / — |
 | 4.2 | SCIM/CSV import-export contracts (MA-2); admin sessions store (part of MG-1) | Minor / Moderate |
 | **4.3** | **Key transparency log: no chapter, schema, proof format, endpoints, or verification algorithm (HB-1)** | **Hard blocker (required v1.0.0)** |
 | 4.4 | Enrollment inclusion-proof verification depends on HB-1; group default size value (MA-3) | Hard blocker (inherits HB-1) / Minor |
@@ -99,10 +110,11 @@ Phases 0.1 → 4.2 (server steps), plus 2.1–2.4, 3.1, 4.1, and 4.5, are implem
 
 ---
 
-## Top 5 most critical gaps
+## Top 6 most critical gaps
 
 1. **Key transparency subsystem (HB-1)** — required for v1.0.0 (Phase 4.3, blocks 4.4 group enrollment); no data model, proof wire format, endpoints, or server verification algorithm anywhere in the server repo.
 2. **Chunked/resumable ciphertext-upload contract (HB-2)** — Phase 5.1/5.3; only a one-line placeholder exists (`§4.7`).
-3. **Session / refresh-token / idempotency persistence (MG-1)** — revocable refresh, `/auth/logout`, admin sessions list, and the idempotency store all need server state, but no tables are in the data model.
-4. **Phase 6.2 / 6.3 designs (DR-1, DR-2)** — metadata-graph hiding and leak-free search are undesigned go/no-go research tracks; unbuildable as-is by admission.
-5. **Minor contracts unspecified (MA-1/2/3)** — token signing algorithm/format, SCIM + CSV admin import-export, and the instance-default `group_max_members` value.
+3. **Canonical OpenAPI wire contract + sync payload shapes (MG-2)** — the frozen `/openapi/v1.json` that all clients validate against in CI does not exist on disk, and the `/sync/manifest` + `/sync/changes` payloads and per-kind ref formats are still loose; both are server-owned and the highest-leverage early deliverables (no new design required, but they gate all client work).
+4. **Session / refresh-token / idempotency persistence (MG-1)** — revocable refresh, `/auth/logout`, admin sessions list, and the idempotency store all need server state, but no tables are in the data model; resolve before the first migration.
+5. **Phase 6.2 / 6.3 designs (DR-1, DR-2)** — metadata-graph hiding and leak-free search are undesigned go/no-go research tracks; unbuildable as-is by admission.
+6. **Minor contracts unspecified (MA-1/2/3)** — token signing algorithm/format, SCIM + CSV admin import-export, and the instance-default `group_max_members` value.
