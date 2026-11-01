@@ -1,0 +1,2846 @@
+openapi: 3.1.0
+info:
+  title: Nyxite Server API
+  version: 1.0.0
+  summary: Canonical wire contract of NyxiteServer (contract-first).
+  description: |
+    The canonical, hand-maintained wire contract of NyxiteServer. The server serves this document
+    as JSON at `/openapi/v1.json`; CI contract tests fail the server when routes or payloads drift
+    from it, and every client builds its API layer from it (specification/04-rest-api.md §4.1).
+
+    Conventions (specification/04-rest-api.md §4.1):
+    - The server is zero-knowledge. Every `*Enc` field, wrapped key, blob and CRDT update is
+      client-side ciphertext the server cannot read.
+    - Binary values in JSON are base64url without padding (`Bytes`).
+    - IDs are UUIDv7 strings, timestamps RFC 3339 UTC.
+    - `Idempotency-Key` is required on every POST that creates something.
+    - Errors are RFC 9457 `application/problem+json` with a stable `code`.
+    - A caller without reach to an id-addressed resource gets `404`, never `403`
+      (existence-hiding, specification/04-rest-api.md §4.4).
+    - The real-time relay is the SignalR hub `RelayHub` (MessagePack), specified in
+      specification/05-realtime-collaboration.md; it is not a REST surface and not described here.
+  license:
+    name: PolyForm Noncommercial 1.0.0
+    url: https://polyformproject.org/licenses/noncommercial/1.0.0/
+servers:
+  - url: https://{host}/api/v1
+    variables:
+      host:
+        default: nyxite.example.org
+security:
+  - bearer: []
+tags:
+  - name: auth
+  - name: me
+  - name: structure
+  - name: content
+  - name: keys
+  - name: devices
+  - name: kt
+  - name: versions
+  - name: shares
+  - name: groups
+  - name: sync
+  - name: admin
+  - name: scim
+  - name: public-share
+  - name: support
+  - name: ops
+
+paths:
+  # ---------------------------------------------------------------- auth (08)
+  /auth/register:
+    post:
+      tags: [auth]
+      security: []
+      summary: Create a native account (TOTP or passkey enrollment follows)
+      parameters: [{ $ref: '#/components/parameters/IdempotencyKey' }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email, displayName, password]
+              properties:
+                email: { type: string, format: email }
+                displayName: { type: string, maxLength: 200 }
+                password: { type: string, minLength: 12, maxLength: 1024 }
+      responses:
+        '201':
+          description: Account created; returns tokens of a session limited to factor enrollment.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/TokenPair' }
+        '400': { $ref: '#/components/responses/Problem' }
+        '409': { $ref: '#/components/responses/Problem' }
+        '429': { $ref: '#/components/responses/Problem' }
+  /auth/login:
+    post:
+      tags: [auth]
+      security: []
+      summary: Password step; never yields a full token
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email, password]
+              properties:
+                email: { type: string, format: email }
+                password: { type: string }
+      responses:
+        '200':
+          description: Password accepted, TOTP required.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [challenge, mfaToken]
+                properties:
+                  challenge: { type: string, const: totp_required }
+                  mfaToken: { type: string, description: 'Single-use, stored hashed (03 ephemeral_tokens)' }
+        '401': { $ref: '#/components/responses/Problem' }
+        '429': { $ref: '#/components/responses/Problem' }
+  /auth/login/totp:
+    post:
+      tags: [auth]
+      security: []
+      summary: Complete login with the TOTP code
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [mfaToken, totpCode]
+              properties:
+                mfaToken: { type: string }
+                totpCode: { type: string, pattern: '^[0-9]{6}$' }
+      responses:
+        '200':
+          description: Signed in.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/TokenPair' }
+        '401': { $ref: '#/components/responses/Problem' }
+        '429': { $ref: '#/components/responses/Problem' }
+  /auth/totp/enroll:
+    post:
+      tags: [auth]
+      summary: Begin TOTP enrollment
+      responses:
+        '200':
+          description: Secret to show; stored only after verify.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [secret, otpauthUri]
+                properties:
+                  secret: { type: string }
+                  otpauthUri: { type: string }
+        '401': { $ref: '#/components/responses/Problem' }
+  /auth/totp/verify:
+    post:
+      tags: [auth]
+      summary: Confirm TOTP enrollment
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [totpCode]
+              properties:
+                totpCode: { type: string, pattern: '^[0-9]{6}$' }
+      responses:
+        '204': { description: 'Second factor active.' }
+        '400': { $ref: '#/components/responses/Problem' }
+        '401': { $ref: '#/components/responses/Problem' }
+  /auth/webauthn/register/options:
+    post:
+      tags: [auth]
+      summary: Begin passkey registration
+      responses:
+        '200':
+          description: WebAuthn PublicKeyCredentialCreationOptions (W3C WebAuthn Level 3 JSON).
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+        '401': { $ref: '#/components/responses/Problem' }
+  /auth/webauthn/register:
+    post:
+      tags: [auth]
+      summary: Finish passkey registration (stores the public credential only)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [credential]
+              properties:
+                credential: { type: object, additionalProperties: true, description: 'RegistrationResponseJSON' }
+                label: { type: string, maxLength: 100 }
+      responses:
+        '204': { description: 'Passkey registered.' }
+        '400': { $ref: '#/components/responses/Problem' }
+        '401': { $ref: '#/components/responses/Problem' }
+  /auth/webauthn/assert/options:
+    post:
+      tags: [auth]
+      security: []
+      summary: Begin passkey login
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                email: { type: string, format: email }
+      responses:
+        '200':
+          description: WebAuthn PublicKeyCredentialRequestOptions JSON.
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+  /auth/webauthn/assert:
+    post:
+      tags: [auth]
+      security: []
+      summary: Finish passkey login (sufficient alone)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [credential]
+              properties:
+                credential: { type: object, additionalProperties: true, description: 'AuthenticationResponseJSON' }
+      responses:
+        '200':
+          description: Signed in.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/TokenPair' }
+        '401': { $ref: '#/components/responses/Problem' }
+  /auth/oidc/authorize:
+    get:
+      tags: [auth]
+      security: []
+      summary: Enterprise OIDC login start (ent.sso)
+      parameters:
+        - { name: client, in: query, required: true, schema: { type: string, enum: [desktop, android, web] } }
+        - { name: redirectUri, in: query, required: true, schema: { type: string, format: uri } }
+      responses:
+        '302': { description: 'Redirect to the IdP authorization endpoint.' }
+        '400': { $ref: '#/components/responses/Problem' }
+        '404': { $ref: '#/components/responses/Problem' }
+  /auth/oidc/callback:
+    get:
+      tags: [auth]
+      security: []
+      summary: IdP callback; redirects to the client with a one-time handoff code
+      parameters:
+        - { name: code, in: query, required: true, schema: { type: string } }
+        - { name: state, in: query, required: true, schema: { type: string } }
+      responses:
+        '302': { description: 'Redirect to the allowlisted redirectUri with `handoff`.' }
+        '400': { $ref: '#/components/responses/Problem' }
+  /auth/oidc/token:
+    post:
+      tags: [auth]
+      security: []
+      summary: Exchange the handoff code for tokens
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [handoff]
+              properties:
+                handoff: { type: string }
+      responses:
+        '200':
+          description: Signed in.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/TokenPair' }
+        '401': { $ref: '#/components/responses/Problem' }
+  /auth/refresh:
+    post:
+      tags: [auth]
+      security: []
+      summary: Rotate a refresh token (single-use; reuse revokes the session)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [refreshToken]
+              properties:
+                refreshToken: { type: string }
+      responses:
+        '200':
+          description: New token pair.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/TokenPair' }
+        '401': { $ref: '#/components/responses/Problem' }
+  /auth/logout:
+    post:
+      tags: [auth]
+      summary: Revoke the current session and its refresh tokens
+      responses:
+        '204': { description: 'Signed out.' }
+        '401': { $ref: '#/components/responses/Problem' }
+  /auth/password/forgot:
+    post:
+      tags: [auth]
+      security: []
+      summary: Send a reset email (restores login only, never content)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email]
+              properties:
+                email: { type: string, format: email }
+      responses:
+        '202': { description: 'Always 202, whether or not the email exists (no account enumeration).' }
+        '429': { $ref: '#/components/responses/Problem' }
+  /auth/password/reset:
+    post:
+      tags: [auth]
+      security: []
+      summary: Complete a password reset
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [resetToken, newPassword]
+              properties:
+                resetToken: { type: string }
+                newPassword: { type: string, minLength: 12, maxLength: 1024 }
+      responses:
+        '204': { description: 'Password changed; all sessions revoked (credential_change).' }
+        '400': { $ref: '#/components/responses/Problem' }
+        '410': { $ref: '#/components/responses/Problem' }
+
+  # ---------------------------------------------------------------- me
+  /me:
+    get:
+      tags: [me]
+      summary: The caller's account and the instance capabilities
+      responses:
+        '200':
+          description: Account.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Me' }
+        '401': { $ref: '#/components/responses/Problem' }
+  /me/settings:
+    get:
+      tags: [me]
+      summary: Client-encrypted settings blob
+      responses:
+        '200':
+          description: Settings ciphertext.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Settings' }
+    put:
+      tags: [me]
+      summary: Replace the client-encrypted settings blob
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/Settings' }
+      responses:
+        '204': { description: 'Stored.' }
+        '400': { $ref: '#/components/responses/Problem' }
+
+  # ---------------------------------------------------------------- structure
+  /projects:
+    get:
+      tags: [structure]
+      summary: List projects the caller can reach
+      parameters: [{ $ref: '#/components/parameters/Cursor' }, { $ref: '#/components/parameters/Limit' }]
+      responses:
+        '200':
+          description: Page of projects.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ProjectPage' }
+    post:
+      tags: [structure]
+      summary: Create a project
+      parameters: [{ $ref: '#/components/parameters/IdempotencyKey' }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [nameEnc]
+              properties:
+                nameEnc: { $ref: '#/components/schemas/Bytes' }
+                syncPolicy: { $ref: '#/components/schemas/SyncPolicy' }
+                readerGroupAttachment: { $ref: '#/components/schemas/Bytes' }
+      responses:
+        '201':
+          description: Created.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Project' }
+        '400': { $ref: '#/components/responses/Problem' }
+        '409': { $ref: '#/components/responses/Problem' }
+  /projects/{id}:
+    parameters: [{ $ref: '#/components/parameters/Id' }]
+    get:
+      tags: [structure]
+      summary: Get a project
+      responses:
+        '200':
+          description: Project.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Project' }
+        '404': { $ref: '#/components/responses/Problem' }
+    patch:
+      tags: [structure]
+      summary: Rename / change policy / reader-group attachment
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                nameEnc: { $ref: '#/components/schemas/Bytes' }
+                syncPolicy: { $ref: '#/components/schemas/SyncPolicy' }
+                readerGroupAttachment: { $ref: '#/components/schemas/Bytes' }
+      responses:
+        '200':
+          description: Updated.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Project' }
+        '404': { $ref: '#/components/responses/Problem' }
+    delete:
+      tags: [structure]
+      summary: Move a project to Trash (soft delete, DL-1)
+      responses:
+        '204': { description: 'Trashed.' }
+        '404': { $ref: '#/components/responses/Problem' }
+  /projects/{id}/folders:
+    parameters: [{ $ref: '#/components/parameters/Id' }]
+    get:
+      tags: [structure]
+      summary: List folders of a project
+      parameters: [{ $ref: '#/components/parameters/Cursor' }, { $ref: '#/components/parameters/Limit' }]
+      responses:
+        '200':
+          description: Page of folders.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/FolderPage' }
+        '404': { $ref: '#/components/responses/Problem' }
+  /folders:
+    post:
+      tags: [structure]
+      summary: Create a folder
+      parameters: [{ $ref: '#/components/parameters/IdempotencyKey' }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [projectId, nameEnc]
+              properties:
+                projectId: { $ref: '#/components/schemas/Uuid' }
+                parentFolderId: { $ref: '#/components/schemas/NullableUuid' }
+                nameEnc: { $ref: '#/components/schemas/Bytes' }
+                syncPolicy: { $ref: '#/components/schemas/SyncPolicy' }
+      responses:
+        '201':
+          description: Created.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Folder' }
+        '400': { $ref: '#/components/responses/Problem' }
+        '404': { $ref: '#/components/responses/Problem' }
+  /folders/{id}:
+    parameters: [{ $ref: '#/components/parameters/Id' }]
+    get:
+      tags: [structure]
+      summary: Get a folder
+      responses:
+        '200':
+          description: Folder.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Folder' }
+        '404': { $ref: '#/components/responses/Problem' }
+    patch:
+      tags: [structure]
+      summary: Rename / move / change policy
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                nameEnc: { $ref: '#/components/schemas/Bytes' }
+                parentFolderId: { $ref: '#/components/schemas/NullableUuid' }
+                syncPolicy: { $ref: '#/components/schemas/SyncPolicy' }
+                readerGroupAttachment: { $ref: '#/components/schemas/Bytes' }
+      responses:
+        '200':
+          description: Updated.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Folder' }
+        '400': { $ref: '#/components/responses/Problem' }
+        '404': { $ref: '#/components/responses/Problem' }
+    delete:
+      tags: [structure]
+      summary: Move a folder to Trash
+      responses:
+        '204': { description: 'Trashed.' }
+        '404': { $ref: '#/components/responses/Problem' }
+  /folders/{id}/files:
+    parameters: [{ $ref: '#/components/parameters/Id' }]
+    get:
+      tags: [structure]
+      summary: List files of a folder
+      parameters: [{ $ref: '#/components/parameters/Cursor' }, { $ref: '#/components/parameters/Limit' }]
+      responses:
+        '200':
+          description: Page of files.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/FilePage' }
+        '404': { $ref: '#/components/responses/Problem' }
+  /files:
+    post:
+      tags: [structure]
+      summary: Create a file (contentType is immutable afterwards)
+      parameters: [{ $ref: '#/components/parameters/IdempotencyKey' }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CreateFileRequest' }
+      responses:
+        '201':
+          description: Created.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/File' }
+        '400': { $ref: '#/components/responses/Problem' }
+        '404': { $ref: '#/components/responses/Problem' }
+  /files/{id}:
+    parameters: [{ $ref: '#/components/parameters/Id' }]
+    get:
+      tags: [structure]
+      summary: Get a file
+      responses:
+        '200':
+          description: File.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/File' }
+        '404': { $ref: '#/components/responses/Problem' }
+    patch:
+      tags: [structure]
+      summary: Update nameEnc, syncPolicy, parentFolderId (move) or metadataEnc only
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                nameEnc: { $ref: '#/components/schemas/Bytes' }
+                syncPolicy: { $ref: '#/components/schemas/SyncPolicy' }
+                parentFolderId: { $ref: '#/components/schemas/NullableUuid' }
+                metadataEnc: { $ref: '#/components/schemas/Bytes' }
+      responses:
+        '200':
+          description: Updated.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/File' }
+        '400': { $ref: '#/components/responses/Problem' }
+        '404': { $ref: '#/components/responses/Problem' }
+    delete:
+      tags: [structure]
+      summary: Move a file to Trash
+      responses:
+        '204': { description: 'Trashed.' }
+        '404': { $ref: '#/components/responses/Problem' }
+
+  # ---------------------------------------------------------------- content
+  /files/{id}/blob:
+    parameters: [{ $ref: '#/components/parameters/Id' }]
+    get:
+      tags: [content]
+      summary: Stream the head ciphertext (the chunk manifest for chunked files)
+      parameters:
+        - { name: If-None-Match, in: header, schema: { type: string }, description: 'contentHash of a locally held version' }
+      responses:
+        '200':
+          description: Ciphertext (NYXC frame).
+          headers:
+            Nyxite-Blob-Layout: { schema: { type: string, enum: [single, chunked] } }
+            ETag: { schema: { type: string } }
+          content:
+            application/octet-stream:
+              schema: { type: string, contentMediaType: application/octet-stream }
+        '304': { description: 'Unchanged.' }
+        '404': { $ref: '#/components/responses/Problem' }
+    put:
+      tags: [content]
+      summary: Upload new inline ciphertext (ink/binary, LWW, at most 100 MB)
+      parameters:
+        - { name: If-Match, in: header, required: true, schema: { type: string }, description: 'parentSeq the client edited from' }
+        - { name: Nyxite-Content-Hash, in: header, required: true, schema: { type: string }, description: 'base64url BLAKE3 content address' }
+        - { name: Nyxite-Key-Id, in: header, required: true, schema: { type: string, format: uuid } }
+      requestBody:
+        required: true
+        content:
+          application/octet-stream:
+            schema: { type: string, contentMediaType: application/octet-stream }
+      responses:
+        '201':
+          description: New head version.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Version' }
+        '409':
+          description: Concurrent write lost (or excluded_content); the bytes were kept as a sibling version.
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/ConflictProblem' }
+        '412': { $ref: '#/components/responses/Problem' }
+        '413': { $ref: '#/components/responses/Problem' }
+        '404': { $ref: '#/components/responses/Problem' }
+  /files/{id}/chunks:missing:
+    parameters: [{ $ref: '#/components/parameters/Id' }]
+    post:
+      tags: [content]
+      summary: Which chunk addresses are not yet stored for this file (07 §7.4a)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [addresses]
+              properties:
+                addresses: { type: array, maxItems: 1000, items: { $ref: '#/components/schemas/Bytes' } }
+      responses:
+        '200':
+          description: Missing subset.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [missing]
+                properties:
+                  missing: { type: array, items: { $ref: '#/components/schemas/Bytes' } }
+        '404': { $ref: '#/components/responses/Problem' }
+  /files/{id}/chunks/{address}:
+    parameters:
+      - { $ref: '#/components/parameters/Id' }
+      - { name: address, in: path, required: true, schema: { $ref: '#/components/schemas/Bytes' } }
+    get:
+      tags: [content]
+      summary: Stream one chunk ciphertext
+      responses:
+        '200':
+          description: Chunk frame.
+          content:
+            application/octet-stream:
+              schema: { type: string, contentMediaType: application/octet-stream }
+        '404': { $ref: '#/components/responses/Problem' }
+    put:
+      tags: [content]
+      summary: Upload one chunk (write-once, at most 4 MiB + 61 B)
+      requestBody:
+        required: true
+        content:
+          application/octet-stream:
+            schema: { type: string, contentMediaType: application/octet-stream }
+      responses:
+        '200': { description: 'Already stored; nothing rewritten.' }
+        '201': { description: 'Stored.' }
+        '404': { $ref: '#/components/responses/Problem' }
+        '413': { $ref: '#/components/responses/Problem' }
+  /files/{id}/blob:commit:
+    parameters: [{ $ref: '#/components/parameters/Id' }]
+    post:
+      tags: [content]
+      summary: Commit a chunked version (same LWW rules as PUT /files/{id}/blob)
+      parameters:
+        - { $ref: '#/components/parameters/IdempotencyKey' }
+        - { name: If-Match, in: header, required: true, schema: { type: string } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [manifestAddress, chunks, keyId]
+              properties:
+                manifestAddress: { $ref: '#/components/schemas/Bytes' }
+                chunks: { type: array, minItems: 1, items: { $ref: '#/components/schemas/Bytes' } }
+                keyId: { $ref: '#/components/schemas/Uuid' }
+      responses:
+        '201':
+          description: New head version.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Version' }
+        '400': { $ref: '#/components/responses/Problem' }
+        '409':
+          description: Concurrent write lost; kept as sibling version.
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/ConflictProblem' }
+        '412': { $ref: '#/components/responses/Problem' }
+        '413': { $ref: '#/components/responses/Problem' }
+  /files/{id}/crdt/log:
+    parameters: [{ $ref: '#/components/parameters/Id' }]
+    get:
+      tags: [content]
+      summary: Encrypted CRDT updates after a sequence number (relay fallback)
+      parameters:
+        - { name: since, in: query, required: true, schema: { type: integer, format: int64, minimum: 0 } }
+        - { $ref: '#/components/parameters/Limit' }
+      responses:
+        '200':
+          description: Updates in seq order.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items, hasMore]
+                properties:
+                  items: { type: array, items: { $ref: '#/components/schemas/CrdtUpdate' } }
+                  hasMore: { type: boolean }
+        '404': { $ref: '#/components/responses/Problem' }
+    post:
+      tags: [content]
+      summary: Submit encrypted CRDT updates (relay fallback)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [updates]
+              properties:
+                updates:
+                  type: array
+                  maxItems: 100
+                  items:
+                    type: object
+                    required: [clientUpdateId, keyId, updateEnc]
+                    properties:
+                      clientUpdateId: { $ref: '#/components/schemas/Uuid' }
+                      keyId: { $ref: '#/components/schemas/Uuid' }
+                      updateEnc: { $ref: '#/components/schemas/Bytes' }
+      responses:
+        '200':
+          description: Server-assigned seq per update (acks).
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [acks]
+                properties:
+                  acks:
+                    type: array
+                    items:
+                      type: object
+                      required: [clientUpdateId, seq]
+                      properties:
+                        clientUpdateId: { $ref: '#/components/schemas/Uuid' }
+                        seq: { type: integer, format: int64 }
+        '404': { $ref: '#/components/responses/Problem' }
+        '412': { $ref: '#/components/responses/Problem' }
+  /files/{id}/snapshot:
+    parameters: [{ $ref: '#/components/parameters/Id' }]
+    get:
+      tags: [content]
+      summary: Latest encrypted snapshot
+      responses:
+        '200':
+          description: Snapshot frame; covers CRDT updates up to Nyxite-Snapshot-Seq.
+          headers:
+            Nyxite-Snapshot-Seq: { schema: { type: integer, format: int64 } }
+          content:
+            application/octet-stream:
+              schema: { type: string, contentMediaType: application/octet-stream }
+        '404': { $ref: '#/components/responses/Problem' }
+
+  # ---------------------------------------------------------------- file keys
+  /files/{id}/keys:
+    parameters: [{ $ref: '#/components/parameters/Id' }]
+    get:
+      tags: [keys]
+      summary: The caller's wrapped file key(s)
+      responses:
+        '200':
+          description: Wrapped keys.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items: { type: array, items: { $ref: '#/components/schemas/WrappedKey' } }
+        '404': { $ref: '#/components/responses/Problem' }
+    post:
+      tags: [keys]
+      summary: Upload wrapped file keys for members
+      parameters: [{ $ref: '#/components/parameters/IdempotencyKey' }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [wrappedKeys]
+              properties:
+                wrappedKeys: { type: array, items: { $ref: '#/components/schemas/WrappedKey' } }
+      responses:
+        '204': { description: 'Stored.' }
+        '404': { $ref: '#/components/responses/Problem' }
+        '412': { $ref: '#/components/responses/Problem' }
+  /files/{id}/keys/rotate:
+    parameters: [{ $ref: '#/components/parameters/Id' }]
+    post:
+      tags: [keys]
+      summary: Commit a file-key rotation (generation-guarded)
+      parameters: [{ $ref: '#/components/parameters/IdempotencyKey' }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [newKeyId, generation, wrappedKeys, newHeadRef]
+              properties:
+                newKeyId: { $ref: '#/components/schemas/Uuid' }
+                generation: { type: integer, minimum: 2 }
+                wrappedKeys: { type: array, items: { $ref: '#/components/schemas/WrappedKey' } }
+                newHeadRef: { $ref: '#/components/schemas/Bytes' }
+      responses:
+        '204': { description: 'Rotation committed.' }
+        '404': { $ref: '#/components/responses/Problem' }
+        '409': { $ref: '#/components/responses/Problem' }
+  /files/keys:batch:
+    post:
+      tags: [keys]
+      summary: Batch wrap for subtree shares (idempotent, partial success)
+      parameters: [{ $ref: '#/components/parameters/IdempotencyKey' }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [grants]
+              properties:
+                grants:
+                  type: array
+                  maxItems: 500
+                  items:
+                    type: object
+                    required: [fileId, keyId, memberId, wrappedKey]
+                    properties:
+                      fileId: { $ref: '#/components/schemas/Uuid' }
+                      keyId: { $ref: '#/components/schemas/Uuid' }
+                      memberId: { $ref: '#/components/schemas/Uuid' }
+                      wrappedKey: { $ref: '#/components/schemas/Bytes' }
+      responses:
+        '200':
+          description: Result per grant.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [results]
+                properties:
+                  results:
+                    type: array
+                    items:
+                      type: object
+                      required: [fileId, status]
+                      properties:
+                        fileId: { $ref: '#/components/schemas/Uuid' }
+                        status: { type: string, enum: [applied, rejected] }
+                        error: { type: [string, 'null'] }
+
+  # ---------------------------------------------------------------- key directory + devices + recovery
+  /keys/directory:
+    get:
+      tags: [keys]
+      summary: A user's public keys (to wrap to them; verify against the KT log first)
+      parameters:
+        - { name: userId, in: query, schema: { type: string, format: uuid } }
+        - { name: email, in: query, schema: { type: string, format: email } }
+      responses:
+        '200':
+          description: Directory entry.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [userId, keys]
+                properties:
+                  userId: { $ref: '#/components/schemas/Uuid' }
+                  keys: { type: array, items: { $ref: '#/components/schemas/DirectoryKey' } }
+        '404': { $ref: '#/components/responses/Problem' }
+  /keys:
+    put:
+      tags: [keys]
+      summary: Publish or rotate the caller's identity keys (appends a KT leaf)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [keyId, generation, algId, kemPub, sigPub, selfSig]
+              properties:
+                keyId: { $ref: '#/components/schemas/Uuid' }
+                generation: { type: integer, minimum: 1 }
+                algId: { type: string }
+                kemPub: { $ref: '#/components/schemas/Bytes' }
+                sigPub: { $ref: '#/components/schemas/Bytes' }
+                selfSig: { $ref: '#/components/schemas/Bytes' }
+      responses:
+        '200':
+          description: Published.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/DirectoryKey' }
+        '400': { $ref: '#/components/responses/Problem' }
+        '409': { $ref: '#/components/responses/Problem' }
+  /devices:
+    get:
+      tags: [devices]
+      summary: List the caller's devices
+      responses:
+        '200':
+          description: Devices.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items: { type: array, items: { $ref: '#/components/schemas/Device' } }
+    post:
+      tags: [devices]
+      summary: Register a pending device
+      parameters: [{ $ref: '#/components/parameters/IdempotencyKey' }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [label, pubkey]
+              properties:
+                label: { type: string, maxLength: 100 }
+                pubkey: { $ref: '#/components/schemas/Bytes' }
+      responses:
+        '201':
+          description: Pending device.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [deviceId, status, pairingCode, qrPayload]
+                properties:
+                  deviceId: { $ref: '#/components/schemas/Uuid' }
+                  status: { type: string, const: pending }
+                  pairingCode: { type: string, pattern: '^[0-9]{6,8}$' }
+                  qrPayload:
+                    type: object
+                    required: [deviceId, pairingCode, pubkeyFingerprint]
+                    properties:
+                      deviceId: { $ref: '#/components/schemas/Uuid' }
+                      pairingCode: { type: string }
+                      pubkeyFingerprint: { $ref: '#/components/schemas/Bytes' }
+  /devices/{id}:
+    parameters: [{ $ref: '#/components/parameters/Id' }]
+    get:
+      tags: [devices]
+      summary: Get a device
+      responses:
+        '200':
+          description: Device.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Device' }
+        '404': { $ref: '#/components/responses/Problem' }
+    delete:
+      tags: [devices]
+      summary: Revoke a device (revokes its sessions)
+      responses:
+        '204': { description: 'Revoked.' }
+        '404': { $ref: '#/components/responses/Problem' }
+  /devices/{id}/approve:
+    parameters: [{ $ref: '#/components/parameters/Id' }]
+    post:
+      tags: [devices]
+      summary: Approve a pending device (server verifies pairingCode first)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [pairingCode, wrappedIdentityKey]
+              properties:
+                pairingCode: { type: string, pattern: '^[0-9]{6,8}$' }
+                wrappedIdentityKey: { $ref: '#/components/schemas/Bytes' }
+      responses:
+        '204': { description: 'Approved; sealed bundle stored for a single fetch.' }
+        '403': { $ref: '#/components/responses/Problem' }
+        '404': { $ref: '#/components/responses/Problem' }
+        '410': { $ref: '#/components/responses/Problem' }
+  /devices/me/enrollment:
+    get:
+      tags: [devices]
+      summary: Fetch the sealed identity bundle once (single-use)
+      responses:
+        '200':
+          description: Sealed bundle; deleted after this response, device becomes active.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [wrappedIdentityKey]
+                properties:
+                  wrappedIdentityKey: { $ref: '#/components/schemas/Bytes' }
+        '404': { $ref: '#/components/responses/Problem' }
+  /recovery:
+    get:
+      tags: [keys]
+      summary: The server-opaque recovery blob
+      responses:
+        '200':
+          description: Recovery blob.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/RecoveryBlob' }
+        '404': { $ref: '#/components/responses/Problem' }
+    put:
+      tags: [keys]
+      summary: Replace the recovery blob
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/RecoveryBlob' }
+      responses:
+        '204': { description: 'Stored.' }
+        '400': { $ref: '#/components/responses/Problem' }
+
+  # ---------------------------------------------------------------- key transparency (17)
+  /kt/log-key:
+    get:
+      tags: [kt]
+      summary: The log's public signing key
+      responses:
+        '200':
+          description: Log key.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [origin, ed25519PublicKey, mldsa65PublicKey]
+                properties:
+                  origin: { type: string }
+                  ed25519PublicKey: { $ref: '#/components/schemas/Bytes' }
+                  mldsa65PublicKey: { $ref: '#/components/schemas/Bytes' }
+  /kt/checkpoint:
+    get:
+      tags: [kt]
+      summary: Latest (or a historical) signed checkpoint, verbatim C2SP signed note
+      parameters:
+        - { name: treeSize, in: query, schema: { type: integer, format: int64, minimum: 1 } }
+      responses:
+        '200':
+          description: Signed note.
+          content:
+            text/plain:
+              schema: { type: string }
+        '404': { $ref: '#/components/responses/Problem' }
+  /kt/inclusion:
+    get:
+      tags: [kt]
+      summary: RFC 9162 inclusion proof
+      parameters:
+        - { name: leafIndex, in: query, required: true, schema: { type: integer, format: int64, minimum: 0 } }
+        - { name: treeSize, in: query, required: true, schema: { type: integer, format: int64, minimum: 1 } }
+      responses:
+        '200':
+          description: Audit path.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [leafIndex, treeSize, proof]
+                properties:
+                  leafIndex: { type: integer, format: int64 }
+                  treeSize: { type: integer, format: int64 }
+                  proof: { type: array, items: { $ref: '#/components/schemas/Bytes' } }
+        '400': { $ref: '#/components/responses/Problem' }
+  /kt/consistency:
+    get:
+      tags: [kt]
+      summary: RFC 9162 consistency proof
+      parameters:
+        - { name: from, in: query, required: true, schema: { type: integer, format: int64, minimum: 1 } }
+        - { name: to, in: query, required: true, schema: { type: integer, format: int64, minimum: 1 } }
+      responses:
+        '200':
+          description: Consistency proof.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [from, to, proof]
+                properties:
+                  from: { type: integer, format: int64 }
+                  to: { type: integer, format: int64 }
+                  proof: { type: array, items: { $ref: '#/components/schemas/Bytes' } }
+        '400': { $ref: '#/components/responses/Problem' }
+  /kt/leaves:
+    get:
+      tags: [kt]
+      summary: Raw leaves for monitoring (end exclusive, at most 1000)
+      parameters:
+        - { name: start, in: query, required: true, schema: { type: integer, format: int64, minimum: 0 } }
+        - { name: end, in: query, required: true, schema: { type: integer, format: int64, minimum: 1 } }
+      responses:
+        '200':
+          description: Leaves.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items:
+                    type: array
+                    items:
+                      type: object
+                      required: [leafIndex, leafData]
+                      properties:
+                        leafIndex: { type: integer, format: int64 }
+                        leafData: { $ref: '#/components/schemas/Bytes' }
+        '400': { $ref: '#/components/responses/Problem' }
+
+  # ---------------------------------------------------------------- versions
+  /files/{id}/versions:
+    parameters: [{ $ref: '#/components/parameters/Id' }]
+    get:
+      tags: [versions]
+      summary: List versions, newest first
+      parameters: [{ $ref: '#/components/parameters/Cursor' }, { $ref: '#/components/parameters/Limit' }]
+      responses:
+        '200':
+          description: Page of versions.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items, nextCursor]
+                properties:
+                  items: { type: array, items: { $ref: '#/components/schemas/Version' } }
+                  nextCursor: { type: [string, 'null'] }
+        '404': { $ref: '#/components/responses/Problem' }
+  /files/{id}/versions/{seq}:
+    parameters: [{ $ref: '#/components/parameters/Id' }, { $ref: '#/components/parameters/Seq' }]
+    get:
+      tags: [versions]
+      summary: Version metadata
+      responses:
+        '200':
+          description: Version.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Version' }
+        '404': { $ref: '#/components/responses/Problem' }
+  /files/{id}/versions/{seq}/blob:
+    parameters: [{ $ref: '#/components/parameters/Id' }, { $ref: '#/components/parameters/Seq' }]
+    get:
+      tags: [versions]
+      summary: A version's ciphertext (chunk manifest for chunked versions)
+      responses:
+        '200':
+          description: Ciphertext.
+          headers:
+            Nyxite-Blob-Layout: { schema: { type: string, enum: [single, chunked] } }
+          content:
+            application/octet-stream:
+              schema: { type: string, contentMediaType: application/octet-stream }
+        '404': { $ref: '#/components/responses/Problem' }
+  /files/{id}/restore:
+    parameters: [{ $ref: '#/components/parameters/Id' }]
+    post:
+      tags: [versions]
+      summary: Record a restore; the new head arrives via the normal write path
+      parameters: [{ $ref: '#/components/parameters/IdempotencyKey' }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [seq]
+              properties:
+                seq: { type: integer, format: int64 }
+      responses:
+        '204': { description: 'Recorded.' }
+        '404': { $ref: '#/components/responses/Problem' }
+
+  # ---------------------------------------------------------------- shares
+  /shares:
+    get:
+      tags: [shares]
+      summary: List shares on a target
+      parameters:
+        - { name: targetType, in: query, required: true, schema: { $ref: '#/components/schemas/TargetType' } }
+        - { name: targetId, in: query, required: true, schema: { type: string, format: uuid } }
+      responses:
+        '200':
+          description: Shares.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items: { type: array, items: { $ref: '#/components/schemas/Share' } }
+        '404': { $ref: '#/components/responses/Problem' }
+    post:
+      tags: [shares]
+      summary: Create an account or link share
+      parameters: [{ $ref: '#/components/parameters/IdempotencyKey' }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CreateShareRequest' }
+      responses:
+        '201':
+          description: Created.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Share' }
+        '400': { $ref: '#/components/responses/Problem' }
+        '404': { $ref: '#/components/responses/Problem' }
+  /shares/{id}:
+    parameters: [{ $ref: '#/components/parameters/Id' }]
+    patch:
+      tags: [shares]
+      summary: Change permission / expiry
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                permission: { $ref: '#/components/schemas/Permission' }
+                expiresAt: { type: [string, 'null'], format: date-time }
+      responses:
+        '200':
+          description: Updated.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Share' }
+        '404': { $ref: '#/components/responses/Problem' }
+    delete:
+      tags: [shares]
+      summary: Revoke (instant ACL cutoff; the client rotates the key separately)
+      responses:
+        '204': { description: 'Revoked.' }
+        '404': { $ref: '#/components/responses/Problem' }
+
+  # ---------------------------------------------------------------- groups (09 §9.9)
+  /groups:
+    get:
+      tags: [groups]
+      summary: File-sharing groups the caller belongs to
+      parameters: [{ $ref: '#/components/parameters/Cursor' }, { $ref: '#/components/parameters/Limit' }]
+      responses:
+        '200':
+          description: Page of groups.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items, nextCursor]
+                properties:
+                  items: { type: array, items: { $ref: '#/components/schemas/Group' } }
+                  nextCursor: { type: [string, 'null'] }
+    post:
+      tags: [groups]
+      summary: Create a file-sharing group (public halves only; appends a KT leaf)
+      parameters: [{ $ref: '#/components/parameters/IdempotencyKey' }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [groupPubkey, ed25519Pubkey, groupKeyId, algId, selfSig, scopeKind]
+              properties:
+                groupPubkey: { $ref: '#/components/schemas/Bytes' }
+                ed25519Pubkey: { $ref: '#/components/schemas/Bytes' }
+                groupKeyId: { $ref: '#/components/schemas/Uuid' }
+                algId: { type: string }
+                selfSig: { $ref: '#/components/schemas/Bytes' }
+                scopeKind: { type: string, enum: [project, time_period] }
+                maxMembers: { type: [integer, 'null'], minimum: 1 }
+      responses:
+        '201':
+          description: Created.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Group' }
+        '400': { $ref: '#/components/responses/Problem' }
+        '403': { $ref: '#/components/responses/Problem' }
+  /groups/{id}/pubkey:
+    parameters: [{ $ref: '#/components/parameters/Id' }]
+    get:
+      tags: [groups]
+      summary: Current public key of a scope (target for DEK-to-group wraps)
+      parameters:
+        - { name: scopeId, in: query, required: true, schema: { type: string, format: uuid } }
+      responses:
+        '200':
+          description: Key with KT leaf index.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/GroupScopeKey' }
+        '404': { $ref: '#/components/responses/Problem' }
+  /groups/{id}/members:
+    parameters: [{ $ref: '#/components/parameters/Id' }]
+    post:
+      tags: [groups]
+      summary: Enroll one member (one grant; memberKeyId must be current and logged)
+      parameters: [{ $ref: '#/components/parameters/IdempotencyKey' }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [memberId, memberKeyId, scopeId, wrappedGroupPrivkey, generation, algId]
+              properties:
+                memberId: { $ref: '#/components/schemas/Uuid' }
+                memberKeyId: { $ref: '#/components/schemas/Uuid' }
+                scopeId: { $ref: '#/components/schemas/Uuid' }
+                wrappedGroupPrivkey: { $ref: '#/components/schemas/Bytes' }
+                generation: { type: integer, minimum: 1 }
+                algId: { type: string }
+      responses:
+        '204': { description: 'Grant written.' }
+        '404': { $ref: '#/components/responses/Problem' }
+        '409': { $ref: '#/components/responses/Problem' }
+  /groups/{id}/members/{uid}:
+    parameters:
+      - { $ref: '#/components/parameters/Id' }
+      - { name: uid, in: path, required: true, schema: { type: string, format: uuid } }
+    delete:
+      tags: [groups]
+      summary: Soft removal (delete the live grant)
+      responses:
+        '204': { description: 'Removed.' }
+        '404': { $ref: '#/components/responses/Problem' }
+  /groups/{id}/keys:
+    parameters: [{ $ref: '#/components/parameters/Id' }]
+    get:
+      tags: [groups]
+      summary: The caller's grant(s) and the DEK-to-group wraps of a scope
+      parameters:
+        - { name: scopeId, in: query, required: true, schema: { type: string, format: uuid } }
+      responses:
+        '200':
+          description: Wrapped material.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [grants, dekWraps]
+                properties:
+                  grants: { type: array, items: { $ref: '#/components/schemas/GroupGrant' } }
+                  dekWraps: { type: array, items: { $ref: '#/components/schemas/WrappedKey' } }
+        '404': { $ref: '#/components/responses/Problem' }
+    post:
+      tags: [groups]
+      summary: Upload DEK-to-group wraps and/or re-wrapped grants
+      parameters: [{ $ref: '#/components/parameters/IdempotencyKey' }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                scopeId: { $ref: '#/components/schemas/Uuid' }
+                grants: { type: array, items: { $ref: '#/components/schemas/GroupGrant' } }
+                dekWraps: { type: array, items: { $ref: '#/components/schemas/WrappedKey' } }
+      responses:
+        '204': { description: 'Stored.' }
+        '404': { $ref: '#/components/responses/Problem' }
+        '412': { $ref: '#/components/responses/Problem' }
+  /groups/{id}/keys/rotate:
+    parameters: [{ $ref: '#/components/parameters/Id' }]
+    post:
+      tags: [groups]
+      summary: Scope-scoped rotation with a new published group key
+      parameters: [{ $ref: '#/components/parameters/IdempotencyKey' }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [scopeId, newGeneration, newKey, grants]
+              properties:
+                scopeId: { $ref: '#/components/schemas/Uuid' }
+                newGeneration: { type: integer, minimum: 2 }
+                newKey:
+                  type: object
+                  required: [keyId, groupPubkey, sigPubkey, algId, selfSig]
+                  properties:
+                    keyId: { $ref: '#/components/schemas/Uuid' }
+                    groupPubkey: { $ref: '#/components/schemas/Bytes' }
+                    sigPubkey: { $ref: '#/components/schemas/Bytes' }
+                    algId: { type: string }
+                    selfSig: { $ref: '#/components/schemas/Bytes' }
+                grants: { type: array, items: { $ref: '#/components/schemas/GroupGrant' } }
+                dekWraps: { type: array, items: { $ref: '#/components/schemas/WrappedKey' } }
+      responses:
+        '204': { description: 'Rotation committed.' }
+        '404': { $ref: '#/components/responses/Problem' }
+        '409': { $ref: '#/components/responses/Problem' }
+
+  # ---------------------------------------------------------------- sync (06 §6.3)
+  /sync/manifest:
+    get:
+      tags: [sync]
+      summary: Full per-project manifest
+      parameters:
+        - { name: projectId, in: query, required: true, schema: { type: string, format: uuid } }
+        - { $ref: '#/components/parameters/Cursor' }
+        - { name: limit, in: query, schema: { type: integer, minimum: 1, maximum: 1000, default: 500 } }
+      responses:
+        '200':
+          description: Manifest page.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Manifest' }
+        '404': { $ref: '#/components/responses/Problem' }
+  /sync/changes:
+    post:
+      tags: [sync]
+      summary: Delta sync; localChanges carry structure edits only
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [projectId, since]
+              properties:
+                projectId: { $ref: '#/components/schemas/Uuid' }
+                since: { type: [string, 'null'] }
+                limit: { type: integer, minimum: 1, maximum: 1000, default: 500 }
+                localChanges: { type: array, maxItems: 200, items: { $ref: '#/components/schemas/LocalChange' } }
+      responses:
+        '200':
+          description: Results and server changes.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [results, serverChanges, nextCursor, hasMore]
+                properties:
+                  results: { type: array, items: { $ref: '#/components/schemas/LocalChangeResult' } }
+                  serverChanges: { type: array, items: { $ref: '#/components/schemas/ServerChange' } }
+                  nextCursor: { type: string }
+                  hasMore: { type: boolean }
+        '404': { $ref: '#/components/responses/Problem' }
+        '410': { $ref: '#/components/responses/Problem' }
+
+  # ---------------------------------------------------------------- admin (12)
+  /admin/users:
+    get:
+      tags: [admin]
+      summary: List users (identity, usage, status, quota)
+      parameters:
+        - { $ref: '#/components/parameters/Cursor' }
+        - { $ref: '#/components/parameters/Limit' }
+        - { name: q, in: query, schema: { type: string }, description: 'prefix match on email or display name' }
+        - { name: status, in: query, schema: { type: string, enum: [active, blocked] } }
+        - { name: role, in: query, schema: { type: string, enum: [user, admin] } }
+        - { name: sort, in: query, schema: { type: string, enum: [email, created_at, usage_bytes], default: email } }
+        - { name: order, in: query, schema: { type: string, enum: [asc, desc], default: asc } }
+      responses:
+        '200':
+          description: Page of users.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items, nextCursor]
+                properties:
+                  items: { type: array, items: { $ref: '#/components/schemas/AdminUser' } }
+                  nextCursor: { type: [string, 'null'] }
+        '403': { $ref: '#/components/responses/Problem' }
+  /admin/users/{id}:
+    parameters: [{ $ref: '#/components/parameters/Id' }]
+    get:
+      tags: [admin]
+      summary: User detail (usage, devices, key generations, memberships)
+      responses:
+        '200':
+          description: User.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AdminUserDetail' }
+        '404': { $ref: '#/components/responses/Problem' }
+    patch:
+      tags: [admin]
+      summary: Role, groups, quota, status
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/AdminUserPatch' }
+      responses:
+        '200':
+          description: Updated.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AdminUser' }
+        '403': { $ref: '#/components/responses/Problem' }
+        '404': { $ref: '#/components/responses/Problem' }
+  /admin/users/bulk:
+    post:
+      tags: [admin]
+      summary: Apply one patch to many users
+      parameters: [{ $ref: '#/components/parameters/IdempotencyKey' }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [userIds, patch]
+              properties:
+                userIds: { type: array, maxItems: 1000, items: { $ref: '#/components/schemas/Uuid' } }
+                patch: { $ref: '#/components/schemas/AdminUserPatch' }
+      responses:
+        '200':
+          description: Result per user.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [results]
+                properties:
+                  results:
+                    type: array
+                    items:
+                      type: object
+                      required: [userId, status]
+                      properties:
+                        userId: { $ref: '#/components/schemas/Uuid' }
+                        status: { type: string, enum: [applied, rejected] }
+                        error: { type: [string, 'null'] }
+  /admin/users/import:
+    post:
+      tags: [admin]
+      summary: CSV import (12 §12.2 format)
+      parameters:
+        - { $ref: '#/components/parameters/IdempotencyKey' }
+        - { name: dryRun, in: query, schema: { type: boolean, default: false } }
+      requestBody:
+        required: true
+        content:
+          text/csv:
+            schema: { type: string }
+      responses:
+        '200':
+          description: Import report.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [created, updated, failed, rows]
+                properties:
+                  created: { type: integer }
+                  updated: { type: integer }
+                  failed: { type: integer }
+                  rows:
+                    type: array
+                    items:
+                      type: object
+                      required: [line, status]
+                      properties:
+                        line: { type: integer }
+                        email: { type: string }
+                        status: { type: string, enum: [created, updated, unchanged, failed] }
+                        error: { type: [string, 'null'] }
+        '400': { $ref: '#/components/responses/Problem' }
+  /admin/users/export:
+    get:
+      tags: [admin]
+      summary: CSV export (12 §12.2 format)
+      responses:
+        '200':
+          description: CSV.
+          content:
+            text/csv:
+              schema: { type: string }
+  /admin/users/{id}/sessions:
+    parameters: [{ $ref: '#/components/parameters/Id' }]
+    get:
+      tags: [admin]
+      summary: Active sessions of a user
+      responses:
+        '200':
+          description: Sessions.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items: { type: array, items: { $ref: '#/components/schemas/Session' } }
+        '404': { $ref: '#/components/responses/Problem' }
+  /admin/users/{id}/sessions/{sid}:
+    parameters:
+      - { $ref: '#/components/parameters/Id' }
+      - { name: sid, in: path, required: true, schema: { type: string, format: uuid } }
+    delete:
+      tags: [admin]
+      summary: Force-logout one session
+      responses:
+        '204': { description: 'Revoked.' }
+        '404': { $ref: '#/components/responses/Problem' }
+  /admin/users/{id}/devices/{deviceId}/revoke:
+    parameters:
+      - { $ref: '#/components/parameters/Id' }
+      - { name: deviceId, in: path, required: true, schema: { type: string, format: uuid } }
+    post:
+      tags: [admin]
+      summary: Administratively revoke a device
+      responses:
+        '204': { description: 'Revoked.' }
+        '404': { $ref: '#/components/responses/Problem' }
+  /admin/instance:
+    get:
+      tags: [admin]
+      summary: Instance health (storage, DB, blob store, relay, key directory, KT log)
+      responses:
+        '200':
+          description: Status.
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties:
+                  type: object
+                  required: [status]
+                  properties:
+                    status: { type: string, enum: [ok, degraded, down] }
+                    detail: { type: object, additionalProperties: true }
+  /admin/instance/config:
+    get:
+      tags: [admin]
+      summary: Effective non-secret configuration
+      responses:
+        '200':
+          description: Key/value map; secret keys are omitted, never masked.
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+  /admin/license:
+    get:
+      tags: [admin]
+      summary: Read-only license / entitlement status (12 §12.8)
+      responses:
+        '200':
+          description: License status.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/LicenseStatus' }
+  /admin/permissions:
+    get:
+      tags: [admin]
+      summary: System-defined permission catalog
+      responses:
+        '200':
+          description: Permissions.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items: { type: array, items: { $ref: '#/components/schemas/PermissionDef' } }
+  /admin/roles:
+    get:
+      tags: [admin]
+      summary: List roles
+      responses:
+        '200':
+          description: Roles.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items: { type: array, items: { $ref: '#/components/schemas/Role' } }
+    post:
+      tags: [admin]
+      summary: Create a custom role
+      parameters: [{ $ref: '#/components/parameters/IdempotencyKey' }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/RoleWrite' }
+      responses:
+        '201':
+          description: Created.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Role' }
+        '400': { $ref: '#/components/responses/Problem' }
+        '403': { $ref: '#/components/responses/Problem' }
+  /admin/roles/{id}:
+    parameters: [{ $ref: '#/components/parameters/Id' }]
+    get:
+      tags: [admin]
+      summary: Get a role
+      responses:
+        '200':
+          description: Role.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Role' }
+        '404': { $ref: '#/components/responses/Problem' }
+    patch:
+      tags: [admin]
+      summary: Edit a custom role (presets are read-only)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/RoleWrite' }
+      responses:
+        '200':
+          description: Updated.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Role' }
+        '404': { $ref: '#/components/responses/Problem' }
+    delete:
+      tags: [admin]
+      summary: Delete a custom role
+      responses:
+        '204': { description: 'Deleted.' }
+        '404': { $ref: '#/components/responses/Problem' }
+  /admin/groups:
+    get:
+      tags: [admin]
+      summary: List RBAC and file-sharing groups
+      parameters: [{ $ref: '#/components/parameters/Cursor' }, { $ref: '#/components/parameters/Limit' }]
+      responses:
+        '200':
+          description: Page of groups.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items, nextCursor]
+                properties:
+                  items: { type: array, items: { $ref: '#/components/schemas/AdminGroup' } }
+                  nextCursor: { type: [string, 'null'] }
+    post:
+      tags: [admin]
+      summary: Create an RBAC group
+      parameters: [{ $ref: '#/components/parameters/IdempotencyKey' }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/AdminGroupWrite' }
+      responses:
+        '201':
+          description: Created.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AdminGroup' }
+  /admin/groups/{id}:
+    parameters: [{ $ref: '#/components/parameters/Id' }]
+    get:
+      tags: [admin]
+      summary: Get a group
+      responses:
+        '200':
+          description: Group.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AdminGroup' }
+        '404': { $ref: '#/components/responses/Problem' }
+    patch:
+      tags: [admin]
+      summary: Edit a group; sets max_members on file-sharing groups (ent.admin_overrides)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/AdminGroupWrite' }
+      responses:
+        '200':
+          description: Updated.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AdminGroup' }
+        '403': { $ref: '#/components/responses/Problem' }
+        '404': { $ref: '#/components/responses/Problem' }
+    delete:
+      tags: [admin]
+      summary: Delete an RBAC group
+      responses:
+        '204': { description: 'Deleted.' }
+        '404': { $ref: '#/components/responses/Problem' }
+  /admin/groups/{id}/members:
+    parameters: [{ $ref: '#/components/parameters/Id' }]
+    post:
+      tags: [admin]
+      summary: Add RBAC group members (bulk)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/UserIdList' }
+      responses:
+        '204': { description: 'Added.' }
+        '404': { $ref: '#/components/responses/Problem' }
+    delete:
+      tags: [admin]
+      summary: Remove RBAC group members (bulk)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/UserIdList' }
+      responses:
+        '204': { description: 'Removed.' }
+        '404': { $ref: '#/components/responses/Problem' }
+  /admin/projects:
+    get:
+      tags: [admin]
+      summary: All projects by opaque id (names are ciphertext)
+      parameters: [{ $ref: '#/components/parameters/Cursor' }, { $ref: '#/components/parameters/Limit' }]
+      responses:
+        '200':
+          description: Page.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items, nextCursor]
+                properties:
+                  items:
+                    type: array
+                    items:
+                      type: object
+                      required: [id, ownerId, sizeCipherBytes, fileCount, createdAt]
+                      properties:
+                        id: { $ref: '#/components/schemas/Uuid' }
+                        ownerId: { $ref: '#/components/schemas/Uuid' }
+                        sizeCipherBytes: { type: integer, format: int64 }
+                        fileCount: { type: integer }
+                        createdAt: { type: string, format: date-time }
+                        deletedAt: { type: [string, 'null'], format: date-time }
+                  nextCursor: { type: [string, 'null'] }
+  /admin/files:
+    get:
+      tags: [admin]
+      summary: File records (no names, no content)
+      parameters:
+        - { $ref: '#/components/parameters/Cursor' }
+        - { $ref: '#/components/parameters/Limit' }
+        - { name: projectId, in: query, schema: { type: string, format: uuid } }
+      responses:
+        '200':
+          description: Page.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items, nextCursor]
+                properties:
+                  items:
+                    type: array
+                    items:
+                      type: object
+                      required: [id, projectId, contentType, sizeCipher, versionCount]
+                      properties:
+                        id: { $ref: '#/components/schemas/Uuid' }
+                        projectId: { $ref: '#/components/schemas/Uuid' }
+                        contentType: { $ref: '#/components/schemas/ContentType' }
+                        sizeCipher: { type: integer, format: int64 }
+                        versionCount: { type: integer }
+                        deletedAt: { type: [string, 'null'], format: date-time }
+                  nextCursor: { type: [string, 'null'] }
+  /admin/keys/health:
+    get:
+      tags: [admin]
+      summary: Key-directory consistency, orphaned wraps, rotation backlog
+      responses:
+        '200':
+          description: Counters only.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  usersWithoutKeys: { type: integer }
+                  orphanedWrappedKeys: { type: integer }
+                  pendingRotations: { type: integer }
+                  ktTreeSize: { type: integer, format: int64 }
+                  directoryKeysNotInLog: { type: integer, description: 'Must be 0; anything else is an alarm' }
+  /admin/audit:
+    get:
+      tags: [admin]
+      summary: Query the audit log
+      parameters:
+        - { $ref: '#/components/parameters/Cursor' }
+        - { $ref: '#/components/parameters/Limit' }
+        - { name: from, in: query, schema: { type: string, format: date-time } }
+        - { name: to, in: query, schema: { type: string, format: date-time } }
+        - { name: actor, in: query, schema: { type: string, format: uuid } }
+        - { name: action, in: query, schema: { type: string } }
+        - { name: target, in: query, schema: { type: string, format: uuid } }
+      responses:
+        '200':
+          description: Page of rows, newest first.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items, nextCursor]
+                properties:
+                  items: { type: array, items: { $ref: '#/components/schemas/AuditRow' } }
+                  nextCursor: { type: [string, 'null'] }
+  /admin/audit/export:
+    get:
+      tags: [admin]
+      summary: Signed audit bundle (ent.audit_export)
+      parameters:
+        - { name: from, in: query, required: true, schema: { type: string, format: date-time } }
+        - { name: to, in: query, required: true, schema: { type: string, format: date-time } }
+      responses:
+        '200':
+          description: ZIP with rows.ndjson and manifest.json (12 §12.4).
+          content:
+            application/zip:
+              schema: { type: string, contentMediaType: application/zip }
+        '403': { $ref: '#/components/responses/Problem' }
+  /admin/audit/stream:
+    get:
+      tags: [admin]
+      summary: SIEM streaming and retention configuration
+      responses:
+        '200':
+          description: Config.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AuditStreamConfig' }
+    put:
+      tags: [admin]
+      summary: Replace SIEM streaming and retention configuration
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/AuditStreamConfig' }
+      responses:
+        '204': { description: 'Stored.' }
+        '400': { $ref: '#/components/responses/Problem' }
+        '403': { $ref: '#/components/responses/Problem' }
+
+  # ---------------------------------------------------------------- SCIM (12 §12.2)
+  /scim/v2/{resource}:
+    parameters:
+      - { name: resource, in: path, required: true, schema: { type: string, enum: [Users, Groups, ServiceProviderConfig, Schemas, ResourceTypes] } }
+    get:
+      tags: [scim]
+      security: [{ scim: [] }]
+      summary: SCIM 2.0 list / discovery (RFC 7644 subset)
+      responses:
+        '200':
+          description: application/scim+json per RFC 7644.
+          content:
+            application/scim+json:
+              schema: { type: object, additionalProperties: true }
+    post:
+      tags: [scim]
+      security: [{ scim: [] }]
+      summary: Create a SCIM User or Group
+      requestBody:
+        required: true
+        content:
+          application/scim+json:
+            schema: { type: object, additionalProperties: true }
+      responses:
+        '201':
+          description: Created resource.
+          content:
+            application/scim+json:
+              schema: { type: object, additionalProperties: true }
+  /scim/v2/{resource}/{id}:
+    parameters:
+      - { name: resource, in: path, required: true, schema: { type: string, enum: [Users, Groups] } }
+      - { $ref: '#/components/parameters/Id' }
+    get:
+      tags: [scim]
+      security: [{ scim: [] }]
+      summary: Get a SCIM resource
+      responses:
+        '200':
+          description: Resource.
+          content:
+            application/scim+json:
+              schema: { type: object, additionalProperties: true }
+    put:
+      tags: [scim]
+      security: [{ scim: [] }]
+      summary: Replace a SCIM resource
+      requestBody:
+        required: true
+        content:
+          application/scim+json:
+            schema: { type: object, additionalProperties: true }
+      responses:
+        '200':
+          description: Resource.
+          content:
+            application/scim+json:
+              schema: { type: object, additionalProperties: true }
+    patch:
+      tags: [scim]
+      security: [{ scim: [] }]
+      summary: Patch a SCIM resource (PatchOp)
+      requestBody:
+        required: true
+        content:
+          application/scim+json:
+            schema: { type: object, additionalProperties: true }
+      responses:
+        '200':
+          description: Resource.
+          content:
+            application/scim+json:
+              schema: { type: object, additionalProperties: true }
+    delete:
+      tags: [scim]
+      security: [{ scim: [] }]
+      summary: Users are blocked (not purged); Groups are deleted
+      responses:
+        '204': { description: 'Done.' }
+
+  # ---------------------------------------------------------------- public share (04 §4.8), outside /api/v1
+  /share/{token}:
+    servers: [{ url: 'https://{host}', variables: { host: { default: nyxite.example.org } } }]
+    parameters: [{ $ref: '#/components/parameters/ShareToken' }]
+    get:
+      tags: [public-share]
+      security: []
+      summary: Guest bootstrap (serves the guest client; key stays in the URL fragment)
+      responses:
+        '200':
+          description: Guest client HTML.
+          content:
+            text/html:
+              schema: { type: string }
+        '410': { $ref: '#/components/responses/Problem' }
+  /share/{token}/session:
+    servers: [{ url: 'https://{host}', variables: { host: { default: nyxite.example.org } } }]
+    parameters: [{ $ref: '#/components/parameters/ShareToken' }]
+    post:
+      tags: [public-share]
+      security: []
+      summary: Issue or renew a 15-minute guest share-session token (re-checks the share)
+      responses:
+        '200':
+          description: Guest token (JWT typ nyx-guest+jwt).
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [guestToken, expiresAt, permission, targetType, targetId]
+                properties:
+                  guestToken: { type: string }
+                  expiresAt: { type: string, format: date-time }
+                  permission: { $ref: '#/components/schemas/Permission' }
+                  targetType: { $ref: '#/components/schemas/TargetType' }
+                  targetId: { $ref: '#/components/schemas/Uuid' }
+        '410': { $ref: '#/components/responses/Problem' }
+  /share/{token}/blob:
+    servers: [{ url: 'https://{host}', variables: { host: { default: nyxite.example.org } } }]
+    parameters: [{ $ref: '#/components/parameters/ShareToken' }]
+    get:
+      tags: [public-share]
+      security: [{ guest: [] }]
+      summary: Ciphertext of the shared file
+      responses:
+        '200':
+          description: Ciphertext.
+          content:
+            application/octet-stream:
+              schema: { type: string, contentMediaType: application/octet-stream }
+        '410': { $ref: '#/components/responses/Problem' }
+
+  # ---------------------------------------------------------------- support relay (04 §4.9), only when support.enabled
+  /support/reports:
+    post:
+      tags: [support]
+      security: [{ bearer: [] }, { guest: [] }]
+      summary: Authenticated report intake, relayed to NyxiteSupport (stores no ticket)
+      parameters: [{ $ref: '#/components/parameters/IdempotencyKey' }]
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [report]
+              properties:
+                report: { type: string, description: 'JSON report body, schema owned by NyxiteSupport (P4.6-CORE-1)' }
+                screenshots: { type: array, items: { type: string, contentMediaType: image/png } }
+      responses:
+        '202':
+          description: Accepted and relayed.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [ticketId]
+                properties:
+                  ticketId: { type: string }
+        '404': { description: 'Reporting is not enabled on this instance.' }
+        '429': { $ref: '#/components/responses/Problem' }
+  /support/tickets:
+    get:
+      tags: [support]
+      summary: The reporter's own tickets
+      responses:
+        '200':
+          description: Proxied from NyxiteSupport.
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+        '404': { description: 'Reporting is not enabled on this instance.' }
+  /support/tickets/{id}:
+    parameters: [{ name: id, in: path, required: true, schema: { type: string } }]
+    get:
+      tags: [support]
+      summary: One of the reporter's own tickets
+      responses:
+        '200':
+          description: Proxied from NyxiteSupport.
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+        '404': { $ref: '#/components/responses/Problem' }
+  /support/tickets/{id}/replies:
+    parameters: [{ name: id, in: path, required: true, schema: { type: string } }]
+    post:
+      tags: [support]
+      summary: Reporter reply on an own ticket
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [body]
+              properties:
+                body: { type: string, maxLength: 20000 }
+      responses:
+        '202': { description: 'Relayed.' }
+        '404': { $ref: '#/components/responses/Problem' }
+
+  # ---------------------------------------------------------------- ops (14 §14.5), outside /api/v1
+  /health/live:
+    servers: [{ url: 'https://{host}', variables: { host: { default: nyxite.example.org } } }]
+    get:
+      tags: [ops]
+      security: []
+      summary: Liveness
+      responses:
+        '200': { description: 'Alive.' }
+  /health/ready:
+    servers: [{ url: 'https://{host}', variables: { host: { default: nyxite.example.org } } }]
+    get:
+      tags: [ops]
+      security: []
+      summary: Readiness (dependencies healthy)
+      responses:
+        '200': { description: 'Ready.' }
+        '503': { description: 'Not ready.' }
+
+components:
+  securitySchemes:
+    bearer:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: Server-issued access token, JWT HS256, typ at+jwt, ~5 min (08 §8.2).
+    guest:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: Guest share-session token, JWT HS256, typ nyx-guest+jwt, 15 min (08 §8.2).
+    scim:
+      type: http
+      scheme: bearer
+      description: NYXITE__Scim__Token (enterprise profile only).
+
+  parameters:
+    Id:
+      name: id
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+    Seq:
+      name: seq
+      in: path
+      required: true
+      schema: { type: integer, format: int64, minimum: 1 }
+    ShareToken:
+      name: token
+      in: path
+      required: true
+      schema: { type: string }
+    Cursor:
+      name: cursor
+      in: query
+      schema: { type: string }
+      description: Opaque base64url cursor; never parse it.
+    Limit:
+      name: limit
+      in: query
+      schema: { type: integer, minimum: 1, maximum: 200, default: 50 }
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: true
+      schema: { type: string, minLength: 8, maxLength: 128 }
+      description: Stored 24 h scoped to (user, endpoint); same key with a different body gives 409 idempotency_conflict.
+
+  responses:
+    Problem:
+      description: RFC 9457 problem (codes in 04 §4.4).
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/Problem' }
+
+  schemas:
+    Uuid: { type: string, format: uuid }
+    NullableUuid: { type: [string, 'null'], format: uuid }
+    Bytes:
+      type: string
+      contentEncoding: base64url
+      pattern: '^[A-Za-z0-9_-]*$'
+      description: Binary value, base64url without padding.
+    ContentType: { type: string, enum: [markdown, plaintext, sourcecode, ink, office, image, binary] }
+    SyncPolicy: { type: string, enum: [server-default, excluded] }
+    Permission: { type: string, enum: [read, write] }
+    TargetType: { type: string, enum: [file, folder, project] }
+
+    Problem:
+      type: object
+      required: [type, title, status, code]
+      properties:
+        type: { type: string }
+        title: { type: string }
+        status: { type: integer }
+        code:
+          type: string
+          enum:
+            - validation_failed
+            - bad_sync_policy
+            - unauthenticated
+            - token_expired
+            - acl_denied
+            - 2fa_required
+            - pairing_code_invalid
+            - not_found
+            - conflict
+            - version_conflict
+            - excluded_content
+            - address_exists
+            - idempotency_conflict
+            - group_full
+            - key_not_transparent
+            - share_revoked
+            - link_expired
+            - pairing_expired
+            - cursor_expired
+            - key_generation_stale
+            - payload_too_large
+            - insufficient_storage
+            - license_readonly
+            - rate_limited
+            - internal
+            - unavailable
+        detail: { type: string }
+        instance: { type: string }
+    ConflictProblem:
+      allOf:
+        - $ref: '#/components/schemas/Problem'
+        - type: object
+          properties:
+            winner: { $ref: '#/components/schemas/Version' }
+            sibling: { $ref: '#/components/schemas/Version' }
+
+    TokenPair:
+      type: object
+      required: [accessToken, refreshToken, accessTokenExpiresAt]
+      properties:
+        accessToken: { type: string }
+        refreshToken: { type: string }
+        accessTokenExpiresAt: { type: string, format: date-time }
+    Me:
+      type: object
+      required: [id, email, displayName, role, status, usageBytes, capabilities]
+      properties:
+        id: { $ref: '#/components/schemas/Uuid' }
+        email: { type: string, format: email }
+        displayName: { type: string }
+        role: { type: string, enum: [user, admin] }
+        status: { type: string, enum: [active, blocked] }
+        storageQuotaBytes: { type: [integer, 'null'], format: int64 }
+        usageBytes: { type: integer, format: int64 }
+        capabilities:
+          type: object
+          required: [support, enterpriseFlags, licenseState]
+          properties:
+            support: { type: boolean, description: 'support.enabled (14 §14.9)' }
+            enterpriseFlags: { type: array, items: { type: string }, description: 'ent.* flags active on this instance (16 §16.5)' }
+            licenseState: { type: string, enum: [community, in_lease, degraded, readonly] }
+    Settings:
+      type: object
+      required: [settingsEnc]
+      properties:
+        settingsEnc: { $ref: '#/components/schemas/Bytes' }
+
+    Project:
+      type: object
+      required: [id, ownerId, nameEnc, syncPolicy, createdAt, updatedAt]
+      properties:
+        id: { $ref: '#/components/schemas/Uuid' }
+        ownerId: { $ref: '#/components/schemas/Uuid' }
+        nameEnc: { $ref: '#/components/schemas/Bytes' }
+        syncPolicy: { $ref: '#/components/schemas/SyncPolicy' }
+        readerGroupAttachment: { oneOf: [{ $ref: '#/components/schemas/Bytes' }, { type: 'null' }] }
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+        deletedAt: { type: [string, 'null'], format: date-time }
+    ProjectPage:
+      type: object
+      required: [items, nextCursor]
+      properties:
+        items: { type: array, items: { $ref: '#/components/schemas/Project' } }
+        nextCursor: { type: [string, 'null'] }
+    Folder:
+      type: object
+      required: [id, projectId, parentFolderId, nameEnc, createdAt, updatedAt]
+      properties:
+        id: { $ref: '#/components/schemas/Uuid' }
+        projectId: { $ref: '#/components/schemas/Uuid' }
+        parentFolderId: { $ref: '#/components/schemas/NullableUuid' }
+        nameEnc: { $ref: '#/components/schemas/Bytes' }
+        syncPolicy: { $ref: '#/components/schemas/SyncPolicy' }
+        readerGroupAttachment: { oneOf: [{ $ref: '#/components/schemas/Bytes' }, { type: 'null' }] }
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+        deletedAt: { type: [string, 'null'], format: date-time }
+    FolderPage:
+      type: object
+      required: [items, nextCursor]
+      properties:
+        items: { type: array, items: { $ref: '#/components/schemas/Folder' } }
+        nextCursor: { type: [string, 'null'] }
+    File:
+      type: object
+      required: [id, projectId, folderId, ownerId, nameEnc, contentType, syncPolicy, keyGeneration, createdAt, updatedAt]
+      properties:
+        id: { $ref: '#/components/schemas/Uuid' }
+        projectId: { $ref: '#/components/schemas/Uuid' }
+        folderId: { $ref: '#/components/schemas/NullableUuid' }
+        ownerId: { $ref: '#/components/schemas/Uuid' }
+        nameEnc: { $ref: '#/components/schemas/Bytes' }
+        metadataEnc: { oneOf: [{ $ref: '#/components/schemas/Bytes' }, { type: 'null' }] }
+        contentType: { $ref: '#/components/schemas/ContentType' }
+        syncPolicy: { $ref: '#/components/schemas/SyncPolicy' }
+        currentVersionSeq: { type: [integer, 'null'], format: int64 }
+        crdtDocId: { $ref: '#/components/schemas/NullableUuid' }
+        keyGeneration: { type: integer }
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+        deletedAt: { type: [string, 'null'], format: date-time }
+    FilePage:
+      type: object
+      required: [items, nextCursor]
+      properties:
+        items: { type: array, items: { $ref: '#/components/schemas/File' } }
+        nextCursor: { type: [string, 'null'] }
+    CreateFileRequest:
+      type: object
+      required: [projectId, nameEnc, contentType, ownerWrappedKey]
+      properties:
+        projectId: { $ref: '#/components/schemas/Uuid' }
+        folderId: { $ref: '#/components/schemas/NullableUuid' }
+        nameEnc: { $ref: '#/components/schemas/Bytes' }
+        contentType: { $ref: '#/components/schemas/ContentType' }
+        syncPolicy: { $ref: '#/components/schemas/SyncPolicy' }
+        metadataEnc: { $ref: '#/components/schemas/Bytes' }
+        crdtDocId: { $ref: '#/components/schemas/NullableUuid', description: 'Required for markdown/plaintext/sourcecode, null otherwise' }
+        ownerWrappedKey: { $ref: '#/components/schemas/WrappedKey' }
+        readerGroupWraps: { type: array, items: { $ref: '#/components/schemas/WrappedKey' }, description: 'Auto-wraps to a reader group (09 §9.9)' }
+
+    Version:
+      type: object
+      required: [seq, contentHash, layout, sizeCipher, keyId, isHead, createdAt]
+      properties:
+        seq: { type: integer, format: int64 }
+        contentHash: { $ref: '#/components/schemas/Bytes' }
+        layout: { type: string, enum: [single, chunked] }
+        sizeCipher: { type: integer, format: int64 }
+        keyId: { $ref: '#/components/schemas/Uuid' }
+        isHead: { type: boolean }
+        authorId: { $ref: '#/components/schemas/NullableUuid' }
+        restoredFromSeq: { type: [integer, 'null'], format: int64 }
+        createdAt: { type: string, format: date-time }
+    CrdtUpdate:
+      type: object
+      required: [seq, keyId, updateEnc, createdAt]
+      properties:
+        seq: { type: integer, format: int64 }
+        keyId: { $ref: '#/components/schemas/Uuid' }
+        updateEnc: { $ref: '#/components/schemas/Bytes' }
+        authorId: { $ref: '#/components/schemas/NullableUuid' }
+        createdAt: { type: string, format: date-time }
+
+    WrappedKey:
+      type: object
+      required: [keyId, ciphertext, generation]
+      properties:
+        keyId: { $ref: '#/components/schemas/Uuid' }
+        fileId: { $ref: '#/components/schemas/Uuid' }
+        memberId: { $ref: '#/components/schemas/NullableUuid' }
+        groupId: { $ref: '#/components/schemas/NullableUuid' }
+        scopeId: { $ref: '#/components/schemas/NullableUuid' }
+        ciphertext: { $ref: '#/components/schemas/Bytes' }
+        generation: { type: integer }
+        algId: { type: string }
+    DirectoryKey:
+      type: object
+      required: [keyId, generation, algId, kemPub, sigPub, selfSig, loggedAt, ktLeafIndex, revoked]
+      properties:
+        keyId: { $ref: '#/components/schemas/Uuid' }
+        generation: { type: integer }
+        algId: { type: string }
+        kemPub: { $ref: '#/components/schemas/Bytes' }
+        sigPub: { $ref: '#/components/schemas/Bytes' }
+        selfSig: { $ref: '#/components/schemas/Bytes' }
+        loggedAt: { type: string, format: date-time, description: 'logged_at of the KT leaf (17 §17.3), millisecond precision' }
+        ktLeafIndex: { type: integer, format: int64 }
+        revoked: { type: boolean }
+    Device:
+      type: object
+      required: [id, label, status, enrolledAt]
+      properties:
+        id: { $ref: '#/components/schemas/Uuid' }
+        label: { type: [string, 'null'] }
+        status: { type: string, enum: [pending, active, revoked] }
+        pubkeyFingerprint: { $ref: '#/components/schemas/Bytes' }
+        enrolledAt: { type: string, format: date-time }
+        revokedAt: { type: [string, 'null'], format: date-time }
+    RecoveryBlob:
+      type: object
+      required: [version, kdf, nonce, ciphertext, tag]
+      properties:
+        version: { type: integer, minimum: 1 }
+        kdf:
+          type: object
+          required: [alg, m, t, p, salt]
+          properties:
+            alg: { type: string, const: argon2id }
+            m: { type: integer }
+            t: { type: integer }
+            p: { type: integer }
+            salt: { $ref: '#/components/schemas/Bytes' }
+        nonce: { $ref: '#/components/schemas/Bytes' }
+        ciphertext: { $ref: '#/components/schemas/Bytes' }
+        tag: { $ref: '#/components/schemas/Bytes' }
+
+    Share:
+      type: object
+      required: [id, targetType, targetId, kind, permission, createdAt]
+      properties:
+        id: { $ref: '#/components/schemas/Uuid' }
+        targetType: { $ref: '#/components/schemas/TargetType' }
+        targetId: { $ref: '#/components/schemas/Uuid' }
+        kind: { type: string, enum: [user_grant, link] }
+        granteeId: { $ref: '#/components/schemas/NullableUuid' }
+        permission: { $ref: '#/components/schemas/Permission' }
+        expiresAt: { type: [string, 'null'], format: date-time }
+        createdAt: { type: string, format: date-time }
+    CreateShareRequest:
+      type: object
+      required: [targetType, targetId, kind, permission]
+      properties:
+        targetType: { $ref: '#/components/schemas/TargetType' }
+        targetId: { $ref: '#/components/schemas/Uuid' }
+        kind: { type: string, enum: [user_grant, link] }
+        granteeId: { $ref: '#/components/schemas/NullableUuid' }
+        permission: { $ref: '#/components/schemas/Permission' }
+        wrappedKeys: { type: array, items: { $ref: '#/components/schemas/WrappedKey' } }
+        linkTokenHash: { $ref: '#/components/schemas/Bytes' }
+        expiresAt: { type: [string, 'null'], format: date-time }
+
+    Group:
+      type: object
+      required: [id, groupPubkey, ed25519Pubkey, groupKeyId, scopeKind, memberCount, createdAt]
+      properties:
+        id: { $ref: '#/components/schemas/Uuid' }
+        groupPubkey: { $ref: '#/components/schemas/Bytes' }
+        ed25519Pubkey: { $ref: '#/components/schemas/Bytes' }
+        groupKeyId: { $ref: '#/components/schemas/Uuid' }
+        scopeKind: { type: string, enum: [project, time_period] }
+        maxMembers: { type: [integer, 'null'] }
+        memberCount: { type: integer }
+        createdAt: { type: string, format: date-time }
+    GroupScopeKey:
+      type: object
+      required: [keyId, generation, groupPubkey, sigPubkey, algId, selfSig, loggedAt, ktLeafIndex]
+      properties:
+        keyId: { $ref: '#/components/schemas/Uuid' }
+        generation: { type: integer }
+        groupPubkey: { $ref: '#/components/schemas/Bytes' }
+        sigPubkey: { $ref: '#/components/schemas/Bytes' }
+        algId: { type: string }
+        selfSig: { $ref: '#/components/schemas/Bytes' }
+        loggedAt: { type: string, format: date-time }
+        ktLeafIndex: { type: integer, format: int64 }
+    GroupGrant:
+      type: object
+      required: [memberId, wrappedGroupPrivkey, algId]
+      properties:
+        memberId: { $ref: '#/components/schemas/Uuid' }
+        memberKeyId: { $ref: '#/components/schemas/Uuid' }
+        wrappedGroupPrivkey: { $ref: '#/components/schemas/Bytes' }
+        generation: { type: integer }
+        algId: { type: string }
+
+    Manifest:
+      type: object
+      required: [projectId, syncCursor, items, nextCursor]
+      properties:
+        projectId: { $ref: '#/components/schemas/Uuid' }
+        syncCursor: { type: string }
+        items:
+          type: array
+          items:
+            type: object
+            required: [fileId, folderId, contentType, syncPolicy, layout, sizeCipher, keyId, keyGeneration, updatedAt]
+            properties:
+              fileId: { $ref: '#/components/schemas/Uuid' }
+              folderId: { $ref: '#/components/schemas/NullableUuid' }
+              contentType: { $ref: '#/components/schemas/ContentType' }
+              syncPolicy: { $ref: '#/components/schemas/SyncPolicy' }
+              currentVersionSeq: { type: [integer, 'null'], format: int64 }
+              contentHash: { oneOf: [{ $ref: '#/components/schemas/Bytes' }, { type: 'null' }] }
+              layout: { type: string, enum: [single, chunked] }
+              sizeCipher: { type: integer, format: int64 }
+              keyId: { $ref: '#/components/schemas/Uuid' }
+              keyGeneration: { type: integer }
+              crdtHeadSeq: { type: [integer, 'null'], format: int64 }
+              updatedAt: { type: string, format: date-time }
+              deletedAt: { type: [string, 'null'], format: date-time }
+        nextCursor: { type: [string, 'null'] }
+    LocalChange:
+      type: object
+      required: [clientChangeId, kind, ref]
+      properties:
+        clientChangeId: { $ref: '#/components/schemas/Uuid' }
+        kind: { type: string, enum: [structure, delete] }
+        ref:
+          oneOf:
+            - $ref: '#/components/schemas/StructureRef'
+            - $ref: '#/components/schemas/DeleteRef'
+    StructureRef:
+      type: object
+      required: [entity, id, op]
+      properties:
+        entity: { type: string, enum: [project, folder, file] }
+        id: { $ref: '#/components/schemas/Uuid' }
+        op: { type: string, enum: [create, update] }
+        parentFolderId: { $ref: '#/components/schemas/NullableUuid' }
+        contentType: { $ref: '#/components/schemas/ContentType' }
+        nameEnc: { $ref: '#/components/schemas/Bytes' }
+        metadataEnc: { $ref: '#/components/schemas/Bytes' }
+        syncPolicy: { $ref: '#/components/schemas/SyncPolicy' }
+    DeleteRef:
+      type: object
+      required: [entity, id]
+      properties:
+        entity: { type: string, enum: [project, folder, file] }
+        id: { $ref: '#/components/schemas/Uuid' }
+    LocalChangeResult:
+      type: object
+      required: [clientChangeId, status, error]
+      properties:
+        clientChangeId: { $ref: '#/components/schemas/Uuid' }
+        status: { type: string, enum: [applied, rejected] }
+        error: { type: [string, 'null'] }
+    ServerChange:
+      type: object
+      required: [seq, at, kind, ref]
+      properties:
+        seq: { type: integer, format: int64 }
+        at: { type: string, format: date-time }
+        kind: { type: string, enum: [structure, blob, crdt, delete, keyrotate] }
+        ref:
+          oneOf:
+            - type: object
+              title: StructureChange
+              required: [entity, id, parentFolderId, nameEnc, updatedAt]
+              properties:
+                entity: { type: string, enum: [project, folder, file] }
+                id: { $ref: '#/components/schemas/Uuid' }
+                parentFolderId: { $ref: '#/components/schemas/NullableUuid' }
+                contentType: { $ref: '#/components/schemas/ContentType' }
+                nameEnc: { $ref: '#/components/schemas/Bytes' }
+                metadataEnc: { oneOf: [{ $ref: '#/components/schemas/Bytes' }, { type: 'null' }] }
+                syncPolicy: { $ref: '#/components/schemas/SyncPolicy' }
+                updatedAt: { type: string, format: date-time }
+            - type: object
+              title: BlobChange
+              required: [fileId, seq, contentHash, layout, sizeCipher, keyId, isHead, url]
+              properties:
+                fileId: { $ref: '#/components/schemas/Uuid' }
+                seq: { type: integer, format: int64 }
+                contentHash: { $ref: '#/components/schemas/Bytes' }
+                layout: { type: string, enum: [single, chunked] }
+                sizeCipher: { type: integer, format: int64 }
+                keyId: { $ref: '#/components/schemas/Uuid' }
+                isHead: { type: boolean }
+                url: { type: string }
+            - type: object
+              title: CrdtChange
+              required: [fileId, fromSeq, toSeq]
+              properties:
+                fileId: { $ref: '#/components/schemas/Uuid' }
+                fromSeq: { type: integer, format: int64 }
+                toSeq: { type: integer, format: int64 }
+            - type: object
+              title: DeleteChange
+              required: [entity, id, deletedAt, reason]
+              properties:
+                entity: { type: string, enum: [project, folder, file] }
+                id: { $ref: '#/components/schemas/Uuid' }
+                deletedAt: { type: string, format: date-time }
+                reason: { type: string, enum: [deleted, purged, access_revoked] }
+            - type: object
+              title: KeyRotateChange
+              required: [fileId, keyId, generation]
+              properties:
+                fileId: { $ref: '#/components/schemas/Uuid' }
+                keyId: { $ref: '#/components/schemas/Uuid' }
+                generation: { type: integer }
+
+    AdminUser:
+      type: object
+      required: [id, email, displayName, role, status, usageBytes, createdAt]
+      properties:
+        id: { $ref: '#/components/schemas/Uuid' }
+        email: { type: string, format: email }
+        displayName: { type: string }
+        role: { type: string, enum: [user, admin] }
+        status: { type: string, enum: [active, blocked] }
+        storageQuotaBytes: { type: [integer, 'null'], format: int64 }
+        usageBytes: { type: integer, format: int64 }
+        externalIdp: { type: [string, 'null'] }
+        createdAt: { type: string, format: date-time }
+        lastSeenAt: { type: [string, 'null'], format: date-time }
+    AdminUserDetail:
+      allOf:
+        - $ref: '#/components/schemas/AdminUser'
+        - type: object
+          properties:
+            devices: { type: array, items: { $ref: '#/components/schemas/Device' } }
+            keyGenerations: { type: array, items: { type: integer } }
+            roleIds: { type: array, items: { $ref: '#/components/schemas/Uuid' } }
+            groupIds: { type: array, items: { $ref: '#/components/schemas/Uuid' } }
+            projectCount: { type: integer }
+            fileCount: { type: integer }
+    AdminUserPatch:
+      type: object
+      properties:
+        role: { type: string, enum: [user, admin] }
+        status: { type: string, enum: [active, blocked] }
+        storageQuotaBytes: { type: [integer, 'null'], format: int64 }
+        roleIds: { type: array, items: { $ref: '#/components/schemas/Uuid' } }
+        groupIds: { type: array, items: { $ref: '#/components/schemas/Uuid' } }
+    Session:
+      type: object
+      required: [id, clientKind, authMethod, createdAt, lastSeenAt, expiresAt]
+      properties:
+        id: { $ref: '#/components/schemas/Uuid' }
+        deviceId: { $ref: '#/components/schemas/NullableUuid' }
+        clientKind: { type: string, enum: [desktop, android, web, admin] }
+        authMethod: { type: string, enum: [password_totp, passkey, oidc] }
+        createdAt: { type: string, format: date-time }
+        lastSeenAt: { type: string, format: date-time }
+        expiresAt: { type: string, format: date-time }
+        lastIp: { type: [string, 'null'] }
+        userAgent: { type: [string, 'null'] }
+    LicenseStatus:
+      type: object
+      required: [mode, state, enterpriseFlags]
+      properties:
+        mode: { type: string, enum: [community, licensed] }
+        tier: { type: [string, 'null'] }
+        email: { type: [string, 'null'] }
+        registered: { type: boolean }
+        active: { type: boolean }
+        leaseExp: { type: [string, 'null'], format: date-time }
+        entitlementExp: { type: [string, 'null'], format: date-time }
+        state: { type: string, enum: [community, in_lease, degraded, readonly] }
+        enterpriseFlags: { type: array, items: { type: string } }
+    PermissionDef:
+      type: object
+      required: [key, description, scopeKinds]
+      properties:
+        key: { type: string, description: 'Stable code-enforced key, e.g. user:block' }
+        description: { type: string }
+        scopeKinds: { type: array, items: { type: string, enum: [instance, project, group, user] } }
+    Role:
+      type: object
+      required: [id, name, preset, permissions]
+      properties:
+        id: { $ref: '#/components/schemas/Uuid' }
+        name: { type: string }
+        preset: { type: boolean }
+        permissions:
+          type: array
+          items:
+            type: object
+            required: [key]
+            properties:
+              key: { type: string }
+              scope: { type: [object, 'null'], additionalProperties: true, description: 'Target-aware scope (12 §12.6)' }
+    RoleWrite:
+      type: object
+      required: [name, permissions]
+      properties:
+        name: { type: string }
+        permissions:
+          type: array
+          items:
+            type: object
+            required: [key]
+            properties:
+              key: { type: string }
+              scope: { type: [object, 'null'], additionalProperties: true }
+    AdminGroup:
+      type: object
+      required: [id, name, kind, memberCount]
+      properties:
+        id: { $ref: '#/components/schemas/Uuid' }
+        name: { type: string }
+        description: { type: [string, 'null'] }
+        kind: { type: string, enum: [rbac, file_sharing] }
+        roleIds: { type: array, items: { $ref: '#/components/schemas/Uuid' } }
+        memberCount: { type: integer }
+        maxMembers: { type: [integer, 'null'] }
+    AdminGroupWrite:
+      type: object
+      properties:
+        name: { type: string }
+        description: { type: [string, 'null'] }
+        roleIds: { type: array, items: { $ref: '#/components/schemas/Uuid' } }
+        maxMembers: { type: [integer, 'null'], minimum: 1 }
+    UserIdList:
+      type: object
+      required: [userIds]
+      properties:
+        userIds: { type: array, maxItems: 1000, items: { $ref: '#/components/schemas/Uuid' } }
+    AuditRow:
+      type: object
+      required: [id, occurredAt, actorKind, action, detail]
+      properties:
+        id: { type: integer, format: int64 }
+        occurredAt: { type: string, format: date-time }
+        actorId: { $ref: '#/components/schemas/NullableUuid' }
+        actorKind: { type: string, enum: [user, admin, guest, system] }
+        action: { type: string }
+        targetType: { type: [string, 'null'] }
+        targetId: { $ref: '#/components/schemas/NullableUuid' }
+        detail: { type: object, additionalProperties: true }
+        ip: { type: [string, 'null'] }
+        userAgent: { type: [string, 'null'] }
+    AuditStreamConfig:
+      type: object
+      required: [retentionDays, sinks]
+      properties:
+        retentionDays: { type: integer, minimum: 1 }
+        sinks:
+          type: array
+          items:
+            type: object
+            required: [kind, enabled]
+            properties:
+              kind: { type: string, enum: [syslog, webhook] }
+              enabled: { type: boolean }
+              target: { type: string, description: 'syslog host:port or webhook URL' }
+              format: { type: string, enum: [json, cef], default: json }

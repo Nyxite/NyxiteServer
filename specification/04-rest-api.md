@@ -11,7 +11,8 @@
 - **Pagination:** query `?cursor=<opaque>&limit=<n>` (default `50`, max `200`); response envelope `{ "items": [...], "nextCursor": <opaque|null> }`. The cursor is an **opaque base64url server token** — clients must not parse it.
 - **Idempotency:** `Idempotency-Key` is **required on POST creates**. The server stores `key → response` for **24h** scoped to `(user, endpoint)`; a replay returns the original response/status; the same key with a **different body** → `409 idempotency_conflict`.
 - **Names in payloads are ciphertext** (`nameEnc`), never plaintext.
-- **OpenAPI:** `/openapi/v1.json` (code-first).
+- **Binary values in JSON** (ciphertext, wrapped keys, public keys, hashes) are **base64url without padding**, one encoding everywhere so no client has to guess per field.
+- **OpenAPI: contract-first.** The canonical wire contract is the hand-maintained [`openapi/v1.yaml`](../openapi/v1.yaml) in this repo; the running server serves it as JSON at `/openapi/v1.json`. It was chosen over code-first generation so clients can be prepared and built against a fixed contract **before** server code exists. CI fails the server if its routes or DTOs drift from the document (contract tests), and every client generates or validates its API layer from the same file. A change to the wire contract is a change to that file first, then to code.
 
 ## 4.2 Resource map
 
@@ -25,6 +26,7 @@
 | Shares | `/api/v1/shares` |
 | Groups (file-sharing / group-key) | `/api/v1/groups` |
 | Keys & devices | `/api/v1/keys`, `/api/v1/devices`, `/api/v1/recovery` |
+| Key transparency | `/api/v1/kt` ([17](17-key-transparency.md)) |
 | Sync | `/api/v1/sync` |
 | Me / settings | `/api/v1/me` |
 | Admin | `/api/v1/admin/**` |
@@ -66,6 +68,16 @@ Same shape as a normal CRUD tree, but **names are ciphertext**:
 | `POST` | `/files/{id}/crdt/log` | Submit **encrypted** CRDT update(s) (REST fallback) |
 | `GET` | `/files/{id}/snapshot` | Pointer/stream of the latest **encrypted** snapshot blob |
 
+#### Chunked upload / download (Phase 5.1, [07 §7.4a](07-encryption.md))
+| Method | Path | Purpose |
+|--------|------|---------|
+| `POST` | `/files/{id}/chunks:missing` | Body `{ addresses: [base64url …] }` (at most 1000) → `{ missing: [ … ] }`, the subset not yet stored **for this file**. Used to start and to resume an upload |
+| `PUT` | `/files/{id}/chunks/{address}` | Upload one chunk ciphertext (at most 4 MiB + 61 B frame overhead, else `413`). Write-once: an existing address → `200` without rewriting, a new one → `201`. Counts against quota immediately |
+| `POST` | `/files/{id}/blob:commit` | Commit a chunked version: header `If-Match: <parentSeq>`, body `{ manifestAddress, chunks: [address …], keyId }`. The manifest frame is uploaded beforehand through the same `PUT /files/{id}/chunks/{manifestAddress}`. The server checks that the manifest and every listed chunk exist for this file (`400 validation_failed` naming the first missing one otherwise), then applies **exactly** the LWW rules of `PUT /files/{id}/blob` (head advance or `409 conflict` + sibling version) and writes `file_versions.layout = 'chunked'` plus the `file_version_chunks` rows in one transaction. `Idempotency-Key` required |
+| `GET` | `/files/{id}/chunks/{address}` | Stream one chunk ciphertext; ACL-checked like the file |
+
+`GET /files/{id}/blob` and `GET /files/{id}/versions/{seq}/blob` return the **manifest** ciphertext for a chunked version, with response header `Nyxite-Blob-Layout: chunked` (absent or `single` otherwise), and the client then fetches chunks. Limits: at most `NYXITE__Limits__MaxChunksPerFile` chunks per version (`413` otherwise).
+
 > No `/content` (decoded) endpoint and no `/crdt/state` server-diff: the server has no readable doc. Clients fetch ciphertext + log and reconstruct state vectors locally.
 
 ### File keys (wrapped)
@@ -79,11 +91,12 @@ Same shape as a normal CRUD tree, but **names are ciphertext**:
 ### Keys, devices, recovery (E2EE)
 | Method | Path | Purpose |
 |--------|------|---------|
-| `GET` | `/keys/directory?userId=` or `?email=` | Fetch a user's **public** keys (to wrap shares to them) |
-| `PUT` | `/keys` | Publish/rotate the caller's own public identity keys |
+| `GET` | `/keys/directory?userId=` or `?email=` | Fetch a user's **public** keys (to wrap shares to them); each key carries `keyId`, `generation`, `algId`, `kemPub`, `sigPub`, `selfSig`, `loggedAt`, `ktLeafIndex` for KT verification ([17 §17.7](17-key-transparency.md)) |
+| `GET` | `/kt/log-key`, `/kt/checkpoint`, `/kt/inclusion`, `/kt/consistency`, `/kt/leaves` | Key-transparency log ([17 §17.8](17-key-transparency.md)) |
+| `PUT` | `/keys` | Publish/rotate the caller's own public identity keys `{ keyId, generation, algId, kemPub, sigPub, selfSig }`; the server verifies `selfSig` (both halves) and appends the KT leaf in the same transaction, else `400 validation_failed` |
 | `GET/DELETE` | `/devices`, `/devices/{id}` | List / revoke devices |
 | `POST` | `/devices` | Enroll: body `{ label, pubkey }` → `{ deviceId, status:"pending", pairingCode (6–8 digit), qrPayload }` |
-| `POST` | `/devices/{id}/approve` | Approve a pending device from an enrolled one: body `{ wrappedIdentityKey }` = **HPKE-seal** of the identity bundle to the pending device's `pubkey`; server stores it in `pending_key_blob` |
+| `POST` | `/devices/{id}/approve` | Approve a pending device from an enrolled one: body `{ pairingCode, wrappedIdentityKey }`. The server **verifies `pairingCode`** against `devices.pairing_code_hash` (constant-time compare, unexpired, under the attempt cap) **before** storing anything; a wrong code increments `pairing_attempts` → `403 pairing_code_invalid`, an expired or exhausted code → `410 pairing_expired` (the new device must re-register). On success `wrappedIdentityKey` = **HPKE-seal** of the identity bundle to the pending device's `pubkey` is stored in `pending_key_blob` and the pairing columns are cleared |
 | `GET` | `/devices/me/enrollment` | Once approved → `{ wrappedIdentityKey }`; server **deletes** `pending_key_blob` after a successful fetch (**single-use**) and marks the device `active` |
 | `GET/PUT` | `/recovery` | Get/set the server-opaque recovery blob: `{ version, kdf:{alg:"argon2id",m,t,p,salt}, nonce, ciphertext, tag }` — **AES-256-GCM under an Argon2id-derived key** from the recovery phrase (not HPKE; [07 §7.8](07-encryption.md)) |
 
@@ -109,22 +122,23 @@ Same shape as a normal CRUD tree, but **names are ciphertext**:
 Group-key layer on the existing membership model ([03 §3.2b](03-data-model.md), [07 §7.2a](07-encryption.md), [09 §9.9](09-sharing-and-acl.md)). All bodies carry **opaque wrapped bytes and public keys only** — no key column, no plaintext name. Existence-hiding on `{id}` (no reach → `404`). Steps P4.4-SRV-1..4.
 | Method | Path | Purpose |
 |--------|------|---------|
-| `POST` | `/groups` | Create a file-sharing group `{ groupPubkey, ed25519Pubkey, scopeKind, maxMembers? }` (the creator generated the keypair client-side; only the public halves are sent) |
+| `POST` | `/groups` | Create a file-sharing group `{ groupPubkey, ed25519Pubkey, groupKeyId, algId, selfSig, scopeKind, maxMembers? }`; the public key is appended to the key-transparency log in the same transaction ([17](17-key-transparency.md)) (the creator generated the keypair client-side; only the public halves are sent) |
 | `GET` | `/groups` | List the file-sharing groups the caller is a member of (metadata + public keys; paginated) |
-| `POST` | `/groups/{id}/members` | **Enroll** one member: body `{ memberId, scopeId, wrappedGroupPrivkey, generation, algId }` = the group privkey **HPKE-wrapped to the member's transparency-verified public key**. Appends **one** `group_key_grants` row. The server verifies a **key-transparency inclusion proof** (Phase 4.3) for `memberId`'s pubkey **before** accepting the grant, and enforces the **member-count limit** ([12 §12.7](12-administration.md)) — both metadata-only |
+| `GET` | `/groups/{id}/pubkey?scopeId=` | The **current** public key of a scope (`keyId`, `generation`, `groupPubkey`, `sigPubkey`, `algId`, `selfSig`, `loggedAt`, `ktLeafIndex`), the target for DEK-to-group wraps; verified by the client against the KT log before wrapping ([17 §17.7](17-key-transparency.md)) |
+| `POST` | `/groups/{id}/members` | **Enroll** one member: body `{ memberId, memberKeyId, scopeId, wrappedGroupPrivkey, generation, algId }` = the group privkey **HPKE-wrapped to the member's transparency-verified public key**. Appends **one** `group_key_grants` row. The server verifies a **key-transparency inclusion proof** (Phase 4.3) for `memberId`'s pubkey **before** accepting the grant, and enforces the **member-count limit** ([12 §12.7](12-administration.md)) — both metadata-only |
 | `DELETE` | `/groups/{id}/members/{uid}` | **Soft removal** — delete the member's live grant (instant ACL cutoff). Forward secrecy is a separate scope-scoped rotation |
 | `GET` | `/groups/{id}/keys?scopeId=` | Get the caller's **wrapped** group key grant(s) + the DEK-to-group wraps for a scope (to unwrap locally) |
 | `POST` | `/groups/{id}/keys` | Upload wrapped material: DEK-to-group wraps (`file_keys` group-principal rows) and/or re-wrapped grants (used when sharing a file/subtree to the group) |
-| `POST` | `/groups/{id}/keys/rotate` | Commit a **scope-scoped** group-key rotation. Body `{ scopeId, newGeneration, grants[], dekWraps[] }`. Committed **only if** `newGeneration == current + 1` for that scope, else `409 conflict` (another rotation won); post-commit wraps tagged with the old generation → `412 key_generation_stale`. Only the named scope is touched — the Phase-2.3 machinery at the group-key level ([09 §9.9](09-sharing-and-acl.md), P4.4-SRV-3) |
+| `POST` | `/groups/{id}/keys/rotate` | Commit a **scope-scoped** group-key rotation. Body `{ scopeId, newGeneration, newKey: { keyId, groupPubkey, sigPubkey, algId, selfSig }, grants[], dekWraps[] }`; `newKey` is inserted into `group_scope_keys` and appended to the KT log in the same transaction. Committed **only if** `newGeneration == current + 1` for that scope, else `409 conflict` (another rotation won); post-commit wraps tagged with the old generation → `412 key_generation_stale`. Only the named scope is touched — the Phase-2.3 machinery at the group-key level ([09 §9.9](09-sharing-and-acl.md), P4.4-SRV-3) |
 
 ### Sync
 | Method | Path | Purpose |
 |--------|------|---------|
 | `POST` | `/sync/changes` | Delta sync of **structure + ciphertext refs** since a cursor; returns `nextCursor`. The cursor is **opaque base64url**, monotonic and resumable, tied to the global change-log seq ([06 §6.3](06-sync.md)) |
-| `GET` | `/sync/manifest?projectId=` | Manifest (ids, contentType, versions, hashes, policies) for client reconcile/index |
+| `GET` | `/sync/manifest?projectId=` | Manifest (ids, contentType, versions, hashes, policies) for client reconcile/index; payloads in [06 §6.3](06-sync.md) |
 
 ### Me / Admin / Public share — see below and [12](12-administration.md), [§4.8](#48-public-share-endpoints).
-`GET /me`, `GET/PUT /me/settings` (settings body is **ciphertext**).
+`GET /me` (account, usage and **instance capabilities**: `support` = `support.enabled`, the active `ent.*` flags and the license state, so clients show or hide gated features without probing), `GET/PUT /me/settings` (settings body is **ciphertext**).
 
 ## 4.4 Error model
 
@@ -134,10 +148,10 @@ RFC 9457 `application/problem+json`. Selected codes:
 |------|--------|------|
 | 400 | `validation_failed`, `bad_sync_policy` | Malformed structure/ACL request |
 | 401 | `unauthenticated`, `token_expired` | Missing/invalid bearer — uniform across all ids, reveals no specific resource |
-| 403 | `acl_denied`, `2fa_required` | Authz denied **only when the caller already has read reach** to the resource (existence not secret to them) or on capability/collection denials that expose no id; **no** `breakglass` |
+| 403 | `acl_denied`, `2fa_required`, `pairing_code_invalid` | Authz denied **only when the caller already has read reach** to the resource (existence not secret to them) or on capability/collection denials that expose no id; **no** `breakglass` |
 | 404 | `not_found` | Resource missing **or** the caller has no reach to it — **the two are indistinguishable** (existence-hiding, see below) |
 | 409 | `conflict`, `version_conflict`, `excluded_content`, `address_exists`, `idempotency_conflict`, `group_full`, `key_not_transparent` | LWW conflict / policy / write-once / rotation lost (file or group scope) / same key + different body / group at member limit ([12 §12.7](12-administration.md)) / enrollment key failed the transparency inclusion proof ([09 §9.9](09-sharing-and-acl.md)) |
-| 410 | `share_revoked`, `link_expired` | Dead share/link |
+| 410 | `share_revoked`, `link_expired`, `pairing_expired`, `cursor_expired` | Dead share/link / pairing code expired or attempt cap reached / sync cursor older than the change-log retention ([06 §6.3.2](06-sync.md)) |
 | 412 | `key_generation_stale` | Client used a superseded file-key generation (rotate/refetch) |
 | 413 | `payload_too_large` | Ciphertext exceeds the upload limit **or the per-user storage quota** ([§4.7](#47-limits--validation-p), [12 §12.6](12-administration.md)) |
 | 507 | `insufficient_storage` | Instance-level storage exhausted (per-user quota → `413`) |
@@ -216,7 +230,7 @@ Every endpoint resolves the target and evaluates the **server ACL** ([09](09-sha
 
 ## 4.7 Limits & validation **[P]**
 
-- Max ciphertext upload: 100 MB inline (larger → chunked, Phase 5).
+- Max ciphertext upload: **100 MB inline** via `PUT /files/{id}/blob`. Files above the 16 MiB chunk threshold use the **chunked** path below (Phase 5.1); the inline path stays the only one in the required v1.0.0 band.
 - **Per-user storage quota:** when `users.storage_quota_bytes` is set, an upload that would push the user's counted **ciphertext bytes** over the quota is rejected with **`413 payload_too_large`** (or `507` for instance-level exhaustion); enforced by size only — no content is read ([12 §12.6](12-administration.md), [03](03-data-model.md)).
 - **Blocked accounts** (`users.status='blocked'`) are denied all write endpoints (download stays allowed) — see [09 §9.5](09-sharing-and-acl.md), [12 §12.6](12-administration.md).
 - `nameEnc`/`metadataEnc` size caps; structural fields validated; `excluded` uploads rejected (`409`).
@@ -229,6 +243,7 @@ Unauthenticated, token-scoped; the **decryption key is in the URL fragment**, ne
 | Method | Path | Purpose |
 |--------|------|---------|
 | `GET` | `/share/{token}` | Resolve a link → guest bootstrap (serves the guest client; fragment key used client-side) |
+| `POST` | `/share/{token}/session` | Issue or **renew** the 15-minute guest share-session token (JWT `typ: nyx-guest+jwt`, [08 §8.2](08-authentication.md)); every call re-checks the `shares` row, so a revoked share stops renewals at once (`410`) |
 | `GET` | `/share/{token}/blob` | Serve **ciphertext** if the link is read/write |
 | `WS` | `/share/{token}/ws` | Guest WebSocket into the encrypted relay — serves **both read and write links**. Read-only guests receive `OnUpdate`/`OnAwareness` but are rejected (`OnError`) on `SubmitUpdate` ([05 §5.8](05-realtime-collaboration.md)) |
 

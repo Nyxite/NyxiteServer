@@ -81,9 +81,25 @@ ALTER TABLE groups
   ADD COLUMN group_pubkey   bytea,                 -- hybrid X25519 + ML-KEM-768 public half (HPKE target); private half NEVER on server
   ADD COLUMN ed25519_pubkey bytea,                 -- hybrid Ed25519 + ML-DSA-65 group signing public key (verify group-authored writes)
   ADD COLUMN scope_kind     text CHECK (scope_kind IN ('project','time_period')),  -- G-4 scope granularity
-  ADD COLUMN max_members    int;                   -- per-group size override (G-5); NULL → instance default group_max_members (§12.7)
--- group_pubkey/ed25519_pubkey are set together iff the group is key-bearing (a file-sharing group).
+  ADD COLUMN max_members    int,                   -- per-group size override (G-5); NULL → instance default group_max_members (§12.7)
+  ADD COLUMN group_key_id   uuid,                  -- id of the generation-1 group key (logged in the KT log, 17 §17.3)
+  ADD COLUMN self_sig       bytea;                 -- hybrid self-signature of the group public keys by ed25519_pubkey (17 §17.3)
+-- group_pubkey/ed25519_pubkey/group_key_id/self_sig are set together iff the group is key-bearing (a file-sharing group).
+
+CREATE TABLE group_scope_keys (                    -- public keys minted by a scope-scoped rotation (09 §9.9)
+  group_id       uuid NOT NULL REFERENCES groups(id),
+  scope_id       uuid NOT NULL,
+  generation     int  NOT NULL,                    -- >= 2; generation 1 of every scope is the groups.group_pubkey key
+  key_id         uuid NOT NULL UNIQUE,
+  group_pubkey   bytea NOT NULL,                   -- hybrid X25519 + ML-KEM-768 public half
+  sig_pubkey     bytea NOT NULL,                   -- hybrid Ed25519 + ML-DSA-65 public half
+  alg_id         text NOT NULL,
+  self_sig       bytea NOT NULL,
+  created_at     timestamptz NOT NULL DEFAULT now(),
+  PRIMARY KEY (group_id, scope_id, generation)
+);
 ```
+> **Current group key of a scope** = the highest-generation `group_scope_keys` row for `(group_id, scope_id)`, or the `groups` base key if the scope was never rotated. A rotation that only re-wrapped the old private key would give no forward secrecy, so every rotation mints a **new keypair** and its public half must be published here, both so other members (and "manager reads all" workers) wrap new DEKs to it and so it enters the key-transparency log (`entry_type 3`, [17](17-key-transparency.md)). Append-only, like the grants.
 > `group_pubkey` is published in the key directory as just another HPKE target — **no new primitive** ([07 §7.3](07-encryption.md)). `max_members` is a **metadata-only** count cap, enforced by membership-row count at enrollment ([12 §12.7](12-administration.md)).
 
 **Per-member group-key grant — `group_key_grants` (append-only).** The group private key HPKE-wrapped **once per member** under that member's personal public key, per scope/generation.
@@ -92,7 +108,7 @@ CREATE TABLE group_key_grants (
   id                    uuid PRIMARY KEY,          -- surrogate (UUIDv7)
   group_id              uuid NOT NULL REFERENCES groups(id),
   member_id             uuid NOT NULL REFERENCES users(id),
-  scope_id              uuid NOT NULL,             -- project/time-period scope this key covers (G-4)
+  scope_id              uuid NOT NULL,             -- project/time-period scope this key covers (G-4); opaque, the server only groups by it and never interprets it
   wrapped_group_privkey bytea NOT NULL,            -- hybrid group privkey bundle (X25519+ML-KEM-768 ‖ Ed25519+ML-DSA-65), HPKE-wrapped to member pubkey — OPAQUE
   generation            int  NOT NULL DEFAULT 1,   -- rotation generation per (group, scope)
   alg_id                text NOT NULL,             -- wrap-suite id; v1 pins the hybrid PQC suite (crypto-agility)
@@ -147,12 +163,15 @@ CREATE TABLE user_keys (
   public_ed25519 bytea NOT NULL,           -- hybrid signing public key (Ed25519 ‖ ML-DSA-65) for signature verification
   alg_id         text NOT NULL,            -- suite id pinning the hybrid primitives (e.g. 'X25519MLKEM768' + Ed25519ML-DSA65) — crypto-agility ([07 §7.3](07-encryption.md))
   generation     int  NOT NULL DEFAULT 1,  -- bumped on identity rotation
+  self_sig       bytea NOT NULL,           -- hybrid directory self-signature by public_ed25519 over the entry (09 §9.3, 17 §17.3)
   created_at     timestamptz NOT NULL DEFAULT now(),
   revoked_at     timestamptz,
   PRIMARY KEY (user_id, key_id)
 );
 ```
 Only **public** keys live here — each a **hybrid classical + post-quantum** public key ([07 §7.3](07-encryption.md)). Private keys never reach the server.
+
+> **Key-transparency log.** Every `user_keys` insert/revoke and every group public key is appended, in the same transaction, to the KT log. Its tables (`kt_leaves`, `kt_nodes`, `kt_checkpoints`, `kt_state`) are specified with the log in [17 §17.6](17-key-transparency.md), so the byte-exact format and the storage stay in one place.
 
 ### devices  (per-device enrollment)
 ```sql
@@ -165,11 +184,16 @@ CREATE TABLE devices (
                      CHECK (status IN ('pending','active','revoked')),
   pending_key_blob bytea,                     -- HPKE-seal of the identity bundle to this device's pubkey;
                                               --   set on approval, DELETED after the single-use enrollment fetch
+  pairing_code_hash  bytea,                   -- SHA-256 of the 6–8 digit pairingCode; NULL once approved or expired
+  pairing_expires_at timestamptz,             -- now() + NYXITE__Auth__PairingCodeLifetime at POST /devices
+  pairing_attempts   int NOT NULL DEFAULT 0,  -- failed code entries; at NYXITE__Auth__PairingCodeMaxAttempts the code is void
   enrolled_at      timestamptz NOT NULL DEFAULT now(),
   revoked_at       timestamptz
 );
 ```
 > A device is created `pending`; an existing device approves it by sealing the identity bundle to its `pubkey` (HPKE) into `pending_key_blob`. The new device fetches it once (single-use), then the server clears `pending_key_blob` and the device becomes `active` ([04](04-rest-api.md), [08 §8.3](08-authentication.md)).
+>
+> **Pairing code storage.** The `pairingCode` belongs to exactly one pending device and dies with it, so it lives on the `devices` row instead of in [`ephemeral_tokens`](#ephemeral_tokens--single-use-short-lived-tokens). A 6–8 digit code has at most ~27 bits of entropy, so its hash is reversible by brute force; it is protected by its **short lifetime** and the **attempt cap**, not by the hash — the hash only keeps it out of plain sight in a dump. The server **verifies the code on `POST /devices/{id}/approve`** ([04](04-rest-api.md)) and rejects the approval otherwise. On approval or expiry `pairing_code_hash` and `pairing_expires_at` are set to NULL.
 
 ### recovery_blobs  (client-encrypted recovery blob — server-opaque)
 ```sql
@@ -183,6 +207,98 @@ CREATE TABLE recovery_blobs (
 );
 ```
 The blob is **AES-256-GCM** under a 256-bit key derived from the user's recovery phrase via **Argon2id** (not HPKE — the recovery key is symmetric). The server stores but **cannot open** this ([07 §7.8](07-encryption.md)). No server/admin escrow.
+
+### sessions  (one row per signed-in client — refresh-token family)
+```sql
+CREATE TABLE sessions (
+  id              uuid PRIMARY KEY,            -- the `sid` claim carried in every access token of this session
+  user_id         uuid NOT NULL REFERENCES users(id),
+  device_id       uuid REFERENCES devices(id), -- NULL until the device is enrolled; login precedes enrollment (08 §8.3)
+  client_kind     text NOT NULL
+                    CHECK (client_kind IN ('desktop','android','web','admin')),
+  auth_method     text NOT NULL
+                    CHECK (auth_method IN ('password_totp','passkey','oidc')),
+  mfa_verified_at timestamptz NOT NULL,        -- last second factor on this session; drives `403 2fa_required` step-up (08 §8.2)
+  created_at      timestamptz NOT NULL DEFAULT now(),
+  last_seen_at    timestamptz NOT NULL DEFAULT now(),  -- bumped on refresh; idle timeout is measured from here
+  expires_at      timestamptz NOT NULL,        -- absolute lifetime; refresh never extends it
+  last_ip         inet,                        -- for the admin sessions list only; overwritten, no history kept here
+  user_agent      text,
+  revoked_at      timestamptz,
+  revoke_reason   text
+                    CHECK (revoke_reason IN ('logout','admin','device_revoked','user_blocked',
+                                             'credential_change','reuse_detected'))
+);
+CREATE INDEX ix_sessions_user_active ON sessions(user_id) WHERE revoked_at IS NULL;
+CREATE INDEX ix_sessions_device      ON sessions(device_id) WHERE revoked_at IS NULL;
+```
+> A session is the server-side anchor for **revocation**: `/auth/logout`, admin force-logout (`DELETE /admin/users/{id}/sessions/{sid}`, [12](12-administration.md)), device revocation, blocking a user and a password/TOTP/passkey change all set `revoked_at` + `revoke_reason`, which kills every refresh token of the session at once. Access tokens stay **stateless** ([08 §8.7](08-authentication.md)); a revoked session therefore loses access within one access-token lifetime (~5 min) — the server does **not** look up `sessions` on every request, because that would make every call a DB round-trip for a 5-minute gain. Holds no key material and nothing content-derived.
+
+### refresh_tokens  (rotate-on-use chain within a session)
+```sql
+CREATE TABLE refresh_tokens (
+  id          uuid PRIMARY KEY,
+  session_id  uuid NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+  parent_id   uuid REFERENCES refresh_tokens(id) ON DELETE CASCADE,  -- the token this one replaced; NULL = issued at login
+  token_hash  bytea NOT NULL UNIQUE,         -- SHA-256 of the opaque 256-bit random token; the raw token is never stored
+  issued_at   timestamptz NOT NULL DEFAULT now(),
+  expires_at  timestamptz NOT NULL,          -- idle lifetime; capped at sessions.expires_at
+  used_at     timestamptz                    -- set when exchanged at /auth/refresh; a used token is never valid again
+);
+CREATE UNIQUE INDEX ux_refresh_parent ON refresh_tokens(parent_id) WHERE parent_id IS NOT NULL;
+CREATE INDEX ix_refresh_session ON refresh_tokens(session_id);
+```
+- **Opaque, hashed.** The refresh token is a random 256-bit value, not a signed token, so it is only valid while its row exists and is unused — revocation is a row update, not a deny-list. Only its **SHA-256** is stored, so a database leak yields no usable refresh token; a slow hash (Argon2id) is unnecessary because the input is 256 bits of randomness, not a guessable password.
+- **Rotation.** `POST /auth/refresh` looks the token up by hash, requires `used_at IS NULL`, `expires_at > now()` and the parent session not revoked/expired, then — in **one transaction** — sets `used_at`, inserts the child with `parent_id` = the old row, and bumps `sessions.last_seen_at`. The **unique index on `parent_id`** makes a double-spend race fail at the database: two concurrent refreshes of the same token cannot both create a child.
+- **Reuse detection.** Presenting a token whose `used_at` is already set means it was copied; the server revokes the whole session (`revoke_reason = 'reuse_detected'`), audits `auth.refresh_reuse` ([12](12-administration.md)) and returns `401`. This is the OAuth 2.0 Security BCP rotation pattern, chosen over a fixed long-lived refresh token because a stolen token is then usable at most until its legitimate owner refreshes next.
+- **Lifetimes** are configuration, not constants: `NYXITE__Auth__RefreshTokenIdleLifetime` and `NYXITE__Auth__SessionAbsoluteLifetime` ([14](14-deployment-and-config.md)); an admin security-policy session timeout ([12](12-administration.md)) may only shorten them.
+- **Cleanup.** The ops job that already sweeps expired shares also deletes sessions revoked or expired longer than `NYXITE__Retention__SessionRetentionDays` ago; `ON DELETE CASCADE` takes their refresh-token chain with them, because a dead chain has no value and keeping it only keeps credential hashes around. The audit trail of the session lives in `audit_log`, not here.
+
+### ephemeral_tokens  (single-use short-lived tokens)
+```sql
+CREATE TABLE ephemeral_tokens (
+  token_hash  bytea PRIMARY KEY,             -- SHA-256 of the opaque 256-bit random token; the raw token is never stored
+  kind        text NOT NULL
+                CHECK (kind IN ('mfa','socket_ticket','password_reset','invite','oidc_state','oidc_handoff')),
+  user_id     uuid REFERENCES users(id),     -- NULL only for 'oidc_state' (no user is known before the IdP answers)
+  session_id  uuid REFERENCES sessions(id) ON DELETE CASCADE,  -- socket_ticket: the session it was minted from; NULL for 'mfa'
+  attempts    int NOT NULL DEFAULT 0,        -- 'mfa': failed TOTP codes; at NYXITE__Auth__MfaMaxAttempts the token is void
+  detail      jsonb,                         -- 'oidc_state' only: { nonce, codeVerifier, redirectUri, client }
+  issued_at   timestamptz NOT NULL DEFAULT now(),
+  expires_at  timestamptz NOT NULL,
+  used_at     timestamptz                    -- set by the consuming request; a used token is never valid again
+);
+ALTER TABLE ephemeral_tokens ADD CONSTRAINT ck_ephemeral_user
+  CHECK (user_id IS NOT NULL OR kind = 'oidc_state');
+CREATE INDEX ix_ephemeral_expires ON ephemeral_tokens(expires_at);
+```
+- **What lives here.** The interim `mfaToken` between `POST /auth/login` and `POST /auth/login/totp` (lifetime `NYXITE__Auth__MfaTokenLifetime`); the relay **socket ticket** minted from a user bearer (single-use, **60 s**, [08 §8.4](08-authentication.md)); the **password-reset** token of `/auth/password/forgot` (30 min); the **invite** token sent to an admin-imported user (7 days, [12 §12.2](12-administration.md)); and the enterprise OIDC `oidc_state` (10 min, its `state`/`nonce`/PKCE verifier kept in a `detail jsonb` column) and `oidc_handoff` (60 s) values ([08 §8.1](08-authentication.md)). Lifetimes are config keys `NYXITE__Auth__Lifetimes__<Kind>` ([14](14-deployment-and-config.md)). Both must be **single-use**, which a stateless signed token cannot enforce, so they need server state.
+- **Consume = one statement.** `UPDATE ephemeral_tokens SET used_at = now() WHERE token_hash = $1 AND kind = $2 AND used_at IS NULL AND expires_at > now() RETURNING …` — exactly one request can win, with no read-then-write race, and it works unchanged when several server nodes share the database.
+- **Why Postgres, not in-memory or Redis.** In-memory state is lost on restart and is invisible to a second node, so a ticket minted on node A would fail on node B. Redis would work but would turn an **optional** component (today only the multi-node relay backplane, [14](14-deployment-and-config.md)) into a **required** part of the default stack. The row volume is tiny (one row per login attempt and per socket connect, gone within minutes), so Postgres carries it without cost. Access goes through an `IEphemeralTokenStore` interface, so a Redis implementation can be added later for large multi-node deployments without a schema change.
+- **Cleanup.** The ops job deletes rows past `expires_at`; nothing here is kept for audit, because login and relay events are already in `audit_log`.
+
+### Guest share-session token — stateless, not stored
+
+The 15-minute guest **share-session token** ([08 §8.2](08-authentication.md), [09 §9.6](09-sharing-and-acl.md)) has **no table**. It is a token signed with the server's token-signing key, carrying the `share_id`, the link permission (read/write) and `exp`. It need not be single-use, so the main reason for server state is absent, and every **renewal** re-checks the `shares` row, which already gives the specified "revoked within one renewal cycle". Not storing it also means the server keeps **no per-guest record** beyond the `auth.guest_session` audit event, which is the privacy-preferring choice.
+
+### idempotency_keys  (replay store for `Idempotency-Key`)
+```sql
+CREATE TABLE idempotency_keys (
+  user_id       uuid NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  endpoint      text NOT NULL,               -- route template, e.g. 'POST /projects', not the concrete URL
+  key           text NOT NULL,               -- client-supplied Idempotency-Key header value
+  request_hash  bytea NOT NULL,              -- SHA-256 of the canonical request body; detects same key + different body
+  status_code   int NOT NULL,
+  response_body bytea NOT NULL,              -- the original response (IDs, timestamps, ciphertext refs — nothing the server could read anyway)
+  created_at    timestamptz NOT NULL DEFAULT now(),
+  expires_at    timestamptz NOT NULL,        -- created_at + 24 h (04 §4.1)
+  PRIMARY KEY (user_id, endpoint, key)
+);
+CREATE INDEX ix_idempotency_expires ON idempotency_keys(expires_at);
+```
+- Implements the rule in [04 §4.1](04-rest-api.md) / [01 §1.5](01-architecture.md): scope `(user, endpoint)`, **24 h**, replay returns the stored status + body, same key with a different `request_hash` → `409 idempotency_conflict`.
+- **Same transaction as the create.** The row is inserted in the **same transaction** that performs the create, just before commit. A concurrent duplicate request blocks on the primary key until the first commits, then hits the unique violation and returns the stored response. This needs no "in progress" state and no extra error code, and a failed create leaves no row, so the client can safely retry.
+- **Cleanup.** The ops job deletes rows past `expires_at`.
 
 ## 3.3 Domain tables
 
@@ -306,6 +422,7 @@ CREATE TABLE file_versions (
   blob_ref     text  NOT NULL,             -- ciphertext address in blob store
   size_cipher  bigint NOT NULL,
   key_id       uuid NOT NULL,              -- file-key generation used
+  layout       text NOT NULL DEFAULT 'single' CHECK (layout IN ('single','chunked')),  -- 'chunked': blob_ref is the chunk manifest (07 §7.4a)
   author_id    uuid REFERENCES users(id), -- null for guests
   created_at   timestamptz NOT NULL DEFAULT now(),
   UNIQUE (file_id, seq)
@@ -315,6 +432,43 @@ ALTER TABLE files ADD CONSTRAINT fk_files_current_version
   FOREIGN KEY (current_version_id) REFERENCES file_versions(id);
 ```
 > No `size_plain` and no `summary`: the server can't measure plaintext or summarize a diff (diffs are client-side, [10](10-version-history.md)).
+
+### file_chunks / file_version_chunks  (chunked large files, Phase 5.1)
+```sql
+CREATE TABLE file_chunks (                 -- one row per uploaded chunk ciphertext (07 §7.4a)
+  file_id      uuid  NOT NULL REFERENCES files(id),
+  address      bytea NOT NULL,             -- client-computed chunk address (32 B), opaque to the server
+  blob_ref     text  NOT NULL,             -- ciphertext location in the blob store
+  size_cipher  bigint NOT NULL,            -- counted against the uploader's quota from upload time
+  uploaded_by  uuid REFERENCES users(id),
+  created_at   timestamptz NOT NULL DEFAULT now(),
+  PRIMARY KEY (file_id, address)
+);
+CREATE TABLE file_version_chunks (         -- ordered chunk list of a chunked version
+  version_id   uuid NOT NULL REFERENCES file_versions(id),
+  chunk_index  int  NOT NULL,
+  file_id      uuid NOT NULL,
+  address      bytea NOT NULL,
+  PRIMARY KEY (version_id, chunk_index),
+  FOREIGN KEY (file_id, address) REFERENCES file_chunks(file_id, address)
+);
+```
+> Chunks are scoped **per file** (primary key `(file_id, address)`), so an existence check never answers across files. The server sees the **chunk count** of a version, which reveals the size in 4 MiB steps; `size_cipher` already reveals the size, so nothing new leaks. A chunk not referenced by any `file_version_chunks` row is **pending**; the blob GC ([§3.4](#34-blob-store-layout)) deletes pending chunks older than `NYXITE__Limits__PendingChunkTtlHours` and every chunk whose versions were all purged.
+
+### change_log  (delta-sync feed, 06 §6.3.2)
+```sql
+CREATE TABLE change_log (
+  seq         bigserial PRIMARY KEY,         -- the position behind the opaque sync cursor
+  project_id  uuid NOT NULL REFERENCES projects(id),
+  kind        text NOT NULL CHECK (kind IN ('structure','blob','crdt','delete','keyrotate')),
+  entity      text NOT NULL CHECK (entity IN ('project','folder','file')),
+  entity_id   uuid NOT NULL,
+  ref         jsonb NOT NULL,                 -- the ServerChange ref, opaque/structural fields only
+  at          timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX ix_change_log_project ON change_log(project_id, seq);
+```
+> Written in the **same transaction** as the change it describes, so the feed can never miss or invent a write. ACL filtering happens at read time, not here. `ref` holds only what `ServerChange` exposes (ids, sequence numbers, opaque `nameEnc`/hashes), never content. Pruned after `NYXITE__Retention__ChangeLogDays`; an older cursor gets `410 cursor_expired` ([06 §6.3.2](06-sync.md)). `bigserial` may leave gaps after a rollback; cursors only require monotonicity, not gaplessness.
 
 ### crdt_updates  (encrypted, server-opaque relay log)
 ```sql
@@ -371,7 +525,7 @@ Content-addressed store behind `IBlobStore` (unchanged interface). Stores **ciph
 - **Address:** client-computed BLAKE3 of plaintext; the server treats it as opaque and enforces write-once.
 - **Layout (filesystem):** sharded by hash prefix `blobs/<aa>/<bb>/<full-hash>`. **[P]**
 - **Stored content:** AES-256-GCM framed ciphertext ([07 §7.4](07-encryption.md)) for blobs, snapshots, and large CRDT updates.
-- **GC:** removes blobs with no live `file_versions`/`crdt_updates` reference ([10](10-version-history.md)).
+- **GC:** removes blobs with no live `file_versions`/`crdt_updates`/`file_version_chunks` reference, and pending chunks past their TTL ([10](10-version-history.md), [§3.3](#file_chunks--file_version_chunks--chunked-large-files-phase-51)).
 
 ```csharp
 public interface IBlobStore

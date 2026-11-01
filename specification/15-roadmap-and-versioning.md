@@ -38,6 +38,7 @@
 - Rich **client-encrypted** per-user/per-file config ([04](04-rest-api.md)).
 
 ### Phase 4.3 — Key transparency (pulled into v1.0.0)
+- Full design: [17-key-transparency.md](17-key-transparency.md) (leaf format, RFC 9162 tree, signed checkpoints, proofs, client verification, enrollment check).
 - **Key-transparency log** for the public-key directory ([09 §9.3](09-sharing-and-acl.md), [13](13-security.md)) — **pulled forward from the optional Phase 6 hardening item into the required v1.0.0 band** because enterprise/family groups depend on it (decision G-3): one substituted key would expose a whole group's corpus, so group enrollment wraps **only to transparency-log-verified public keys**. Blocks Phase 4.4.
 
 ### Phase 4.4 — Enterprise/family file-sharing groups
@@ -50,12 +51,14 @@
 
 ### Phase 5 — Format expansion
 - Office docs, source-code text types, images as **encrypted** blobs; any processing (thumbnails, extraction) is **client-side** ([11](11-search.md)).
-- Chunked/resumable ciphertext upload for large binaries ([04 §4.7](04-rest-api.md)).
+- Chunked/resumable ciphertext upload for large binaries: **chunked encryption** (4 MiB NYXC chunk frames + encrypted chunk manifest, [07 §7.4a](07-encryption.md); endpoints [04 §4.3](04-rest-api.md); tables [03](03-data-model.md) `file_chunks`).
 
 ### Phase 6 — Advanced hardening (optional)
 - **Key transparency / verification** (safety numbers) to defend the key directory ([09 §9.3](09-sharing-and-acl.md), [13](13-security.md)). *(The transparency **log** itself was pulled forward to the required **Phase 4.3** for groups (G-3); remaining here are the optional client-facing verification affordances — safety numbers.)*
 - Optional **metadata-graph hiding** (encrypt structure too) — a larger design beyond names ([07 §7.7](07-encryption.md)).
 - Possible **zero-knowledge searchable index** (blind indexing) only if it leaks nothing ([11](11-search.md)).
+
+> **Deferred by design, not a spec gap.** Phases 6.2 (metadata-graph hiding) and 6.3 (leak-free searchable index) are **go/no-go research tracks**. Neither has a server design in this spec, deliberately: 6.2 would remove the containment graph the server currently needs to route sync and evaluate ACLs, and 6.3 may be declined outright if no scheme passes a leakage audit ([11 §11.5](11-search.md)). An implementer of v1.0.0 builds **nothing** for them, and no v1.0.0 table, endpoint or format may assume either will exist. Each starts with its own design step (`P6.2-CORE-1`, `P6.3-CORE-1`) that ends in a written go/no-go before any server work is scheduled. Phase 6.1 is different: its safety-number format is already pinned ([17 §17.10](17-key-transparency.md)), only the UI is optional.
 - (E2EE itself is **not** here — it's the Phase-0 default.)
 
 ### Cross-cutting / later

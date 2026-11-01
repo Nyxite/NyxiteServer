@@ -36,14 +36,30 @@
 | `NYXITE__Auth__TokenSigningKey` (secret) | **Native** token-signing key — signs/validates the server's own access + refresh tokens (always required) |
 | `NYXITE__Auth__PasswordPepper` (secret; deploy secret `PASSWORD_PEPPER`) | **Versioned, rotatable** account-password **pepper** — the HMAC-SHA256 key applied as a pre-hash before Argon2id ([08 §8.1](08-authentication.md)). Held **outside Postgres** (alongside DB creds) so a **DB-only leak yields uncrackable verifiers**. Format `{version}:{key}` (or a versioned set); rotation adds a new version and **re-peppers lazily at each user's next login**. Account-auth only — **not** applied to the recovery-phrase KDF |
 | `NYXITE__Auth__Audience` | Expected token audience |
+| `NYXITE__Auth__Lifetimes__PasswordReset` / `__Invite` / `__OidcState` / `__OidcHandoff` | Lifetimes of the single-use `ephemeral_tokens` kinds ([03 §3.2](03-data-model.md)). Defaults **30 min** / **7 days** / **10 min** / **60 s** **[P]** |
+| `NYXITE__Auth__Enterprise__RedirectUris` | Allowlist of client redirect URIs for the OIDC flow, e.g. `nyxite://oidc`, the web origin ([08 §8.1](08-authentication.md)); anything else → `400` (**enterprise profile only**) |
+| `NYXITE__Scim__Token` (secret) | Bearer token the enterprise IdP uses for `/scim/v2/**` ([12 §12.2](12-administration.md)); SCIM is disabled when unset (**enterprise profile only**) |
+| `NYXITE__Auth__RefreshTokenIdleLifetime` | Idle lifetime of a refresh token — a session unused for longer must sign in again ([03 §3.2](03-data-model.md) `refresh_tokens`). Default **14 days** **[P]** |
+| `NYXITE__Auth__SessionAbsoluteLifetime` | Absolute lifetime of a session regardless of use; refresh never extends it ([03 §3.2](03-data-model.md) `sessions`). Default **90 days** **[P]** |
+| `NYXITE__Auth__MfaTokenLifetime` | Lifetime of the interim `mfaToken` between the password and TOTP step ([03 §3.2](03-data-model.md) `ephemeral_tokens`). Default **5 min** **[P]** |
+| `NYXITE__Auth__MfaMaxAttempts` | Wrong TOTP codes allowed per `mfaToken` before it is void and the password step must be repeated. Default **5** **[P]** |
+| `NYXITE__Auth__PairingCodeLifetime` | Lifetime of a pending device's `pairingCode` ([03 §3.2](03-data-model.md) `devices`). Default **10 min** **[P]** |
+| `NYXITE__Auth__PairingCodeMaxAttempts` | Wrong pairing-code entries allowed before the code is void; the low-entropy code is protected by this cap and its lifetime. Default **5** **[P]** |
 | `NYXITE__Auth__Enterprise__Enabled` | `true` to enable the enterprise OIDC IdP (default `false` = native only) |
 | `NYXITE__Auth__Enterprise__Authority` | Keycloak issuer URL (**enterprise profile only**) |
 | `NYXITE__Auth__Enterprise__ClientId` / `ClientSecret` (secret) | OIDC client (**enterprise profile only**) |
+| `NYXITE__KeyTransparency__SigningKey` (secret) | Hybrid Ed25519 + ML-DSA-65 **log signing key** of the key-transparency log ([17 §17.5](17-key-transparency.md)); held outside Postgres, used for nothing else. Required from Phase 4.3 |
+| `NYXITE__KeyTransparency__Origin` | Log origin line, default `<public host>/nyxite-kt/v1` ([17 §17.5](17-key-transparency.md)) |
+| `NYXITE__Limits__PendingChunkTtlHours` | Age after which an uploaded chunk that no committed version references is garbage-collected ([03](03-data-model.md) `file_chunks`). Default **24** **[P]** |
+| `NYXITE__Limits__MaxChunksPerFile` | Upper bound of chunks per chunked version ([04 §4.3](04-rest-api.md)); 4 MiB each. Default **25600** (= 100 GiB) **[P]** |
+| `NYXITE__Groups__DefaultMaxMembers` | Instance default `group_max_members` for file-sharing groups ([12 §12.7](12-administration.md)); per-group `max_members` overrides it. Default **16**, equal to the community-mode cap, so a community instance never needs an override **[P]** |
 | `NYXITE__Realtime__Backplane` | `none` \| `redis` |
 | `NYXITE__Realtime__Redis` (secret) | Redis connection when enabled |
 | `NYXITE__Limits__*` | Upload sizes, rate-limit buckets ([13](13-security.md)) |
 | `NYXITE__Relay__PruneAfterSnapshotSeq` | How long to keep encrypted updates past a client snapshot ([05](05-realtime-collaboration.md)) |
 | `NYXITE__Retention__*` | History/audit retention ([10](10-version-history.md), [12](12-administration.md)) |
+| `NYXITE__Retention__SessionRetentionDays` | How long revoked/expired `sessions` rows (and their refresh-token chain) are kept before the ops job deletes them; the audit trail lives in `audit_log` independently. Default **30** **[P]** |
+| `NYXITE__Retention__ChangeLogDays` | How long `change_log` rows are kept; an older sync cursor gets `410 cursor_expired` and the client re-runs the manifest ([06 §6.3.2](06-sync.md)). Default **90** **[P]**, long enough that a device offline for a quarter still resumes by delta |
 | `NYXITE__Retention__TrashWindowDays` | Deletion-lifecycle **Trash** window — instance-wide default **30** ([03 §3.3](03-data-model.md), DL-1); per-user override stored in metadata, same mechanism as the storage quota |
 | `NYXITE__Retention__GraceWindowDays` | Deletion-lifecycle **grace** window past Trash — instance-wide default **30** (admin/support-assisted restore only, DL-4); per-user override supported. Purge fires at Trash + grace (~60 days); **no early/permanent-now purge** (DL-5) |
 | `NYXITE_LICENSE_TOKEN` | **Optional** per-instance license token — absent = community mode (free non-commercial). Verified **offline** against embedded license public keys; unlocks enterprise gates. Not a secret to protect (per-instance, non-sensitive). ([16](16-licensing-and-entitlement.md)) |

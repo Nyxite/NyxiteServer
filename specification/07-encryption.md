@@ -80,10 +80,21 @@ magic(4) | version(1) | key_id(16) | nonce(12) | ciphertext(...) | gcm_tag(16)
 ```
 - **magic** = ASCII `"NYXC"` (`0x4E 0x59 0x58 0x43`); **version** = `0x01`.
 - **AAD** = `magic ‖ version ‖ key_id ‖ file_id(16) ‖ object_kind(1)` — binds the frame to its file and kind.
-- **`object_kind`** enum: `blob=1`, `snapshot=2`, `crdt=3`, `name=4`, `metadata=5`, `awareness=6`, `settings=7`.
+- **`object_kind`** enum: `blob=1`, `snapshot=2`, `crdt=3`, `name=4`, `metadata=5`, `awareness=6`, `settings=7`, `chunk=8`, `chunk_manifest=9` ([§7.4a](#74a-chunked-encryption-for-large-files-phase-51-p)).
 - **HPKE wrap output framing** (a wrapped file-key): `enc(HPKE encapsulated key) ‖ ciphertext ‖ tag(16)`. Under the hybrid KEM `enc` is the **X25519 share (32B) concatenated with the ML-KEM-768 ciphertext (~1088B)** rather than a bare 32B share; the `alg_id` fixes its length.
 
 `key_id` identifies which **file key** (and its 1:1 rotation generation) was used; the server cannot resolve it to a usable key.
+
+## 7.4a Chunked encryption for large files (Phase 5.1) **[P]**
+
+Files larger than **`chunkThreshold` = 16 MiB** of plaintext (office, image, binary, and ink if it ever grows that large) are not encrypted as one frame but as a sequence of independently encrypted **chunks** plus an encrypted **chunk manifest**. Chosen over a single resumable ciphertext stream (tus / S3-multipart style) because a single AES-GCM frame can only be authenticated **after the last byte**, so a client would have to buffer or trust unverified plaintext of a multi-GB file. Per-chunk frames are verified as they arrive, a resumed upload only re-sends missing chunks, and unchanged chunks of a new version are not re-uploaded.
+
+- **Chunking.** Plaintext is split into fixed **4 MiB** chunks (`chunkSize = 4 194 304`), the last one shorter. Fixed rather than content-defined chunking keeps four implementations byte-identical with no rolling-hash parameters; the cost is that an insertion near the start re-uploads the rest of the file, which is acceptable for office/image/binary files that are usually rewritten whole anyway.
+- **Chunk frame.** Each chunk is a normal NYXC frame ([§7.4](#74-encrypted-object-framing-p)) with `object_kind = chunk (8)` and an **extended AAD**: `magic ‖ version ‖ key_id ‖ file_id ‖ object_kind ‖ chunk_index(u32) ‖ chunk_count(u32)`. Binding `chunk_index` stops reordering, binding `chunk_count` stops truncation, and binding `file_id` + `key_id` stops a chunk from being replayed into another file or key generation.
+- **Chunk address** (what the server stores it under) = `BLAKE3-256("NYXC-CHUNK-v1" ‖ file_id ‖ key_id ‖ chunk_index(u32) ‖ chunk_count(u32) ‖ BLAKE3-256(chunk plaintext))`. It is deterministic, so a resuming client recomputes the same addresses without state, and an existing address is safe to reuse because it implies an identical AAD. Because `file_id` and `key_id` are mixed in, an address is **not** a cross-file "does anyone have this content" oracle.
+- **Chunk manifest.** One NYXC frame with `object_kind = chunk_manifest (9)` and the normal AAD, whose plaintext is the deterministic CBOR map `{ 1: totalPlaintextSize (uint), 2: chunkSize (uint), 3: [ chunk plaintext BLAKE3-256 … ] (array of 32-byte bstr), 4: fileContentHash (32-byte bstr, BLAKE3-256 of the whole plaintext) }`. Its address is `fileContentHash`, i.e. the same content address a single-frame blob of the same file would have, so `file_versions.content_hash` keeps its meaning.
+- **Reading.** Fetch the manifest, decrypt it, then fetch, verify and decrypt each chunk in order; a chunk whose plaintext BLAKE3 does not match the manifest entry is a hard error, as is a final `BLAKE3(whole plaintext) != fileContentHash`.
+- **Rotation** ([§7.9](#79-rotation--revocation)) re-encrypts the head under the new key, which changes every chunk address because `key_id` is part of it, so a rotated head never shares ciphertext with the old key.
 
 ## 7.5 Content addressing & deduplication
 

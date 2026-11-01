@@ -21,7 +21,7 @@
 | `GET` | `/admin/users/{id}` | Usage, counts, devices, key generations, group/role membership |
 | `PATCH` | `/admin/users/{id}` | Role/group, **storage quota**, limits, **status** (block/unblock) |
 | `POST` | `/admin/users/bulk` | **Bulk edit** — apply changes to many users in one request |
-| `POST` | `/admin/users/import` · `GET /admin/users/export` | CSV import/export; SCIM (`/scim/v2/**`) drives IdP lifecycle |
+| `POST` | `/admin/users/import` · `GET /admin/users/export` | CSV import/export (format below); SCIM (`/scim/v2/**`) drives IdP lifecycle (below) |
 | `GET` | `/admin/instance` | Status: storage, DB, blob store, relay, key directory health |
 | `GET` | `/admin/instance/config` | Effective **non-secret** configuration |
 | `GET` | `/admin/license` | **Read-only** license/entitlement status (§12.8) — tier, licensed-to email, registered/active, lease expiry, degrade/read-only state |
@@ -33,6 +33,25 @@
 | `GET/POST/PATCH/DELETE` | `/admin/roles[/{id}]` | Role presets + custom roles (composed from permissions) |
 | `GET/POST/PATCH/DELETE` | `/admin/groups[/{id}]` | Create/edit groups; assign roles. `PATCH` also sets a file-sharing group's **`max_members` override** (G-5, §12.7) |
 | `POST/DELETE` | `/admin/groups/{id}/members` | Add/remove members (bulk-capable) |
+
+#### CSV import/export format **[P]**
+
+- **Encoding:** UTF-8, RFC 4180 (comma-separated, `"`-quoted, CRLF or LF), header row required, at most **10 000** data rows per import.
+- **Columns:** `email,display_name,role,status,storage_quota_bytes,groups`. `role` = `user|admin`; `status` = `active|blocked`; `storage_quota_bytes` empty = unlimited; `groups` = RBAC group names separated by `;`. Export adds leading `id` and trailing `created_at`.
+- **Semantics:** rows are **upserted by `email`**. A new email creates an account **with no credential** and sends an **invite** link (single-use `invite` token, [03 §3.2](03-data-model.md)) where the user sets a password + TOTP or a passkey and creates their own identity keys. An import can never set a password or a key, because a credential chosen by the admin would be known to the admin. `?dryRun=true` validates without writing.
+- **Response:** `{ created, updated, failed, rows: [ { line, email, status: "created|updated|unchanged|failed", error? } ] }`; one bad row does not abort the import. Audited as `admin.user_import` with counts only.
+
+#### SCIM 2.0 (enterprise) **[P]**
+
+[RFC 7643](https://www.rfc-editor.org/rfc/rfc7643) / [RFC 7644](https://www.rfc-editor.org/rfc/rfc7644) subset under `/scim/v2`, authenticated with the bearer `NYXITE__Scim__Token`, gated by `ent.sso` ([16 §16.5](16-licensing-and-entitlement.md)):
+
+| Endpoint | Supported |
+|---|---|
+| `GET /ServiceProviderConfig`, `/Schemas`, `/ResourceTypes` | Discovery; `patch` supported, `bulk`, `sort`, `changePassword` and `etag` not supported |
+| `GET/POST /Users`, `GET/PUT/PATCH/DELETE /Users/{id}` | Filter `userName eq "…"` and `externalId eq "…"` only; pagination `startIndex`/`count` |
+| `GET/POST /Groups`, `GET/PUT/PATCH/DELETE /Groups/{id}` | **RBAC groups** (§3.2a) and their members; never file-sharing groups, which carry client-held keys |
+
+Mapping: `userName` ↔ `email`, `displayName` ↔ `display_name`, `externalId` ↔ `external_idp_sub`, `active=false` ↔ `status='blocked'`. `DELETE /Users/{id}` **blocks** the account and revokes its sessions instead of purging it, because a purge would destroy content the user's collaborators still need; purging stays an explicit admin action. A SCIM-created user is an OIDC user (`external_idp` set) and signs in via the IdP.
 
 ### Structure, sessions (no content, no names)
 | Method | Path | Purpose |
@@ -66,10 +85,10 @@ Recorded `action` values (non-exhaustive) **[P]**:
 
 | Category | Examples |
 |----------|----------|
-| Auth | `auth.login`, `auth.2fa_challenge`, `auth.guest_session` |
+| Auth | `auth.login`, `auth.2fa_challenge`, `auth.guest_session`, `auth.logout`, `auth.refresh_reuse` (a used refresh token was presented again; the session is revoked — [03 §3.2](03-data-model.md)) |
 | Keys/devices | `device.enroll`, `device.revoke`, `key.publish`, `key.rotate`, `recovery.use` |
 | Sharing | `share.create`, `share.update`, `share.revoke`, `share.link_access` |
-| Admin | `admin.user_update`, `admin.user_block`, `admin.user_unblock`, `admin.quota_set`, `admin.bulk_update`, `admin.role_change`, `admin.group_change`, `admin.group_max_members_set`, `admin.session_revoke`, `admin.config_view`, `admin.device_revoke` |
+| Admin | `admin.user_update`, `admin.user_block`, `admin.user_unblock`, `admin.quota_set`, `admin.bulk_update`, `admin.role_change`, `admin.group_change`, `admin.group_max_members_set`, `admin.session_revoke`, `admin.user_import`, `admin.config_view`, `admin.device_revoke` |
 | Groups (file-sharing) | `group.enroll`, `group.enroll_rejected` (over-limit / transparency-unverified), `group.member_remove`, `group.key_rotate` |
 | Content lifecycle (structural) | `file.delete`, `file.restore`, `version.purge`, `blob.gc` |
 
@@ -104,7 +123,7 @@ The dashboard sets these; the **server enforces** them — none require reading 
 
 The enterprise/family file-sharing groups ([03 §3.2b](03-data-model.md), [09 §9.9](09-sharing-and-acl.md)) add two server-owned, **metadata-only** admin concerns. Neither reads content or a key. Step P4.4-SRV-4.
 
-- **Group-size limit (G-5), admin-overridable.** An instance-wide default **`group_max_members`** (config, [14](14-deployment-and-config.md)) is enforced **server-side at enrollment** (`POST /groups/{id}/members`, [04](04-rest-api.md)) by **membership-row count only** — it reads no content and no key; an over-limit add is rejected `409 group_full` and **audited** (`group.enroll_rejected`). The `admin` dashboard **overrides it per group** via `PATCH /admin/groups/{id}` setting `groups.max_members` (nullable; **null → the instance default**), mirroring the per-user storage-quota override pattern (§12.6). Every override change is audited (`admin.group_max_members_set`). Existence-hiding applies — no reach to the group → `404` (§13.6a).
+- **Group-size limit (G-5), admin-overridable.** An instance-wide default **`group_max_members`** (config `NYXITE__Groups__DefaultMaxMembers`, default **16**, [14](14-deployment-and-config.md)) is enforced **server-side at enrollment** (`POST /groups/{id}/members`, [04](04-rest-api.md)) by **membership-row count only** — it reads no content and no key; an over-limit add is rejected `409 group_full` and **audited** (`group.enroll_rejected`). The `admin` dashboard **overrides it per group** via `PATCH /admin/groups/{id}` setting `groups.max_members` (nullable; **null → the instance default**), mirroring the per-user storage-quota override pattern (§12.6). Every override change is audited (`admin.group_max_members_set`). Existence-hiding applies — no reach to the group → `404` (§13.6a).
 - **Enterprise-gated (L-3).** The per-group `max_members` override is one of the **advanced admin overrides** unlocked only by a valid license ([16 §16.5](16-licensing-and-entitlement.md), flag `ent.admin_overrides`) — together with the per-user quota override (§12.6) and scoped/custom RBAC. In **community mode** the override is refused and `group_max_members` is pinned to **16** (`ent.large_groups` off); enrollment past 16 returns `409 group_full`. The admin API still exposes the control, but a mutation while unlicensed returns `409 license_degraded`.
 - **Group-key & rotation health (public/opaque only).** `GET /admin/keys/health` (§12.2) also surfaces file-sharing-group health: **orphaned group-key grants** (grants for a departed member or a superseded generation), **rotation backlog** (scopes with a removal awaiting rotation, or old-generation DEK-to-group wraps not yet re-sealed), and per-scope generation counts. All are **public/opaque material only** — the view never touches a group private key, a content key, or a plaintext name; there is no break-glass ([13 §13.6b](13-security.md)).
 

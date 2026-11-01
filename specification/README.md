@@ -48,6 +48,7 @@ Two privacy-maximal **[P]** defaults to note explicitly:
 | 14 | [deployment-and-config.md](14-deployment-and-config.md) | Docker Compose, config (no KEK/no search), operations |
 | 15 | [roadmap-and-versioning.md](15-roadmap-and-versioning.md) | Phase mapping, versioning, canonical-doc updates |
 | 16 | [licensing-and-entitlement.md](16-licensing-and-entitlement.md) | Client side of self-hosting licensing: offline token verify, best-effort check-in/lease, enterprise feature gates, degrade/read-only enforcement (L-1–L-7) |
+| 17 | [key-transparency.md](17-key-transparency.md) | Append-only key-transparency log (Phase 4.3): leaf format, RFC 9162 Merkle tree, signed checkpoints, proofs, client verification, enrollment check, safety numbers |
 
 ## Status
 
