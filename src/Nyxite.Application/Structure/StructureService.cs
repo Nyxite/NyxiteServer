@@ -4,6 +4,7 @@ using Microsoft.Extensions.Options;
 using Nyxite.Application.Audit;
 using Nyxite.Application.Auth;
 using Nyxite.Application.Keys;
+using Nyxite.Application.Maintenance;
 using Nyxite.Contracts.Structure;
 using Nyxite.Crypto;
 using Nyxite.Domain.Identity;
@@ -25,7 +26,7 @@ namespace Nyxite.Application.Structure;
 /// </summary>
 public sealed class StructureService(
     NyxiteDbContext db, DeviceGuard guard, IdempotencyStore idempotency, AuditWriter audit, TimeProvider time,
-    IOptions<StructureOptions> options)
+    IOptions<StructureOptions> options, IOptions<RetentionOptions> retention)
 {
     public const string CreateProjectEndpoint = "POST /projects";
     public const string CreateFolderEndpoint = "POST /folders";
@@ -37,22 +38,33 @@ public sealed class StructureService(
     /// <summary>A wrapped object key: the 32-byte AES key sealed with hybrid HPKE.</summary>
     public const int WrappedKeySize = 32 + HybridHpke.Overhead;
 
+    /// <summary>Most object ids one key lookup may name.</summary>
+    public const int MaxKeyLookup = 500;
+
+    public const string Project = "project";
+    public const string Folder = "folder";
+    public const string File = "file";
+
     private readonly StructureOptions _options = options.Value;
+    private readonly TimeSpan _trashWindow = TimeSpan.FromDays(retention.Value.TrashWindowDays);
 
     // ---------------------------------------------------------------- projects
 
-    public async Task<PageDto<ProjectDto>> ListProjectsAsync(ClaimsPrincipal principal, string? cursor, int? limit, CancellationToken ct)
+    public async Task<PageDto<ProjectDto>> ListProjectsAsync(ClaimsPrincipal principal, string? cursor, int? limit, bool keys, CancellationToken ct)
     {
         var userId = principal.UserId();
         var (after, take) = Page(cursor, limit);
         var rows = await db.Projects.AsNoTracking()
             .Where(p => p.OwnerId == userId && p.DeletedAt == null && p.Id > after)
             .OrderBy(p => p.Id).Take(take + 1).ToListAsync(ct);
-        return ToPage(rows, take, r => r.Id, ToDto);
+        return ToPage(rows, take, r => r.Id, await ProjectMapAsync(rows.Take(take), userId, keys, ct));
     }
 
-    public async Task<ProjectDto> GetProjectAsync(ClaimsPrincipal principal, Guid id, CancellationToken ct) =>
-        ToDto(await ProjectAsync(principal.UserId(), id, tracked: false, ct));
+    public async Task<ProjectDto> GetProjectAsync(ClaimsPrincipal principal, Guid id, bool keys, CancellationToken ct)
+    {
+        var userId = principal.UserId();
+        return await ToDtoAsync(await ProjectAsync(userId, id, tracked: false, ct), userId, keys, ct);
+    }
 
     public async Task<IdempotentResponse> CreateProjectAsync(ClaimsPrincipal principal, CreateProjectRequest body, string? idempotencyKey, CancellationToken ct)
     {
@@ -78,7 +90,7 @@ public sealed class StructureService(
             Id = Guid.CreateVersion7(now), ProjectId = project.Id, MemberId = userId, KeyId = wrap.KeyId, WrappedKey = wrap.Ciphertext,
             Generation = 1, AlgId = wrap.AlgId, CreatedAt = now,
         });
-        var stored = idempotency.Add(userId, CreateProjectEndpoint, key, hash, 201, ToDto(project));
+        var stored = idempotency.Add(userId, CreateProjectEndpoint, key, hash, 201, ToDto(project, wrap.ToDto(userId)));
         await SaveCreateAsync(ct);
         return stored;
     }
@@ -94,10 +106,10 @@ public sealed class StructureService(
         if (Policy(body.SyncPolicy) is { } policy) project.SyncPolicy = policy;
         project.UpdatedAt = time.GetUtcNow();
         await db.SaveChangesAsync(ct);
-        return ToDto(project);
+        return await ToDtoAsync(project, userId, keys: true, ct);
     }
 
-    /// <summary>Moves the project and everything in it to Trash, with one timestamp, so a restore finds the same set.</summary>
+    /// <summary>Moves the project and everything in it to Trash. What goes along is marked with the project's id, so a restore finds the same set.</summary>
     public async Task DeleteProjectAsync(ClaimsPrincipal principal, Guid id, RequestInfo request, CancellationToken ct)
     {
         var userId = await WriterAsync(principal, ct);
@@ -105,9 +117,9 @@ public sealed class StructureService(
         var project = await ProjectAsync(userId, id, tracked: true, ct);
         var now = time.GetUtcNow();
         var files = await db.Files.Where(f => f.ProjectId == id && f.DeletedAt == null)
-            .ExecuteUpdateAsync(s => s.SetProperty(f => f.DeletedAt, now).SetProperty(f => f.UpdatedAt, now), ct);
+            .ExecuteUpdateAsync(s => s.SetProperty(f => f.DeletedAt, now).SetProperty(f => f.UpdatedAt, now).SetProperty(f => f.DeletedRootId, id), ct);
         var folders = await db.Folders.Where(f => f.ProjectId == id && f.DeletedAt == null)
-            .ExecuteUpdateAsync(s => s.SetProperty(f => f.DeletedAt, now).SetProperty(f => f.UpdatedAt, now), ct);
+            .ExecuteUpdateAsync(s => s.SetProperty(f => f.DeletedAt, now).SetProperty(f => f.UpdatedAt, now).SetProperty(f => f.DeletedRootId, id), ct);
         project.DeletedAt = now;
         project.UpdatedAt = now;
         audit.Add("project.delete", userId, request, targetType: "project", targetId: id, detail: new { folders, files });
@@ -124,18 +136,22 @@ public sealed class StructureService(
 
     // ---------------------------------------------------------------- folders
 
-    public async Task<PageDto<FolderDto>> ListFoldersAsync(ClaimsPrincipal principal, Guid projectId, string? cursor, int? limit, CancellationToken ct)
+    public async Task<PageDto<FolderDto>> ListFoldersAsync(ClaimsPrincipal principal, Guid projectId, string? cursor, int? limit, bool keys, CancellationToken ct)
     {
-        await ProjectAsync(principal.UserId(), projectId, tracked: false, ct);
+        var userId = principal.UserId();
+        await ProjectAsync(userId, projectId, tracked: false, ct);
         var (after, take) = Page(cursor, limit);
         var rows = await db.Folders.AsNoTracking()
             .Where(f => f.ProjectId == projectId && f.DeletedAt == null && f.Id > after)
             .OrderBy(f => f.Id).Take(take + 1).ToListAsync(ct);
-        return ToPage(rows, take, r => r.Id, ToDto);
+        return ToPage(rows, take, r => r.Id, await FolderMapAsync(rows.Take(take), userId, keys, ct));
     }
 
-    public async Task<FolderDto> GetFolderAsync(ClaimsPrincipal principal, Guid id, CancellationToken ct) =>
-        ToDto(await FolderAsync(principal.UserId(), id, tracked: false, ct));
+    public async Task<FolderDto> GetFolderAsync(ClaimsPrincipal principal, Guid id, bool keys, CancellationToken ct)
+    {
+        var userId = principal.UserId();
+        return await ToDtoAsync(await FolderAsync(userId, id, tracked: false, ct), userId, keys, ct);
+    }
 
     public async Task<IdempotentResponse> CreateFolderAsync(ClaimsPrincipal principal, CreateFolderRequest body, string? idempotencyKey, CancellationToken ct)
     {
@@ -164,7 +180,7 @@ public sealed class StructureService(
             Id = Guid.CreateVersion7(now), FolderId = folder.Id, MemberId = userId, KeyId = wrap.KeyId, WrappedKey = wrap.Ciphertext,
             Generation = 1, AlgId = wrap.AlgId, CreatedAt = now,
         });
-        var stored = idempotency.Add(userId, CreateFolderEndpoint, key, hash, 201, ToDto(folder));
+        var stored = idempotency.Add(userId, CreateFolderEndpoint, key, hash, 201, ToDto(folder, wrap.ToDto(userId)));
         await SaveCreateAsync(ct);
         return stored;
     }
@@ -197,7 +213,7 @@ public sealed class StructureService(
         folder.UpdatedAt = time.GetUtcNow();
         await db.SaveChangesAsync(ct);
         await tx.CommitAsync(ct);
-        return ToDto(folder);
+        return await ToDtoAsync(folder, userId, keys: true, ct);
     }
 
     /// <summary>Moves the folder and its whole subtree to Trash as one audited event (02 §2.6).</summary>
@@ -213,14 +229,15 @@ public sealed class StructureService(
                 SELECT id FROM folders WHERE id = {id}
                 UNION ALL
                 SELECT f.id FROM folders f JOIN sub ON f.parent_folder_id = sub.id WHERE f.deleted_at IS NULL)
-            UPDATE files SET deleted_at = {now}, updated_at = {now} WHERE folder_id IN (SELECT id FROM sub) AND deleted_at IS NULL
+            UPDATE files SET deleted_at = {now}, updated_at = {now}, deleted_root_id = {id} WHERE folder_id IN (SELECT id FROM sub) AND deleted_at IS NULL
             """, ct);
         var folders = await db.Database.ExecuteSqlAsync($"""
             WITH RECURSIVE sub AS (
                 SELECT id FROM folders WHERE id = {id}
                 UNION ALL
                 SELECT f.id FROM folders f JOIN sub ON f.parent_folder_id = sub.id WHERE f.deleted_at IS NULL)
-            UPDATE folders SET deleted_at = {now}, updated_at = {now} WHERE id IN (SELECT id FROM sub) AND deleted_at IS NULL
+            UPDATE folders SET deleted_at = {now}, updated_at = {now}, deleted_root_id = CASE WHEN id = {id} THEN NULL ELSE {id}::uuid END
+            WHERE id IN (SELECT id FROM sub) AND deleted_at IS NULL
             """, ct);
         audit.Add("folder.delete", userId, request, targetType: "folder", targetId: id, detail: new { folders, files });
         await db.SaveChangesAsync(ct);
@@ -237,7 +254,7 @@ public sealed class StructureService(
     // ---------------------------------------------------------------- files
 
     /// <summary>The files of a project, or with <paramref name="folderId"/> the files directly in that folder.</summary>
-    public async Task<PageDto<FileDto>> ListFilesAsync(ClaimsPrincipal principal, Guid? projectId, Guid? folderId, string? cursor, int? limit, CancellationToken ct)
+    public async Task<PageDto<FileDto>> ListFilesAsync(ClaimsPrincipal principal, Guid? projectId, Guid? folderId, string? cursor, int? limit, bool keys, CancellationToken ct)
     {
         var userId = principal.UserId();
         if (folderId is { } fid) projectId = (await FolderAsync(userId, fid, tracked: false, ct)).ProjectId;
@@ -247,11 +264,14 @@ public sealed class StructureService(
         var rows = await db.Files.AsNoTracking()
             .Where(f => f.ProjectId == projectId && (folderId == null || f.FolderId == folderId) && f.DeletedAt == null && f.Id > after)
             .OrderBy(f => f.Id).Take(take + 1).ToListAsync(ct);
-        return ToPage(rows, take, r => r.Id, ToDto);
+        return ToPage(rows, take, r => r.Id, await FileMapAsync(rows.Take(take), userId, keys, ct));
     }
 
-    public async Task<FileDto> GetFileAsync(ClaimsPrincipal principal, Guid id, CancellationToken ct) =>
-        ToDto(await FileAsync(principal.UserId(), id, tracked: false, ct));
+    public async Task<FileDto> GetFileAsync(ClaimsPrincipal principal, Guid id, bool keys, CancellationToken ct)
+    {
+        var userId = principal.UserId();
+        return await ToDtoAsync(await FileAsync(userId, id, tracked: false, ct), userId, keys, ct);
+    }
 
     public async Task<IdempotentResponse> CreateFileAsync(ClaimsPrincipal principal, CreateFileRequest body, string? idempotencyKey, CancellationToken ct)
     {
@@ -285,7 +305,7 @@ public sealed class StructureService(
             Id = Guid.CreateVersion7(now), FileId = file.Id, MemberId = userId, KeyId = wrap.KeyId, WrappedKey = wrap.Ciphertext,
             Generation = 1, AlgId = wrap.AlgId, CreatedAt = now,
         });
-        var stored = idempotency.Add(userId, CreateFileEndpoint, key, hash, 201, ToDto(file));
+        var stored = idempotency.Add(userId, CreateFileEndpoint, key, hash, 201, ToDto(file, wrap.ToDto(userId)));
         await SaveCreateAsync(ct);
         return stored;
     }
@@ -307,7 +327,7 @@ public sealed class StructureService(
 
         file.UpdatedAt = time.GetUtcNow();
         await db.SaveChangesAsync(ct);
-        return ToDto(file);
+        return await ToDtoAsync(file, userId, keys: true, ct);
     }
 
     public async Task DeleteFileAsync(ClaimsPrincipal principal, Guid id, RequestInfo request, CancellationToken ct)
@@ -418,7 +438,10 @@ public sealed class StructureService(
     private static string? Policy(string? syncPolicy) =>
         syncPolicy is null || SyncPolicies.IsValid(syncPolicy) ? syncPolicy : throw new AuthException(400, "bad_sync_policy", "syncPolicy is not a known sync policy.");
 
-    private sealed record Wrap(Guid KeyId, byte[] Ciphertext, string AlgId);
+    private sealed record Wrap(Guid KeyId, byte[] Ciphertext, string AlgId)
+    {
+        public WrappedKeyDto ToDto(Guid memberId) => new(KeyId, memberId, Base64UrlCodec.Encode(Ciphertext), 1, AlgId);
+    }
 
     /// <summary>The creator's own wrapped key of a new object. It must be the key the name and the metadata are sealed with.</summary>
     private static Wrap OwnerWrap(WrappedKeyRequest? wrap, Guid userId, Guid nameKeyId, byte[]? metadata)
@@ -472,17 +495,271 @@ public sealed class StructureService(
         return new WrappedKeysDto(rows.Select(k => new WrappedKeyDto(k.KeyId, k.MemberId, Base64UrlCodec.Encode(k.WrappedKey), k.Generation, k.AlgId)).ToList());
     }
 
+    // ---------------------------------------------------------------- keys of many objects
+
+    private sealed record KeyRow(Guid ObjectId, Guid KeyId, Guid? MemberId, byte[] WrappedKey, int Generation, string AlgId)
+    {
+        public WrappedKeyDto ToDto() => new(KeyId, MemberId, Base64UrlCodec.Encode(WrappedKey), Generation, AlgId);
+    }
+
+    /// <summary>The caller's live wraps of the given objects, in one query per kind.</summary>
+    private async Task<List<KeyRow>> KeyRowsAsync(string entity, IReadOnlyCollection<Guid> ids, Guid userId, CancellationToken ct)
+    {
+        if (ids.Count == 0) return [];
+        return entity switch
+        {
+            Project => await db.StructureKeys.AsNoTracking()
+                .Where(k => k.ProjectId != null && ids.Contains(k.ProjectId.Value) && k.MemberId == userId && k.RevokedAt == null)
+                .Select(k => new KeyRow(k.ProjectId!.Value, k.KeyId, k.MemberId, k.WrappedKey, k.Generation, k.AlgId)).ToListAsync(ct),
+            Folder => await db.StructureKeys.AsNoTracking()
+                .Where(k => k.FolderId != null && ids.Contains(k.FolderId.Value) && k.MemberId == userId && k.RevokedAt == null)
+                .Select(k => new KeyRow(k.FolderId!.Value, k.KeyId, k.MemberId, k.WrappedKey, k.Generation, k.AlgId)).ToListAsync(ct),
+            _ => await db.FileKeys.AsNoTracking()
+                .Where(k => ids.Contains(k.FileId) && k.MemberId == userId && k.RevokedAt == null)
+                .Select(k => new KeyRow(k.FileId, k.KeyId, k.MemberId, k.WrappedKey, k.Generation, k.AlgId)).ToListAsync(ct),
+        };
+    }
+
+    /// <summary>
+    /// The wrap each object is shown with: the caller's wrap of the object's current key generation, which opens its name
+    /// and metadata. Empty when the client asked for no keys, because it has them cached.
+    /// </summary>
+    private async Task<Dictionary<Guid, WrappedKeyDto>> CurrentKeysAsync(string entity, IEnumerable<(Guid Id, int Generation)> objects, Guid userId,
+        bool keys, CancellationToken ct)
+    {
+        if (!keys) return [];
+        var generation = objects.ToDictionary(o => o.Id, o => o.Generation);
+        return (await KeyRowsAsync(entity, generation.Keys, userId, ct))
+            .Where(r => generation[r.ObjectId] == r.Generation)
+            .ToDictionary(r => r.ObjectId, r => r.ToDto());
+    }
+
+    /// <summary>
+    /// The caller's wrapped keys of up to <see cref="MaxKeyLookup"/> objects in one request (04 "structure"), for a client
+    /// that listed without keys and misses some. Every live generation is returned. Objects the caller cannot reach
+    /// are left out without a trace, like a 404 would. Objects in Trash are included, so the Trash view can show names.
+    /// </summary>
+    public async Task<KeyLookupDto> LookupKeysAsync(ClaimsPrincipal principal, KeyLookupRequest body, CancellationToken ct)
+    {
+        var userId = principal.UserId();
+        var projects = (body.ProjectIds ?? []).Distinct().ToList();
+        var folders = (body.FolderIds ?? []).Distinct().ToList();
+        var files = (body.FileIds ?? []).Distinct().ToList();
+        if (projects.Count + folders.Count + files.Count > MaxKeyLookup) throw AuthException.Validation($"At most {MaxKeyLookup} ids per lookup.");
+
+        var owned = db.Projects.Where(p => p.OwnerId == userId);
+        projects = await owned.Where(p => projects.Contains(p.Id)).Select(p => p.Id).ToListAsync(ct);
+        folders = await db.Folders.Where(f => folders.Contains(f.Id) && owned.Any(p => p.Id == f.ProjectId)).Select(f => f.Id).ToListAsync(ct);
+        files = await db.Files.Where(f => files.Contains(f.Id) && owned.Any(p => p.Id == f.ProjectId)).Select(f => f.Id).ToListAsync(ct);
+
+        var items = new List<ObjectKeysDto>();
+        foreach (var (entity, ids) in new[] { (Project, projects), (Folder, folders), (File, files) })
+        {
+            items.AddRange((await KeyRowsAsync(entity, ids, userId, ct))
+                .GroupBy(r => r.ObjectId).OrderBy(g => g.Key)
+                .Select(g => new ObjectKeysDto(entity, g.Key, g.OrderBy(r => r.Generation).Select(r => r.ToDto()).ToList())));
+        }
+
+        return new KeyLookupDto(items);
+    }
+
+    // ---------------------------------------------------------------- trash
+
+    /// <summary>Rows deleted before this moment have left Trash: only an admin restores them (03 §3.3, DL-4).</summary>
+    private DateTimeOffset TrashCutoff => time.GetUtcNow() - _trashWindow;
+
+    /// <summary>
+    /// The Trash view (03 §3.3, DL-1): what the caller deleted directly and can still restore, newest first. What went to
+    /// Trash along with a folder or project is not listed on its own, it is counted on that entry and comes back with it.
+    /// </summary>
+    public async Task<PageDto<TrashItemDto>> ListTrashAsync(ClaimsPrincipal principal, string? cursor, int? limit, bool keys, CancellationToken ct)
+    {
+        var userId = principal.UserId();
+        if (limit is < 1 or > MaxPageSize) throw AuthException.Validation($"limit must be 1 to {MaxPageSize}.");
+        var take = limit ?? DefaultPageSize;
+        var (beforeAt, beforeId) = TrashCursor(cursor);
+        var cutoff = TrashCutoff;
+        var owned = db.Projects.Where(p => p.OwnerId == userId);
+
+        // Each kind contributes its newest candidates; the page is the newest of all three.
+        var projects = await owned.AsNoTracking()
+            .Where(p => p.DeletedAt > cutoff && (p.DeletedAt < beforeAt || (p.DeletedAt == beforeAt && p.Id < beforeId)))
+            .OrderByDescending(p => p.DeletedAt).ThenByDescending(p => p.Id).Take(take + 1).ToListAsync(ct);
+        var folders = await db.Folders.AsNoTracking()
+            .Where(f => f.DeletedAt > cutoff && f.DeletedRootId == null && owned.Any(p => p.Id == f.ProjectId)
+                        && (f.DeletedAt < beforeAt || (f.DeletedAt == beforeAt && f.Id < beforeId)))
+            .OrderByDescending(f => f.DeletedAt).ThenByDescending(f => f.Id).Take(take + 1).ToListAsync(ct);
+        var files = await db.Files.AsNoTracking()
+            .Where(f => f.DeletedAt > cutoff && f.DeletedRootId == null && owned.Any(p => p.Id == f.ProjectId)
+                        && (f.DeletedAt < beforeAt || (f.DeletedAt == beforeAt && f.Id < beforeId)))
+            .OrderByDescending(f => f.DeletedAt).ThenByDescending(f => f.Id).Take(take + 1).ToListAsync(ct);
+
+        var merged = projects.Select(p => (At: p.DeletedAt!.Value, p.Id, Row: (object)p))
+            .Concat(folders.Select(f => (At: f.DeletedAt!.Value, f.Id, Row: (object)f)))
+            .Concat(files.Select(f => (At: f.DeletedAt!.Value, f.Id, Row: (object)f)))
+            .OrderByDescending(e => e.At).ThenByDescending(e => e.Id).ToList();
+        var page = merged.Take(take).ToList();
+
+        var projectMap = await ProjectMapAsync(page.Select(e => e.Row).OfType<ProjectEntity>(), userId, keys, ct);
+        var folderMap = await FolderMapAsync(page.Select(e => e.Row).OfType<FolderEntity>(), userId, keys, ct);
+        var fileMap = await FileMapAsync(page.Select(e => e.Row).OfType<FileEntity>(), userId, keys, ct);
+        var roots = page.Where(e => e.Row is not FileEntity).Select(e => e.Id).ToList();
+        var folderCounts = await db.Folders.Where(f => f.DeletedRootId != null && roots.Contains(f.DeletedRootId.Value))
+            .GroupBy(f => f.DeletedRootId!.Value).Select(g => new { g.Key, Count = g.Count() }).ToDictionaryAsync(g => g.Key, g => g.Count, ct);
+        var fileCounts = await db.Files.Where(f => f.DeletedRootId != null && roots.Contains(f.DeletedRootId.Value))
+            .GroupBy(f => f.DeletedRootId!.Value).Select(g => new { g.Key, Count = g.Count() }).ToDictionaryAsync(g => g.Key, g => g.Count, ct);
+
+        var items = page.Select(e => new TrashItemDto(
+            e.Row switch { ProjectEntity => Project, FolderEntity => Folder, _ => File },
+            e.At, e.At + _trashWindow, folderCounts.GetValueOrDefault(e.Id), fileCounts.GetValueOrDefault(e.Id),
+            e.Row is ProjectEntity p ? projectMap(p) : null, e.Row is FolderEntity fo ? folderMap(fo) : null, e.Row is FileEntity fi ? fileMap(fi) : null)).ToList();
+        string? next = null;
+        if (merged.Count > take)
+        {
+            var last = page[^1];
+            var bytes = new byte[24];
+            System.Buffers.Binary.BinaryPrimitives.WriteInt64BigEndian(bytes, last.At.UtcTicks);
+            last.Id.TryWriteBytes(bytes.AsSpan(8), bigEndian: true, out _);
+            next = Base64UrlCodec.Encode(bytes);
+        }
+
+        return new PageDto<TrashItemDto>(items, next);
+    }
+
+    private static (DateTimeOffset At, Guid Id) TrashCursor(string? cursor)
+    {
+        if (cursor is null) return (DateTimeOffset.MaxValue, Guid.Empty);
+        if (!Base64UrlCodec.TryDecode(cursor, out var bytes) || bytes.Length != 24) throw AuthException.Validation("cursor is malformed.");
+        var ticks = System.Buffers.Binary.BinaryPrimitives.ReadInt64BigEndian(bytes);
+        if (ticks < 0 || ticks > DateTimeOffset.MaxValue.UtcTicks) throw AuthException.Validation("cursor is malformed.");
+        return (new DateTimeOffset(ticks, TimeSpan.Zero), new Guid(bytes.AsSpan(8), bigEndian: true));
+    }
+
+    /// <summary>Brings a project back from Trash, with everything its delete took along. Restoring a live project changes nothing.</summary>
+    public async Task<ProjectDto> RestoreProjectAsync(ClaimsPrincipal principal, Guid id, RequestInfo request, CancellationToken ct)
+    {
+        var userId = await WriterAsync(principal, ct);
+        await using var tx = await db.Database.BeginTransactionAsync(ct);
+        var cutoff = TrashCutoff;
+        var project = await db.Projects.SingleOrDefaultAsync(p => p.Id == id && p.OwnerId == userId && (p.DeletedAt == null || p.DeletedAt > cutoff), ct)
+                      ?? throw AuthException.NotFound();
+        if (project.DeletedAt is not null)
+        {
+            var (folders, files) = await RestoreWithAsync(id, ct);
+            project.DeletedAt = null;
+            project.UpdatedAt = time.GetUtcNow();
+            audit.Add("project.restore", userId, request, targetType: Project, targetId: id, detail: new { folders, files });
+            await db.SaveChangesAsync(ct);
+        }
+
+        await tx.CommitAsync(ct);
+        return await ToDtoAsync(project, userId, keys: true, ct);
+    }
+
+    /// <summary>Brings a folder back from Trash with its subtree. What it lies in must be live (04 "structure").</summary>
+    public async Task<FolderDto> RestoreFolderAsync(ClaimsPrincipal principal, Guid id, RequestInfo request, CancellationToken ct)
+    {
+        var userId = await WriterAsync(principal, ct);
+        await using var tx = await db.Database.BeginTransactionAsync(ct);
+        var cutoff = TrashCutoff;
+        var folder = await db.Folders.SingleOrDefaultAsync(f => f.Id == id && (f.DeletedAt == null || f.DeletedAt > cutoff)
+                         && db.Projects.Any(p => p.Id == f.ProjectId && p.OwnerId == userId), ct)
+                     ?? throw AuthException.NotFound();
+        if (folder.DeletedAt is not null)
+        {
+            await RequireLiveContainerAsync(folder.ProjectId, folder.ParentFolderId, ct);
+            var (folders, files) = await RestoreWithAsync(id, ct);
+            folder.DeletedAt = null;
+            folder.DeletedRootId = null;
+            folder.UpdatedAt = time.GetUtcNow();
+            audit.Add("folder.restore", userId, request, targetType: Folder, targetId: id, detail: new { folders = folders + 1, files });
+            await db.SaveChangesAsync(ct);
+        }
+
+        await tx.CommitAsync(ct);
+        return await ToDtoAsync(folder, userId, keys: true, ct);
+    }
+
+    public async Task<FileDto> RestoreFileAsync(ClaimsPrincipal principal, Guid id, RequestInfo request, CancellationToken ct)
+    {
+        var userId = await WriterAsync(principal, ct);
+        var cutoff = TrashCutoff;
+        var file = await db.Files.SingleOrDefaultAsync(f => f.Id == id && (f.DeletedAt == null || f.DeletedAt > cutoff)
+                       && db.Projects.Any(p => p.Id == f.ProjectId && p.OwnerId == userId), ct)
+                   ?? throw AuthException.NotFound();
+        if (file.DeletedAt is not null)
+        {
+            await RequireLiveContainerAsync(file.ProjectId, file.FolderId, ct);
+            file.DeletedAt = null;
+            file.DeletedRootId = null;
+            file.UpdatedAt = time.GetUtcNow();
+            audit.Add("file.restore", userId, request, targetType: File, targetId: id);
+            await db.SaveChangesAsync(ct);
+        }
+
+        return await ToDtoAsync(file, userId, keys: true, ct);
+    }
+
+    /// <summary>
+    /// Nothing is restored into Trash: the folder and the project it lies in must be live, and the caller restores those
+    /// first. Moving it to the project root instead was rejected, because it would reappear where nobody put it.
+    /// </summary>
+    private async Task RequireLiveContainerAsync(Guid projectId, Guid? folderId, CancellationToken ct)
+    {
+        if (!await db.Projects.AnyAsync(p => p.Id == projectId && p.DeletedAt == null, ct))
+            throw AuthException.Conflict("The project is in Trash; restore it first.");
+        if (folderId is { } fid && !await db.Folders.AnyAsync(f => f.Id == fid && f.DeletedAt == null, ct))
+            throw AuthException.Conflict("The containing folder is in Trash; restore it first.");
+    }
+
+    /// <summary>Restores what the delete of <paramref name="rootId"/> took along. Things deleted on their own before stay in Trash.</summary>
+    private async Task<(int Folders, int Files)> RestoreWithAsync(Guid rootId, CancellationToken ct)
+    {
+        var now = time.GetUtcNow();
+        var folders = await db.Folders.Where(f => f.DeletedRootId == rootId)
+            .ExecuteUpdateAsync(s => s.SetProperty(f => f.DeletedAt, (DateTimeOffset?)null).SetProperty(f => f.DeletedRootId, (Guid?)null).SetProperty(f => f.UpdatedAt, now), ct);
+        var files = await db.Files.Where(f => f.DeletedRootId == rootId)
+            .ExecuteUpdateAsync(s => s.SetProperty(f => f.DeletedAt, (DateTimeOffset?)null).SetProperty(f => f.DeletedRootId, (Guid?)null).SetProperty(f => f.UpdatedAt, now), ct);
+        return (folders, files);
+    }
+
+    // ---------------------------------------------------------------- mapping
+
     private static string? Encode(byte[]? bytes) => bytes is null ? null : Base64UrlCodec.Encode(bytes);
 
-    private static ProjectDto ToDto(ProjectEntity p) =>
-        new(p.Id, p.OwnerId, Base64UrlCodec.Encode(p.NameEnc), Encode(p.MetadataEnc), p.SyncPolicy, p.KeyGeneration, p.CreatedAt, p.UpdatedAt, p.DeletedAt);
+    private async Task<Func<ProjectEntity, ProjectDto>> ProjectMapAsync(IEnumerable<ProjectEntity> rows, Guid userId, bool keys, CancellationToken ct)
+    {
+        var map = await CurrentKeysAsync(Project, rows.Select(r => (r.Id, r.KeyGeneration)), userId, keys, ct);
+        return p => ToDto(p, map.GetValueOrDefault(p.Id));
+    }
 
-    private static FolderDto ToDto(FolderEntity f) =>
+    private async Task<Func<FolderEntity, FolderDto>> FolderMapAsync(IEnumerable<FolderEntity> rows, Guid userId, bool keys, CancellationToken ct)
+    {
+        var map = await CurrentKeysAsync(Folder, rows.Select(r => (r.Id, r.KeyGeneration)), userId, keys, ct);
+        return f => ToDto(f, map.GetValueOrDefault(f.Id));
+    }
+
+    private async Task<Func<FileEntity, FileDto>> FileMapAsync(IEnumerable<FileEntity> rows, Guid userId, bool keys, CancellationToken ct)
+    {
+        var map = await CurrentKeysAsync(File, rows.Select(r => (r.Id, r.KeyGeneration)), userId, keys, ct);
+        return f => ToDto(f, map.GetValueOrDefault(f.Id));
+    }
+
+    private async Task<ProjectDto> ToDtoAsync(ProjectEntity p, Guid userId, bool keys, CancellationToken ct) => (await ProjectMapAsync([p], userId, keys, ct))(p);
+
+    private async Task<FolderDto> ToDtoAsync(FolderEntity f, Guid userId, bool keys, CancellationToken ct) => (await FolderMapAsync([f], userId, keys, ct))(f);
+
+    private async Task<FileDto> ToDtoAsync(FileEntity f, Guid userId, bool keys, CancellationToken ct) => (await FileMapAsync([f], userId, keys, ct))(f);
+
+    private static ProjectDto ToDto(ProjectEntity p, WrappedKeyDto? key) =>
+        new(p.Id, p.OwnerId, Base64UrlCodec.Encode(p.NameEnc), Encode(p.MetadataEnc), p.SyncPolicy, p.KeyGeneration, p.CreatedAt, p.UpdatedAt, p.DeletedAt, key);
+
+    private static FolderDto ToDto(FolderEntity f, WrappedKeyDto? key) =>
         new(f.Id, f.ProjectId, f.ParentFolderId, Base64UrlCodec.Encode(f.NameEnc), Encode(f.MetadataEnc), f.SyncPolicy, f.KeyGeneration,
-            f.CreatedAt, f.UpdatedAt, f.DeletedAt);
+            f.CreatedAt, f.UpdatedAt, f.DeletedAt, key);
 
     // currentVersionSeq stays null until file_versions exists (Phase 1.1).
-    private static FileDto ToDto(FileEntity f) =>
+    private static FileDto ToDto(FileEntity f, WrappedKeyDto? key) =>
         new(f.Id, f.ProjectId, f.FolderId, f.OwnerId, Base64UrlCodec.Encode(f.NameEnc), Encode(f.MetadataEnc), f.ContentType, f.SyncPolicy,
-            null, f.CrdtDocId, f.KeyGeneration, f.CreatedAt, f.UpdatedAt, f.DeletedAt);
+            null, f.CrdtDocId, f.KeyGeneration, f.CreatedAt, f.UpdatedAt, f.DeletedAt, key);
 }

@@ -51,6 +51,8 @@ internal sealed class FolderConfiguration : IEntityTypeConfiguration<FolderEntit
         b.Property(x => x.CreatedAt).HasColumnName("created_at").HasDefaultValueSql("now()");
         b.Property(x => x.UpdatedAt).HasColumnName("updated_at").HasDefaultValueSql("now()");
         b.Property(x => x.DeletedAt).HasColumnName("deleted_at");
+        b.Property(x => x.DeletedRootId).HasColumnName("deleted_root_id");
+        b.HasIndex(x => x.DeletedRootId).HasFilter("deleted_root_id IS NOT NULL").HasDatabaseName("ix_folders_deleted_root");
         b.HasOne<ProjectEntity>().WithMany().HasForeignKey(x => x.ProjectId).OnDelete(DeleteBehavior.Restrict);
         b.HasOne<FolderEntity>().WithMany().HasForeignKey(x => x.ParentFolderId).OnDelete(DeleteBehavior.Restrict);
         b.HasIndex(x => x.ProjectId).HasFilter(StructureSql.Live).HasDatabaseName("ix_folders_project");
@@ -82,6 +84,8 @@ internal sealed class FileConfiguration : IEntityTypeConfiguration<FileEntity>
         b.Property(x => x.CreatedAt).HasColumnName("created_at").HasDefaultValueSql("now()");
         b.Property(x => x.UpdatedAt).HasColumnName("updated_at").HasDefaultValueSql("now()");
         b.Property(x => x.DeletedAt).HasColumnName("deleted_at");
+        b.Property(x => x.DeletedRootId).HasColumnName("deleted_root_id");
+        b.HasIndex(x => x.DeletedRootId).HasFilter("deleted_root_id IS NOT NULL").HasDatabaseName("ix_files_deleted_root");
         b.HasOne<ProjectEntity>().WithMany().HasForeignKey(x => x.ProjectId).OnDelete(DeleteBehavior.Restrict);
         b.HasOne<FolderEntity>().WithMany().HasForeignKey(x => x.FolderId).OnDelete(DeleteBehavior.Restrict);
         b.HasOne<UserEntity>().WithMany().HasForeignKey(x => x.OwnerId).OnDelete(DeleteBehavior.Restrict);

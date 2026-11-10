@@ -16,6 +16,12 @@ public sealed class RetentionOptions
     /// <summary>How long revoked or expired <c>sessions</c> rows, and with them their refresh-token chain, are kept.</summary>
     public int SessionRetentionDays { get; set; } = 30;
 
+    /// <summary>
+    /// How long a deleted project, folder or file stays in Trash, where its owner can restore it (03 §3.3, DL-1).
+    /// After that only an admin can bring it back, until it is purged.
+    /// </summary>
+    public int TrashWindowDays { get; set; } = 30;
+
     /// <summary>How often the maintenance job deletes expired rows.</summary>
     public TimeSpan CleanupInterval { get; set; } = TimeSpan.FromHours(1);
 }

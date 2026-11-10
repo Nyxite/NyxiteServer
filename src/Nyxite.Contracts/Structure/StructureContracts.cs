@@ -51,7 +51,7 @@ public sealed record CreateProjectRequest(Guid Id, string? NameEnc, string? Meta
 public sealed record UpdateProjectRequest(string? NameEnc, Patch<string?> MetadataEnc, string? SyncPolicy);
 
 public sealed record ProjectDto(Guid Id, Guid OwnerId, string NameEnc, string? MetadataEnc, string SyncPolicy, int KeyGeneration,
-    DateTimeOffset CreatedAt, DateTimeOffset UpdatedAt, DateTimeOffset? DeletedAt);
+    DateTimeOffset CreatedAt, DateTimeOffset UpdatedAt, DateTimeOffset? DeletedAt, WrappedKeyDto? WrappedKey);
 
 public sealed record CreateFolderRequest(Guid Id, Guid ProjectId, Guid? ParentFolderId, string? NameEnc, string? MetadataEnc, string? SyncPolicy,
     WrappedKeyRequest? OwnerWrappedKey);
@@ -59,7 +59,7 @@ public sealed record CreateFolderRequest(Guid Id, Guid ProjectId, Guid? ParentFo
 public sealed record UpdateFolderRequest(string? NameEnc, Patch<Guid?> ParentFolderId, Patch<string?> MetadataEnc, Patch<string?> SyncPolicy);
 
 public sealed record FolderDto(Guid Id, Guid ProjectId, Guid? ParentFolderId, string NameEnc, string? MetadataEnc, string? SyncPolicy, int KeyGeneration,
-    DateTimeOffset CreatedAt, DateTimeOffset UpdatedAt, DateTimeOffset? DeletedAt);
+    DateTimeOffset CreatedAt, DateTimeOffset UpdatedAt, DateTimeOffset? DeletedAt, WrappedKeyDto? WrappedKey);
 
 public sealed record CreateFileRequest(Guid Id, Guid ProjectId, Guid? FolderId, string? NameEnc, string? ContentType, string? SyncPolicy,
     string? MetadataEnc, Guid? CrdtDocId, WrappedKeyRequest? OwnerWrappedKey);
@@ -68,4 +68,18 @@ public sealed record UpdateFileRequest(string? NameEnc, string? SyncPolicy, Patc
 
 public sealed record FileDto(Guid Id, Guid ProjectId, Guid? FolderId, Guid OwnerId, string NameEnc, string? MetadataEnc, string ContentType,
     string SyncPolicy, long? CurrentVersionSeq, Guid? CrdtDocId, int KeyGeneration,
-    DateTimeOffset CreatedAt, DateTimeOffset UpdatedAt, DateTimeOffset? DeletedAt);
+    DateTimeOffset CreatedAt, DateTimeOffset UpdatedAt, DateTimeOffset? DeletedAt, WrappedKeyDto? WrappedKey);
+
+/// <summary>
+/// One entry of the Trash view: something the caller deleted directly, with what went to Trash along with it. Exactly
+/// one of <see cref="Project"/>, <see cref="Folder"/> and <see cref="File"/> is set, named by <see cref="Entity"/>.
+/// </summary>
+public sealed record TrashItemDto(string Entity, DateTimeOffset DeletedAt, DateTimeOffset RestorableUntil, int Folders, int Files,
+    ProjectDto? Project, FolderDto? Folder, FileDto? File);
+
+/// <summary>Asks for the caller's wrapped keys of many objects at once.</summary>
+public sealed record KeyLookupRequest(IReadOnlyList<Guid>? ProjectIds, IReadOnlyList<Guid>? FolderIds, IReadOnlyList<Guid>? FileIds);
+
+public sealed record ObjectKeysDto(string Entity, Guid Id, IReadOnlyList<WrappedKeyDto> WrappedKeys);
+
+public sealed record KeyLookupDto(IReadOnlyList<ObjectKeysDto> Items);

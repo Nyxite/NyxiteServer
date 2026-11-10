@@ -27,6 +27,9 @@ public sealed class FolderEntity
     public DateTimeOffset CreatedAt { get; set; }
     public DateTimeOffset UpdatedAt { get; set; }
     public DateTimeOffset? DeletedAt { get; set; }
+
+    /// <summary>The folder or project whose delete took this row to Trash with it; null when it was deleted itself.</summary>
+    public Guid? DeletedRootId { get; set; }
 }
 
 /// <summary><c>files</c> (03 §3.3). <c>current_version_id</c> gets its FK with <c>file_versions</c> (Phase 1.1).</summary>
@@ -46,6 +49,9 @@ public sealed class FileEntity
     public DateTimeOffset CreatedAt { get; set; }
     public DateTimeOffset UpdatedAt { get; set; }
     public DateTimeOffset? DeletedAt { get; set; }
+
+    /// <summary>The folder or project whose delete took this row to Trash with it; null when it was deleted itself.</summary>
+    public Guid? DeletedRootId { get; set; }
 }
 
 /// <summary>

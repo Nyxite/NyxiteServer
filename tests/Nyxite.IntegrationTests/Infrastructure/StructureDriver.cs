@@ -94,6 +94,30 @@ public sealed class StructureDriver(HttpClient client)
         return Encoding.UTF8.GetString(NyxcFrame.Open(key, Base64UrlCodec.Decode(item.GetProperty("nameEnc").GetString()!), aad));
     }
 
+    /// <summary>Opens the name of a returned object with the wrapped key it carries.</summary>
+    public string NameOf(JsonElement item)
+    {
+        var id = item.GetProperty("id").GetGuid();
+        var wrapped = item.GetProperty("wrappedKey");
+        var key = HybridHpke.Open(_kemSeed, "nyxite object key"u8, id.ToByteArray(bigEndian: true), Base64UrlCodec.Decode(wrapped.GetProperty("ciphertext").GetString()!));
+        var aad = NyxcFrame.BuildAad(wrapped.GetProperty("keyId").GetGuid(), id, ObjectKind.Name);
+        return Encoding.UTF8.GetString(NyxcFrame.Open(key, Base64UrlCodec.Decode(item.GetProperty("nameEnc").GetString()!), aad));
+    }
+
+    public async Task<List<JsonElement>> ItemsAsync(string path)
+    {
+        var items = new List<JsonElement>();
+        string? cursor = null;
+        do
+        {
+            var page = await (await GetAsync(path + (cursor is null ? "" : (path.Contains('?') ? "&" : "?") + "cursor=" + cursor))).JsonAsync();
+            items.AddRange(page.GetProperty("items").EnumerateArray());
+            cursor = page.GetProperty("nextCursor").ValueKind == JsonValueKind.Null ? null : page.GetProperty("nextCursor").GetString();
+        } while (cursor is not null);
+
+        return items;
+    }
+
     public async Task<List<Guid>> IdsAsync(string path)
     {
         var ids = new List<Guid>();

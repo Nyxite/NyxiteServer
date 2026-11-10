@@ -323,6 +323,10 @@ namespace Nyxite.Persistence.Migrations
                         .HasColumnType("timestamp with time zone")
                         .HasColumnName("deleted_at");
 
+                    b.Property<Guid?>("DeletedRootId")
+                        .HasColumnType("uuid")
+                        .HasColumnName("deleted_root_id");
+
                     b.Property<Guid?>("FolderId")
                         .HasColumnType("uuid")
                         .HasColumnName("folder_id");
@@ -364,6 +368,10 @@ namespace Nyxite.Persistence.Migrations
                         .HasDefaultValueSql("now()");
 
                     b.HasKey("Id");
+
+                    b.HasIndex("DeletedRootId")
+                        .HasDatabaseName("ix_files_deleted_root")
+                        .HasFilter("deleted_root_id IS NOT NULL");
 
                     b.HasIndex("FolderId")
                         .HasDatabaseName("ix_files_folder")
@@ -471,6 +479,10 @@ namespace Nyxite.Persistence.Migrations
                         .HasColumnType("timestamp with time zone")
                         .HasColumnName("deleted_at");
 
+                    b.Property<Guid?>("DeletedRootId")
+                        .HasColumnType("uuid")
+                        .HasColumnName("deleted_root_id");
+
                     b.Property<int>("KeyGeneration")
                         .ValueGeneratedOnAdd()
                         .HasColumnType("integer")
@@ -505,6 +517,10 @@ namespace Nyxite.Persistence.Migrations
                         .HasDefaultValueSql("now()");
 
                     b.HasKey("Id");
+
+                    b.HasIndex("DeletedRootId")
+                        .HasDatabaseName("ix_folders_deleted_root")
+                        .HasFilter("deleted_root_id IS NOT NULL");
 
                     b.HasIndex("ParentFolderId")
                         .HasDatabaseName("ix_folders_parent")

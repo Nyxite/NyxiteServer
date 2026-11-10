@@ -27,12 +27,12 @@ public sealed class StructureTests(PostgresFixture pg)
         var s = await SignedInAsync(app);
 
         var project = await s.ProjectAsync("Taxes");
-        var folder = await s.FolderAsync(project, "2025");
-        var file = await s.FileAsync(project, "W2.md", folder);
+        var folder = await s.FolderAsync(project, "Receipts");
+        var file = await s.FileAsync(project, "Payslip.md", folder);
 
         Assert.Equal("Taxes", await s.ReadNameAsync("projects", project.Id));
-        Assert.Equal("2025", await s.ReadNameAsync("folders", folder.Id));
-        Assert.Equal("W2.md", await s.ReadNameAsync("files", file.Id));
+        Assert.Equal("Receipts", await s.ReadNameAsync("folders", folder.Id));
+        Assert.Equal("Payslip.md", await s.ReadNameAsync("files", file.Id));
 
         // Server inspection: every row of every structure table, as Postgres prints it and with the bytes decoded.
         foreach (var table in new[] { "projects", "folders", "files", "file_keys", "structure_keys", "idempotency_keys", "audit_log" })
@@ -40,7 +40,8 @@ public sealed class StructureTests(PostgresFixture pg)
             var rows = string.Join("\n", await Sql.ListAsync<string>(app.ConnectionString, $"SELECT t::text FROM {table} t"));
             var bytes = await Sql.ListAsync<byte[]>(app.ConnectionString,
                 table is "projects" or "folders" or "files" ? $"SELECT name_enc FROM {table}" : "SELECT ''::bytea");
-            foreach (var name in new[] { "Taxes", "2025", "W2" })
+            // Names without hex digits only: Postgres prints bytea as hex, where "2025" turns up by chance.
+            foreach (var name in new[] { "Taxes", "Receipts", "Payslip" })
             {
                 Assert.DoesNotContain(name, rows);
                 Assert.DoesNotContain(bytes, b => Encoding.Latin1.GetString(b).Contains(name));

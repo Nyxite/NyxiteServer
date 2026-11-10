@@ -766,7 +766,7 @@ paths:
     get:
       tags: [structure]
       summary: List projects the caller can reach
-      parameters: [{ $ref: '#/components/parameters/Cursor' }, { $ref: '#/components/parameters/Limit' }]
+      parameters: [{ $ref: '#/components/parameters/Cursor' }, { $ref: '#/components/parameters/Limit' }, { $ref: '#/components/parameters/Keys' }]
       responses:
         '200':
           description: Page of projects.
@@ -804,6 +804,7 @@ paths:
     get:
       tags: [structure]
       summary: Get a project
+      parameters: [{ $ref: '#/components/parameters/Keys' }]
       responses:
         '200':
           description: Project.
@@ -843,7 +844,7 @@ paths:
     get:
       tags: [structure]
       summary: List folders of a project
-      parameters: [{ $ref: '#/components/parameters/Cursor' }, { $ref: '#/components/parameters/Limit' }]
+      parameters: [{ $ref: '#/components/parameters/Cursor' }, { $ref: '#/components/parameters/Limit' }, { $ref: '#/components/parameters/Keys' }]
       responses:
         '200':
           description: Page of folders.
@@ -856,7 +857,7 @@ paths:
     get:
       tags: [structure]
       summary: List all files of a project, flat (those at the project root have folderId null)
-      parameters: [{ $ref: '#/components/parameters/Cursor' }, { $ref: '#/components/parameters/Limit' }]
+      parameters: [{ $ref: '#/components/parameters/Cursor' }, { $ref: '#/components/parameters/Limit' }, { $ref: '#/components/parameters/Keys' }]
       responses:
         '200':
           description: Page of files.
@@ -910,6 +911,7 @@ paths:
     get:
       tags: [structure]
       summary: Get a folder
+      parameters: [{ $ref: '#/components/parameters/Keys' }]
       responses:
         '200':
           description: Folder.
@@ -951,7 +953,7 @@ paths:
     get:
       tags: [structure]
       summary: List files of a folder
-      parameters: [{ $ref: '#/components/parameters/Cursor' }, { $ref: '#/components/parameters/Limit' }]
+      parameters: [{ $ref: '#/components/parameters/Cursor' }, { $ref: '#/components/parameters/Limit' }, { $ref: '#/components/parameters/Keys' }]
       responses:
         '200':
           description: Page of files.
@@ -995,6 +997,7 @@ paths:
     get:
       tags: [structure]
       summary: Get a file
+      parameters: [{ $ref: '#/components/parameters/Keys' }]
       responses:
         '200':
           description: File.
@@ -1030,6 +1033,97 @@ paths:
       responses:
         '204': { description: 'Trashed.' }
         '404': { $ref: '#/components/responses/Problem' }
+
+  /keys/lookup:
+    post:
+      tags: [keys]
+      summary: The caller's wrapped keys of many objects in one request
+      description: >-
+        For a client that lists with keys=false and misses some keys. Returns every live generation.
+        Objects the caller cannot reach are left out, objects in Trash are included. At most 500 ids
+        in total. Not a create, so it takes no Idempotency-Key.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                projectIds: { type: array, items: { $ref: '#/components/schemas/Uuid' } }
+                folderIds: { type: array, items: { $ref: '#/components/schemas/Uuid' } }
+                fileIds: { type: array, items: { $ref: '#/components/schemas/Uuid' } }
+      responses:
+        '200':
+          description: Keys per object.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items:
+                    type: array
+                    items:
+                      type: object
+                      required: [entity, id, wrappedKeys]
+                      properties:
+                        entity: { type: string, enum: [project, folder, file] }
+                        id: { $ref: '#/components/schemas/Uuid' }
+                        wrappedKeys: { type: array, items: { $ref: '#/components/schemas/WrappedKey' } }
+  /trash:
+    get:
+      tags: [structure]
+      summary: What the caller deleted and can still restore, newest first (DL-1)
+      parameters: [{ $ref: '#/components/parameters/Cursor' }, { $ref: '#/components/parameters/Limit' }, { $ref: '#/components/parameters/Keys' }]
+      responses:
+        '200':
+          description: Page of Trash entries.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items, nextCursor]
+                properties:
+                  items: { type: array, items: { $ref: '#/components/schemas/TrashItem' } }
+                  nextCursor: { type: [string, 'null'] }
+  /trash/projects/{id}/restore:
+    parameters: [{ $ref: '#/components/parameters/Id' }]
+    post:
+      tags: [structure]
+      summary: Restore a project with everything its delete took along
+      responses:
+        '200':
+          description: Restored. Also the answer for a project that is not in Trash.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Project' }
+        '404': { $ref: '#/components/responses/Problem' }
+  /trash/folders/{id}/restore:
+    parameters: [{ $ref: '#/components/parameters/Id' }]
+    post:
+      tags: [structure]
+      summary: Restore a folder with its subtree
+      responses:
+        '200':
+          description: Restored. Also the answer for a folder that is not in Trash.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Folder' }
+        '404': { $ref: '#/components/responses/Problem' }
+        '409': { description: 'The project or the containing folder is in Trash; restore that first.', content: { application/problem+json: { schema: { $ref: '#/components/schemas/Problem' } } } }
+  /trash/files/{id}/restore:
+    parameters: [{ $ref: '#/components/parameters/Id' }]
+    post:
+      tags: [structure]
+      summary: Restore a file (its version history comes back with it)
+      responses:
+        '200':
+          description: Restored. Also the answer for a file that is not in Trash.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/File' }
+        '404': { $ref: '#/components/responses/Problem' }
+        '409': { description: 'The project or the containing folder is in Trash; restore that first.', content: { application/problem+json: { schema: { $ref: '#/components/schemas/Problem' } } } }
 
   # ---------------------------------------------------------------- content
   /files/{id}/blob:
@@ -2725,6 +2819,13 @@ components:
       description: NYXITE__Scim__Token (enterprise profile only).
 
   parameters:
+    Keys:
+      name: keys
+      in: query
+      schema: { type: boolean, default: true }
+      description: >-
+        false leaves `wrappedKey` out of every returned object, for a client that has the keys cached.
+        Keys it then misses come from POST /keys/lookup.
     Id:
       name: id
       in: path
@@ -2886,6 +2987,7 @@ components:
         metadataEnc: { oneOf: [{ $ref: '#/components/schemas/Bytes' }, { type: 'null' }] }
         syncPolicy: { $ref: '#/components/schemas/SyncPolicy', description: 'Default for what is created in the project; the server enforces only the value on each file' }
         keyGeneration: { type: integer, description: "Rotation generation of the project's own key" }
+        wrappedKey: { oneOf: [{ $ref: '#/components/schemas/WrappedKey' }, { type: 'null' }], description: "The caller's wrap of the object's current key, which opens nameEnc and metadataEnc. null with keys=false" }
         readerGroupAttachment: { oneOf: [{ $ref: '#/components/schemas/Bytes' }, { type: 'null' }] }
         createdAt: { type: string, format: date-time }
         updatedAt: { type: string, format: date-time }
@@ -2907,6 +3009,7 @@ components:
         metadataEnc: { oneOf: [{ $ref: '#/components/schemas/Bytes' }, { type: 'null' }] }
         syncPolicy: { oneOf: [{ $ref: '#/components/schemas/SyncPolicy' }, { type: 'null' }], description: 'null = follow the parent; a default for what is created in the folder' }
         keyGeneration: { type: integer, description: "Rotation generation of the folder's own key" }
+        wrappedKey: { oneOf: [{ $ref: '#/components/schemas/WrappedKey' }, { type: 'null' }], description: "The caller's wrap of the object's current key, which opens nameEnc and metadataEnc. null with keys=false" }
         readerGroupAttachment: { oneOf: [{ $ref: '#/components/schemas/Bytes' }, { type: 'null' }] }
         createdAt: { type: string, format: date-time }
         updatedAt: { type: string, format: date-time }
@@ -2932,6 +3035,7 @@ components:
         currentVersionSeq: { type: [integer, 'null'], format: int64 }
         crdtDocId: { $ref: '#/components/schemas/NullableUuid' }
         keyGeneration: { type: integer }
+        wrappedKey: { oneOf: [{ $ref: '#/components/schemas/WrappedKey' }, { type: 'null' }], description: "The caller's wrap of the object's current key, which opens nameEnc and metadataEnc. null with keys=false" }
         createdAt: { type: string, format: date-time }
         updatedAt: { type: string, format: date-time }
         deletedAt: { type: [string, 'null'], format: date-time }
@@ -2979,6 +3083,19 @@ components:
         authorId: { $ref: '#/components/schemas/NullableUuid' }
         createdAt: { type: string, format: date-time }
 
+    TrashItem:
+      type: object
+      required: [entity, deletedAt, restorableUntil, folders, files]
+      description: Something the caller deleted directly. Exactly one of project, folder and file is set, named by entity.
+      properties:
+        entity: { type: string, enum: [project, folder, file] }
+        deletedAt: { type: string, format: date-time }
+        restorableUntil: { type: string, format: date-time, description: 'End of the Trash window; after it only an admin restores (DL-4)' }
+        folders: { type: integer, description: 'Folders that went to Trash along with it and come back with it' }
+        files: { type: integer, description: 'Files that went to Trash along with it and come back with it' }
+        project: { oneOf: [{ $ref: '#/components/schemas/Project' }, { type: 'null' }] }
+        folder: { oneOf: [{ $ref: '#/components/schemas/Folder' }, { type: 'null' }] }
+        file: { oneOf: [{ $ref: '#/components/schemas/File' }, { type: 'null' }] }
     WrappedKeyList:
       type: object
       required: [items]
