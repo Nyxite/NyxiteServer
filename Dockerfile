@@ -25,6 +25,10 @@ FROM mcr.microsoft.com/dotnet/aspnet:10.0
 RUN apt-get update && apt-get install -y --no-install-recommends libgssapi-krb5-2 && rm -rf /var/lib/apt/lists/*
 WORKDIR /app
 COPY --from=build /app ./
+# The filesystem blob root (NYXITE__BlobStore__RootPath). It exists in the image and belongs to the unprivileged user,
+# because a named volume takes its ownership from the directory it is first mounted over.
+RUN mkdir -p /var/lib/nyxite/blobs && chown $APP_UID /var/lib/nyxite/blobs
+VOLUME /var/lib/nyxite/blobs
 # The base image's unprivileged user: the server needs no root and writes nothing into its own directory.
 USER $APP_UID
 ENV ASPNETCORE_HTTP_PORTS=8080
