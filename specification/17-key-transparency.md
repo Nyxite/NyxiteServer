@@ -39,7 +39,8 @@ leaf_data =
                                     except logged_at and self_sig itself
 ```
 
-- For `entry_type = 2` (revoke), `kem_pub` and `sig_pub` repeat the revoked key's values, so a monitor can match the revocation to the publish leaf without a lookup.
+- For `entry_type = 2` (revoke), `kem_pub` and `sig_pub` repeat the revoked key's values, so a monitor can match the revocation to the publish leaf without a lookup. `self_sig` repeats the revoked key's stored self-signature as well, which covers the publish message (`entry_type = 1`), because the server performs a revocation on rotation and holds no key to sign it.
+- **Leaves before the tree (Phase 0.1).** `kt_leaves` and `kt_state` exist from Phase 0.1 on, and every directory publish or revoke appends its leaf from then on. `kt_nodes`, checkpoints and the proof endpoints follow in Phase 4.3 and are computed from the stored leaves. The leaves come first because `logged_at` is part of the hashed leaf and cannot be backfilled honestly, and so that no key is ever in the directory without its leaf.
 - `self_sig` is the **directory self-signature** already required by [09 §9.3](09-sharing-and-acl.md) (stored in `user_keys.self_sig` / `groups.self_sig`). Including it in the leaf proves the key's holder signed it. The server cannot forge it, but it can generate a whole fresh keypair, which is exactly what monitoring (§17.7) catches.
 
 ## 17.4 Merkle tree

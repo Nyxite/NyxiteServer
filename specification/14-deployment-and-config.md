@@ -29,13 +29,33 @@
 
 | Key (env) | Purpose |
 |-----------|---------|
-| `NYXITE__Database__ConnectionString` | PostgreSQL DSN |
+| `NYXITE__Database__ConnectionString` | PostgreSQL DSN of the server's login role, a member of `nyxite_app` ([03 §3.5](03-data-model.md)) |
+| `NYXITE__Database__MigrationConnectionString` | PostgreSQL DSN of the migration role (table owner, `CREATEROLE`), read only by `nyxite-server migrate` |
 | `NYXITE__BlobStore__Provider` | `filesystem` \| `s3` |
 | `NYXITE__BlobStore__RootPath` | Filesystem blob root (content-addressed, sharded) |
 | `NYXITE__BlobStore__S3__*` | Endpoint/bucket/credentials when `s3` |
-| `NYXITE__Auth__TokenSigningKey` (secret) | **Native** token-signing key — signs/validates the server's own access + refresh tokens (always required) |
+| `NYXITE__Auth__TokenSigningKey` (secret) | **Native** token-signing key — signs/validates the server's own access + refresh tokens (always required). Format `{version}:{base64 key}` entries separated by `;`, at least 32 bytes each. The highest version signs and becomes the `kid`, older versions only validate, so a rollover keeps live tokens valid |
 | `NYXITE__Auth__PasswordPepper` (secret; deploy secret `PASSWORD_PEPPER`) | **Versioned, rotatable** account-password **pepper** — the HMAC-SHA256 key applied as a pre-hash before Argon2id ([08 §8.1](08-authentication.md)). Held **outside Postgres** (alongside DB creds) so a **DB-only leak yields uncrackable verifiers**. Format `{version}:{key}` (or a versioned set); rotation adds a new version and **re-peppers lazily at each user's next login**. Account-auth only — **not** applied to the recovery-phrase KDF |
 | `NYXITE__Auth__Audience` | Expected token audience |
+| `NYXITE__Auth__Issuer` | `iss` of issued access tokens, the instance base URL ([08 §8.2](08-authentication.md)) |
+| `NYXITE__Auth__AccessTokenLifetime` | Access-token lifetime. Default **5 min** **[P]** |
+| `NYXITE__Auth__WebAuthn__RelyingPartyId` / `__RelyingPartyName` / `__Origins__<n>` | Passkey relying party: the RP ID (instance host), the name shown by authenticators (default `Nyxite`) and the allowed origins (web origin, `android:apk-key-hash:…`). Passkey endpoints answer `503` while the RP ID or the origins are unset, because a guessed RP ID would bind every credential to the wrong domain |
+| `NYXITE__Auth__WebAuthnChallengeLifetime` / `__TotpEnrollLifetime` | Lifetimes of a passkey challenge and of a pending TOTP enrollment ([03 §3.2](03-data-model.md)). Defaults **5 min** / **10 min** **[P]** |
+| `NYXITE__Auth__TotpIssuer` | Issuer shown in authenticator apps. Default `Nyxite` |
+| `NYXITE__Auth__EmailCodeLifetime` | Lifetime of an emailed one-time code (email verification, email second factor, email step-up) ([08 §8.1](08-authentication.md)). Default **15 min** **[P]** |
+| `NYXITE__Auth__UnverifiedAccountLifetime` / `__UnverifiedAccountSweepInterval` | How long an account may stay unverified before it is purged and its address is free again, and how often the background job looks. Defaults **24 h** / **1 h** **[P]** |
+| `NYXITE__Auth__StepUpLifetime` | Lifetime of a single-use step-up token ([08 §8.2](08-authentication.md)). Default **5 min** **[P]** |
+| `NYXITE__Auth__BackupCodeCount` | Backup codes per generated set. Default **10** **[P]** |
+| `NYXITE__Auth__SecondFactorFailureLimit` / `__SecondFactorFailureWindow` | Wrong second-factor codes allowed per account within the window before `429 rate_limited` ([08 §8.1](08-authentication.md)). Defaults **10** / **15 min** **[P]** |
+| `NYXITE__Auth__MaxConcurrentPasswordHashes` / `__PasswordHashQueueTimeout` | How many Argon2id derivations run at once, and how long a sign-in waits for a free slot before `429 rate_limited` ([13 §13.5](13-security.md)). Each derivation holds 64 MiB, so the cap bounds the memory sign-ins can take. Defaults **0** (one per CPU core) / **5 s** **[P]** |
+| `NYXITE__Auth__PasswordResetEmailLimit` / `__PasswordResetEmailWindow` | Password-reset emails per account within the window, further requests are dropped silently ([13 §13.5](13-security.md)). Defaults **3** / **1 h** **[P]** |
+| `NYXITE__RateLimiting__Auth__PermitLimit` / `__Window` | Fixed window of the per-IP auth bucket ([08 §8.9](08-authentication.md), [13 §13.5](13-security.md)). Defaults **10** / **1 min** **[P]** |
+| `NYXITE__Email__Host` / `__Port` / `__EnableSsl` / `__Username` / `__Password` (secret) / `__From` | SMTP relay for account email (verification and one-time codes, never content). Submission with STARTTLS, default port **587**. `Host` and `From` are **required**: the server refuses to start without them, because no account can be verified, and so none can become usable, without mail |
+| `NYXITE__Email__SendTimeout` / `__OutboxPollInterval` / `__OutboxMaxAttempts` | Outbox worker ([03 §3.2](03-data-model.md) `email_outbox`): time limit of one delivery attempt, how often the worker polls when nothing woke it, and attempts per mail before it is given up on. Defaults **30 s** / **5 s** / **5** **[P]** |
+| `NYXITE__Retention__CleanupInterval` | How often the maintenance job deletes expired `ephemeral_tokens`, `idempotency_keys` and long-dead `sessions` ([03 §3.2](03-data-model.md)). Default **1 h** **[P]** |
+| `NYXITE__Network__CorsOrigins__<n>` | Browser origins allowed to call the API ([13 §13.9](13-security.md)). Unset = same-origin only, which fits the default deployment where nginx serves the web client and the API under one host |
+| `NYXITE__Metrics__Port` | Port of the separate `/metrics` listener ([§14.5](#145-health--observability)). Unset = metrics are off |
+| `NYXITE__Network__KnownProxies__<n>` / `__KnownNetworks__<n>` | IP addresses / CIDR ranges of the nginx and Cloudflare hops whose `X-Forwarded-For` / `-Proto` are trusted ([§14.6](#146-networking--tls)). Unset = the headers are ignored and the socket peer is the client IP, and the server logs a warning at startup, because behind a proxy all clients then share one rate-limit bucket |
 | `NYXITE__Auth__Lifetimes__PasswordReset` / `__Invite` / `__OidcState` / `__OidcHandoff` | Lifetimes of the single-use `ephemeral_tokens` kinds ([03 §3.2](03-data-model.md)). Defaults **30 min** / **7 days** / **10 min** / **60 s** **[P]** |
 | `NYXITE__Auth__Enterprise__RedirectUris` | Allowlist of client redirect URIs for the OIDC flow, e.g. `nyxite://oidc`, the web origin ([08 §8.1](08-authentication.md)); anything else → `400` (**enterprise profile only**) |
 | `NYXITE__Scim__Token` (secret) | Bearer token the enterprise IdP uses for `/scim/v2/**` ([12 §12.2](12-administration.md)); SCIM is disabled when unset (**enterprise profile only**) |
@@ -44,6 +64,9 @@
 | `NYXITE__Auth__MfaTokenLifetime` | Lifetime of the interim `mfaToken` between the password and TOTP step ([03 §3.2](03-data-model.md) `ephemeral_tokens`). Default **5 min** **[P]** |
 | `NYXITE__Auth__MfaMaxAttempts` | Wrong TOTP codes allowed per `mfaToken` before it is void and the password step must be repeated. Default **5** **[P]** |
 | `NYXITE__Auth__PairingCodeLifetime` | Lifetime of a pending device's `pairingCode` ([03 §3.2](03-data-model.md) `devices`). Default **10 min** **[P]** |
+| `NYXITE__Auth__PairingCodeDigits` | Length of a pending device's `pairingCode`, 6 to 8. Default **8** **[P]**, the longest value the spec allows, because the code is typed only in the QR fallback and every digit multiplies the guessing work under the attempt cap |
+| `NYXITE__RateLimiting__DeviceEnrollment__PermitLimit` / `__Window` | Per-user bucket of `POST /devices` ([13 §13.5](13-security.md)). Default **5 per hour** **[P]**, because a person enrolls a device rarely and every pending device holds a guessable pairing code |
+| `NYXITE__RateLimiting__Directory__PermitLimit` / `__Window` | Per-user bucket of `GET /keys/directory`. Default **60 per minute** **[P]** ([13 §13.5](13-security.md)) |
 | `NYXITE__Auth__PairingCodeMaxAttempts` | Wrong pairing-code entries allowed before the code is void; the low-entropy code is protected by this cap and its lifetime. Default **5** **[P]** |
 | `NYXITE__Auth__Enterprise__Enabled` | `true` to enable the enterprise OIDC IdP (default `false` = native only) |
 | `NYXITE__Auth__Enterprise__Authority` | Keycloak issuer URL (**enterprise profile only**) |
@@ -72,25 +95,28 @@
 
 ## 14.4 Startup & lifecycle
 
-- **Migrations** run as a discrete deploy step (separate DB role), not at app startup in prod. **[P]**
-- Boot validation: DB reachable + migrated, native **token-signing key** present, **password pepper** present (native-auth profile), blob store writable. The **Keycloak JWKS reachable** check applies **only under the `enterprise` profile** (native auth validates its own tokens with the signing key). (No KEK probe — there is none.) Fail fast otherwise.
-- Background hosted services: blob GC, share-token/expiry sweeps, audit retention. **No** snapshotting/indexing (client-side).
+- **Migrations** run as a discrete deploy step (separate DB role), not at app startup in prod. **[P]** The step is `nyxite-server migrate`: the server binary applies pending migrations with `NYXITE__Database__MigrationConnectionString` and exits (`0` on success, `2` when the connection string is missing). It ships in the same image as the server, so code and schema versions cannot diverge, and it needs none of the server's secrets. Until it has run, `/health/ready` answers `503`. A separate EF migrations bundle was rejected as a second artifact to build and version, and a generated SQL script because it needs `psql` in the deploy and a manual release step.
+- Boot validation: DB reachable + migrated, native **token-signing key** present, **password pepper** present (native-auth profile), **mail relay** configured (`NYXITE__Email__Host` / `__From`), blob store writable. The **Keycloak JWKS reachable** check applies **only under the `enterprise` profile** (native auth validates its own tokens with the signing key). (No KEK probe — there is none.) Fail fast otherwise.
+- Background hosted services: blob GC, share-token/expiry sweeps, the email outbox worker, the unverified-account sweep and the cleanup of expired rows ([03 §3.2](03-data-model.md)). **No** snapshotting/indexing (client-side). Audit retention is not a hosted service but the scheduled CLI step `nyxite-server purge-audit` as the migration role, because the app role has no `DELETE` on `audit_log` ([12 §12.3](12-administration.md)).
 
 ## 14.5 Health & observability
 
 | Endpoint | Purpose |
 |----------|---------|
 | `GET /health/live` | Liveness |
-| `GET /health/ready` | Readiness (deps healthy) |
-| `GET /metrics` | OpenTelemetry/Prometheus **[P]** |
+| `GET /health/ready` | Readiness (deps healthy): Postgres reachable with no pending migration. The blob-store and IdP checks of P0.1-SRV-5 join when those components exist. `503` otherwise, without error detail, because the endpoint is public |
+| `GET /metrics` | Prometheus text format, on its own port `NYXITE__Metrics__Port` and off when unset |
 
-Structured logs to stdout; security events → audit log; **never content** (none readable).
+- **Metrics on a separate port.** Metrics show usage patterns, so they must not be public. The listener carries nothing but `/metrics` and the reverse proxy only forwards the API port, so only monitoring inside the deployment network reaches it and no token has to be managed. Serving it on the API port behind a bearer token was rejected, because the endpoint would then be reachable from the internet.
+- **What is exported.** Request count and duration by method, route template and status, plus the server's own counters: audit events by `action`, mails sent and failed, rows deleted by maintenance. No user id, email, IP or URL value is ever a label.
+- **Exporter.** The text format is rendered in-house on .NET's `MeterListener`, because the OpenTelemetry Prometheus exporter is only published as a pre-release package. The instruments are standard .NET meters, so an OpenTelemetry exporter can be added later without touching them.
+- **Logs.** One JSON object per line on stdout with the request's trace id, written by the JSON console logger that ships with .NET. It was chosen over Serilog, because it needs no extra package and stdout is all a container deployment collects. Every response carries the same id as `Nyxite-Request-Id`, so a client report can be matched to its log lines. Expected failures (a wrong code, a `401`, a validation error) are answers and are not logged as errors. Security events go to the audit log, and content is never logged, because none is readable.
 
 ## 14.6 Networking & TLS
 
 - Server listens plain HTTP **inside** the Compose network; **nginx terminates TLS** (Cloudflare Origin CA); Cloudflare fronts public traffic (INFRASTRUCTURE.md, [13](13-security.md)).
 - Admin/origin-direct access over **WireGuard**; internal DNS via **bind9** over the VPN.
-- Trust forwarded-proto/for headers only from known nginx/Cloudflare hops (correct client IP for rate limiting/audit). **[P]**
+- Trust forwarded-proto/for headers only from known nginx/Cloudflare hops (correct client IP for rate limiting/audit), configured by `NYXITE__Network__KnownProxies` / `__KnownNetworks` (§14.3). **[P]**
 
 ## 14.7 Backups & DR
 

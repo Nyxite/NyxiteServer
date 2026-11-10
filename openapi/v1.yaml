@@ -53,22 +53,28 @@ paths:
     post:
       tags: [auth]
       security: []
-      summary: Create a native account (TOTP or passkey enrollment follows)
-      parameters: [{ $ref: '#/components/parameters/IdempotencyKey' }]
+      summary: Create a native account (email verification, then factor enrollment, follow)
+      description: >-
+        Emails an 8-digit verification code. The returned session is limited to email verification
+        until the address is confirmed, and to factor enrollment after that. An account left
+        unverified for NYXITE__Auth__UnverifiedAccountLifetime is purged, so its address is free
+        again (08 §8.1). No Idempotency-Key: no user exists yet to scope it to, and a retry is safe
+        because the unique email answers 409.
       requestBody:
         required: true
         content:
           application/json:
             schema:
               type: object
-              required: [email, displayName, password]
+              required: [email, displayName, password, clientKind]
               properties:
                 email: { type: string, format: email }
                 displayName: { type: string, maxLength: 200 }
                 password: { type: string, minLength: 12, maxLength: 1024 }
+                clientKind: { $ref: '#/components/schemas/ClientKind' }
       responses:
         '201':
-          description: Account created; returns tokens of a session limited to factor enrollment.
+          description: Account created; returns tokens of a session limited to verification and enrollment.
           content:
             application/json:
               schema: { $ref: '#/components/schemas/TokenPair' }
@@ -86,21 +92,31 @@ paths:
           application/json:
             schema:
               type: object
-              required: [email, password]
+              required: [email, password, clientKind]
               properties:
                 email: { type: string, format: email }
                 password: { type: string }
+                clientKind: { $ref: '#/components/schemas/ClientKind' }
       responses:
         '200':
-          description: Password accepted, TOTP required.
+          description: >-
+            Password accepted; a second factor is always required. For an account without any factor
+            yet, `methods` is ["email"] and `enrollment` is true: the emailed code proves the mailbox
+            (and verifies the address), and the session it yields is limited to factor enrollment
+            (amr ["pwd"]). The password alone never yields a session (08 §8.1).
           content:
             application/json:
               schema:
                 type: object
-                required: [challenge, mfaToken]
+                required: [challenge, mfaToken, methods, enrollment]
                 properties:
-                  challenge: { type: string, const: totp_required }
+                  challenge: { type: string, const: second_factor_required }
                   mfaToken: { type: string, description: 'Single-use, stored hashed (03 ephemeral_tokens)' }
+                  methods:
+                    type: array
+                    items: { $ref: '#/components/schemas/SecondFactorMethod' }
+                    description: 'Methods that complete this password step, in the order totp, email, backup_code.'
+                  enrollment: { type: boolean, description: 'True when the account has no factor yet and the resulting session is enrollment-limited.' }
         '401': { $ref: '#/components/responses/Problem' }
         '429': { $ref: '#/components/responses/Problem' }
   /auth/login/totp:
@@ -125,11 +141,116 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/TokenPair' }
         '401': { $ref: '#/components/responses/Problem' }
+        '403': { $ref: '#/components/responses/Problem' }
+        '429': { $ref: '#/components/responses/Problem' }
+  /auth/login/email/send:
+    post:
+      tags: [auth]
+      security: []
+      summary: Email a sign-in code for this password step
+      description: >-
+        For accounts with email codes enabled, and as the enrollment login of an account without any
+        factor. Sending again replaces the previous code.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [mfaToken]
+              properties:
+                mfaToken: { type: string }
+      responses:
+        '204': { description: 'Code sent.' }
+        '400': { $ref: '#/components/responses/Problem' }
+        '401': { $ref: '#/components/responses/Problem' }
+        '429': { $ref: '#/components/responses/Problem' }
+  /auth/login/email:
+    post:
+      tags: [auth]
+      security: []
+      summary: Complete login with the emailed code
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [mfaToken, code]
+              properties:
+                mfaToken: { type: string }
+                code: { $ref: '#/components/schemas/EmailCode' }
+      responses:
+        '200':
+          description: Signed in.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/TokenPair' }
+        '401': { $ref: '#/components/responses/Problem' }
+        '403': { $ref: '#/components/responses/Problem' }
+        '429': { $ref: '#/components/responses/Problem' }
+  /auth/login/backup-code:
+    post:
+      tags: [auth]
+      security: []
+      summary: Complete login with a single-use backup code
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [mfaToken, code]
+              properties:
+                mfaToken: { type: string }
+                code: { type: string, description: 'XXXXX-XXXXX; case, spaces and the dash are ignored' }
+      responses:
+        '200':
+          description: Signed in; the code is spent.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/TokenPair' }
+        '401': { $ref: '#/components/responses/Problem' }
+        '403': { $ref: '#/components/responses/Problem' }
+        '429': { $ref: '#/components/responses/Problem' }
+  /auth/email/verify:
+    post:
+      tags: [auth]
+      summary: Confirm the account email with the emailed code
+      description: Any session of the account, including a limited one. A no-op once verified.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [code]
+              properties:
+                code: { $ref: '#/components/schemas/EmailCode' }
+      responses:
+        '204': { description: 'Email verified.' }
+        '400': { $ref: '#/components/responses/Problem' }
+        '401': { $ref: '#/components/responses/Problem' }
+        '429': { $ref: '#/components/responses/Problem' }
+  /auth/email/verify/resend:
+    post:
+      tags: [auth]
+      summary: Email a new verification code (replaces the previous one)
+      responses:
+        '204': { description: 'Code sent, or nothing to do because the email is verified.' }
+        '401': { $ref: '#/components/responses/Problem' }
         '429': { $ref: '#/components/responses/Problem' }
   /auth/totp/enroll:
     post:
       tags: [auth]
       summary: Begin TOTP enrollment
+      description: >-
+        Needs a verified email. On an account that already has a second factor, also needs a full
+        session and a step-up token (08 §8.2); without it 403 2fa_required.
+      requestBody:
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/StepUpTokenRequest' }
       responses:
         '200':
           description: Secret to show; stored only after verify.
@@ -142,6 +263,7 @@ paths:
                   secret: { type: string }
                   otpauthUri: { type: string }
         '401': { $ref: '#/components/responses/Problem' }
+        '403': { $ref: '#/components/responses/Problem' }
   /auth/totp/verify:
     post:
       tags: [auth]
@@ -156,13 +278,134 @@ paths:
               properties:
                 totpCode: { type: string, pattern: '^[0-9]{6}$' }
       responses:
-        '204': { description: 'Second factor active.' }
+        '204': { description: 'Second factor active. Replacing or adding to an existing factor revokes the other sessions (credential_change).' }
         '400': { $ref: '#/components/responses/Problem' }
         '401': { $ref: '#/components/responses/Problem' }
+        '403': { $ref: '#/components/responses/Problem' }
+  /auth/email-otp/enroll:
+    post:
+      tags: [auth]
+      summary: Begin enabling emailed sign-in codes (sends a confirmation code)
+      description: >-
+        Same enrollment rules as /auth/totp/enroll. An account that uses email codes cannot reset
+        its password by email, because the mailbox would then stand in for both factors (08 §8.1).
+      requestBody:
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/StepUpTokenRequest' }
+      responses:
+        '204': { description: 'Confirmation code sent.' }
+        '401': { $ref: '#/components/responses/Problem' }
+        '403': { $ref: '#/components/responses/Problem' }
+        '409': { $ref: '#/components/responses/Problem' }
+        '429': { $ref: '#/components/responses/Problem' }
+  /auth/email-otp/verify:
+    post:
+      tags: [auth]
+      summary: Confirm the emailed code and enable email as a second factor
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [code]
+              properties:
+                code: { $ref: '#/components/schemas/EmailCode' }
+      responses:
+        '204': { description: 'Email codes enabled. On an account that had a factor, the other sessions are revoked.' }
+        '400': { $ref: '#/components/responses/Problem' }
+        '401': { $ref: '#/components/responses/Problem' }
+        '403': { $ref: '#/components/responses/Problem' }
+  /auth/backup-codes:
+    post:
+      tags: [auth]
+      summary: Create a new set of backup codes (replaces the old set)
+      description: >-
+        Full session plus a step-up token. The codes are returned once and stored only as keyed
+        hashes. The other sessions are revoked (credential_change).
+      requestBody:
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/StepUpTokenRequest' }
+      responses:
+        '200':
+          description: The new codes.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [codes]
+                properties:
+                  codes: { type: array, items: { type: string, pattern: '^[0-9A-HJKMNP-TV-Z]{5}-[0-9A-HJKMNP-TV-Z]{5}$' } }
+        '401': { $ref: '#/components/responses/Problem' }
+        '403': { $ref: '#/components/responses/Problem' }
+  /auth/step-up:
+    post:
+      tags: [auth]
+      summary: Prove an existing second factor again for one factor change (08 §8.2)
+      description: >-
+        Returns a single-use token bound to this session, valid for NYXITE__Auth__StepUpLifetime.
+        `email` needs /auth/step-up/email first and is only accepted when email codes are enabled;
+        `passkey` needs /auth/step-up/passkey/options first.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [method]
+              properties:
+                method: { type: string, enum: [totp, email, backup_code, passkey] }
+                code: { type: string }
+                credential: { type: object, additionalProperties: true, description: 'AuthenticationResponseJSON (passkey)' }
+      responses:
+        '200':
+          description: Step-up token.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [stepUpToken, expiresAt]
+                properties:
+                  stepUpToken: { type: string }
+                  expiresAt: { type: string, format: date-time }
+        '400': { $ref: '#/components/responses/Problem' }
+        '401': { $ref: '#/components/responses/Problem' }
+        '403': { $ref: '#/components/responses/Problem' }
+        '429': { $ref: '#/components/responses/Problem' }
+  /auth/step-up/email:
+    post:
+      tags: [auth]
+      summary: Email a step-up code (accounts with email codes only)
+      responses:
+        '204': { description: 'Code sent.' }
+        '400': { $ref: '#/components/responses/Problem' }
+        '401': { $ref: '#/components/responses/Problem' }
+        '403': { $ref: '#/components/responses/Problem' }
+        '429': { $ref: '#/components/responses/Problem' }
+  /auth/step-up/passkey/options:
+    post:
+      tags: [auth]
+      summary: Begin a passkey step-up (allowCredentials = the caller's passkeys)
+      responses:
+        '200':
+          description: WebAuthn PublicKeyCredentialRequestOptions JSON.
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+        '400': { $ref: '#/components/responses/Problem' }
+        '401': { $ref: '#/components/responses/Problem' }
+        '403': { $ref: '#/components/responses/Problem' }
   /auth/webauthn/register/options:
     post:
       tags: [auth]
       summary: Begin passkey registration
+      description: Same enrollment rules as /auth/totp/enroll.
+      requestBody:
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/StepUpTokenRequest' }
       responses:
         '200':
           description: WebAuthn PublicKeyCredentialCreationOptions (W3C WebAuthn Level 3 JSON).
@@ -170,6 +413,7 @@ paths:
             application/json:
               schema: { type: object, additionalProperties: true }
         '401': { $ref: '#/components/responses/Problem' }
+        '403': { $ref: '#/components/responses/Problem' }
   /auth/webauthn/register:
     post:
       tags: [auth]
@@ -185,9 +429,10 @@ paths:
                 credential: { type: object, additionalProperties: true, description: 'RegistrationResponseJSON' }
                 label: { type: string, maxLength: 100 }
       responses:
-        '204': { description: 'Passkey registered.' }
+        '204': { description: 'Passkey registered. On an account that had a factor, the other sessions are revoked.' }
         '400': { $ref: '#/components/responses/Problem' }
         '401': { $ref: '#/components/responses/Problem' }
+        '403': { $ref: '#/components/responses/Problem' }
   /auth/webauthn/assert/options:
     post:
       tags: [auth]
@@ -199,27 +444,30 @@ paths:
             schema:
               type: object
               properties:
-                email: { type: string, format: email }
+                email: { type: string, format: email, description: 'Ignored; credentials are discoverable (08 §8.1)' }
       responses:
         '200':
           description: WebAuthn PublicKeyCredentialRequestOptions JSON.
           content:
             application/json:
               schema: { type: object, additionalProperties: true }
+        '429': { $ref: '#/components/responses/Problem' }
+        '503': { $ref: '#/components/responses/Problem' }
   /auth/webauthn/assert:
     post:
       tags: [auth]
       security: []
-      summary: Finish passkey login (sufficient alone)
+      summary: Finish passkey login (sufficient alone; a blocked account gets 403 account_blocked for web)
       requestBody:
         required: true
         content:
           application/json:
             schema:
               type: object
-              required: [credential]
+              required: [credential, clientKind]
               properties:
                 credential: { type: object, additionalProperties: true, description: 'AuthenticationResponseJSON' }
+                clientKind: { $ref: '#/components/schemas/ClientKind' }
       responses:
         '200':
           description: Signed in.
@@ -276,6 +524,7 @@ paths:
       tags: [auth]
       security: []
       summary: Rotate a refresh token (single-use; reuse revokes the session)
+      description: A web session of an account blocked since sign-in is revoked here (403 account_blocked).
       requestBody:
         required: true
         content:
@@ -292,6 +541,7 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/TokenPair' }
         '401': { $ref: '#/components/responses/Problem' }
+        '403': { $ref: '#/components/responses/Problem' }
   /auth/logout:
     post:
       tags: [auth]
@@ -299,11 +549,144 @@ paths:
       responses:
         '204': { description: 'Signed out.' }
         '401': { $ref: '#/components/responses/Problem' }
+  /auth/factors:
+    get:
+      tags: [auth]
+      summary: The caller's sign-in methods (any session, including a limited one)
+      responses:
+        '200':
+          description: Factor overview; no secret material.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [emailVerified, totp, emailOtp, passkeys, backupCodesRemaining, passwordResetByEmail]
+                properties:
+                  emailVerified: { type: boolean }
+                  totp: { type: boolean }
+                  emailOtp: { type: boolean }
+                  passkeys: { type: integer }
+                  backupCodesRemaining: { type: integer }
+                  passwordResetByEmail: { type: boolean, description: 'False while email codes are a second factor (08 §8.1).' }
+        '401': { $ref: '#/components/responses/Problem' }
+  /auth/totp:
+    delete:
+      tags: [auth]
+      summary: Remove TOTP
+      description: Step-up token in the Nyxite-Step-Up header. The last factor cannot be removed (409).
+      parameters:
+        - $ref: '#/components/parameters/StepUpHeader'
+      responses:
+        '204': { description: 'Removed.' }
+        '401': { $ref: '#/components/responses/Problem' }
+        '403': { $ref: '#/components/responses/Problem' }
+        '404': { $ref: '#/components/responses/Problem' }
+        '409': { $ref: '#/components/responses/Problem' }
+  /auth/email-otp:
+    delete:
+      tags: [auth]
+      summary: Turn emailed sign-in codes off (password reset by email becomes available again)
+      description: Step-up token in the Nyxite-Step-Up header. The last factor cannot be removed (409).
+      parameters:
+        - $ref: '#/components/parameters/StepUpHeader'
+      responses:
+        '204': { description: 'Turned off.' }
+        '401': { $ref: '#/components/responses/Problem' }
+        '403': { $ref: '#/components/responses/Problem' }
+        '404': { $ref: '#/components/responses/Problem' }
+        '409': { $ref: '#/components/responses/Problem' }
+  /auth/passkeys:
+    get:
+      tags: [auth]
+      summary: The caller's passkeys (public metadata only)
+      responses:
+        '200':
+          description: Passkeys.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+                  required: [id, createdAt]
+                  properties:
+                    id: { $ref: '#/components/schemas/Uuid' }
+                    label: { type: [string, 'null'] }
+                    createdAt: { type: string, format: date-time }
+        '401': { $ref: '#/components/responses/Problem' }
+  /auth/passkeys/{id}:
+    delete:
+      tags: [auth]
+      summary: Remove one of the caller's passkeys
+      description: Step-up token in the Nyxite-Step-Up header. Another user's id answers 404. The last factor cannot be removed (409).
+      parameters:
+        - $ref: '#/components/parameters/Id'
+        - $ref: '#/components/parameters/StepUpHeader'
+      responses:
+        '204': { description: 'Removed.' }
+        '401': { $ref: '#/components/responses/Problem' }
+        '403': { $ref: '#/components/responses/Problem' }
+        '404': { $ref: '#/components/responses/Problem' }
+        '409': { $ref: '#/components/responses/Problem' }
+  /auth/sessions:
+    get:
+      tags: [auth]
+      summary: The caller's live sessions
+      responses:
+        '200':
+          description: Sessions, most recently used first; `current` marks the calling session.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  allOf:
+                    - $ref: '#/components/schemas/Session'
+                    - type: object
+                      required: [current]
+                      properties:
+                        current: { type: boolean }
+        '401': { $ref: '#/components/responses/Problem' }
+  /auth/sessions/{id}:
+    delete:
+      tags: [auth]
+      summary: Sign out one of the caller's sessions
+      description: Another user's session id answers 404. No step-up, because ending a session only removes access.
+      parameters:
+        - $ref: '#/components/parameters/Id'
+      responses:
+        '204': { description: 'Signed out.' }
+        '401': { $ref: '#/components/responses/Problem' }
+        '404': { $ref: '#/components/responses/Problem' }
+  /auth/password/change:
+    post:
+      tags: [auth]
+      summary: Change the password (current password plus step-up; other sessions are revoked)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [currentPassword, newPassword, stepUpToken]
+              properties:
+                currentPassword: { type: string }
+                newPassword: { type: string, minLength: 12, maxLength: 1024 }
+                stepUpToken: { type: string }
+      responses:
+        '204': { description: 'Changed.' }
+        '400': { $ref: '#/components/responses/Problem' }
+        '401': { $ref: '#/components/responses/Problem' }
+        '403': { $ref: '#/components/responses/Problem' }
+        '429': { $ref: '#/components/responses/Problem' }
   /auth/password/forgot:
     post:
       tags: [auth]
       security: []
       summary: Send a reset email (restores login only, never content)
+      description: >-
+        No email is sent for an account that uses email codes as a second factor, because the mailbox
+        would then reset the password and pass the second factor alike (08 §8.1).
       requestBody:
         required: true
         content:
@@ -314,7 +697,7 @@ paths:
               properties:
                 email: { type: string, format: email }
       responses:
-        '202': { description: 'Always 202, whether or not the email exists (no account enumeration).' }
+        '202': { description: 'Always 202, whether or not the email exists or may be reset (no account enumeration).' }
         '429': { $ref: '#/components/responses/Problem' }
   /auth/password/reset:
     post:
@@ -332,9 +715,10 @@ paths:
                 resetToken: { type: string }
                 newPassword: { type: string, minLength: 12, maxLength: 1024 }
       responses:
-        '204': { description: 'Password changed; all sessions revoked (credential_change).' }
+        '204': { description: 'Password changed; all sessions revoked (credential_change). The second factor is unchanged.' }
         '400': { $ref: '#/components/responses/Problem' }
-        '410': { $ref: '#/components/responses/Problem' }
+        '410': { description: 'link_expired: unknown, used or expired token, or email codes enabled since it was sent.', content: { application/problem+json: { schema: { $ref: '#/components/schemas/Problem' } } } }
+        '429': { $ref: '#/components/responses/Problem' }
 
   # ---------------------------------------------------------------- me
   /me:
@@ -942,6 +1326,7 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/DirectoryKey' }
         '400': { $ref: '#/components/responses/Problem' }
+        '403': { description: 'device_not_active (rotation from a session without an active device).', $ref: '#/components/responses/Problem' }
         '409': { $ref: '#/components/responses/Problem' }
   /devices:
     get:
@@ -959,7 +1344,7 @@ paths:
                   items: { type: array, items: { $ref: '#/components/schemas/Device' } }
     post:
       tags: [devices]
-      summary: Register a pending device
+      summary: Register a pending device, bound to the calling session
       parameters: [{ $ref: '#/components/parameters/IdempotencyKey' }]
       requestBody:
         required: true
@@ -970,7 +1355,7 @@ paths:
               required: [label, pubkey]
               properties:
                 label: { type: string, maxLength: 100 }
-                pubkey: { $ref: '#/components/schemas/Bytes' }
+                pubkey: { $ref: '#/components/schemas/Bytes', description: 'Hybrid KEM public key X25519 || ML-KEM-768 (1216 bytes).' }
       responses:
         '201':
           description: Pending device.
@@ -990,6 +1375,8 @@ paths:
                       deviceId: { $ref: '#/components/schemas/Uuid' }
                       pairingCode: { type: string }
                       pubkeyFingerprint: { $ref: '#/components/schemas/Bytes' }
+        '400': { $ref: '#/components/responses/Problem' }
+        '409': { description: 'The calling session is already bound to a device.', $ref: '#/components/responses/Problem' }
   /devices/{id}:
     parameters: [{ $ref: '#/components/parameters/Id' }]
     get:
@@ -1028,6 +1415,29 @@ paths:
         '403': { $ref: '#/components/responses/Problem' }
         '404': { $ref: '#/components/responses/Problem' }
         '410': { $ref: '#/components/responses/Problem' }
+  /devices/{id}/activate:
+    parameters: [{ $ref: '#/components/parameters/Id' }]
+    post:
+      tags: [devices]
+      summary: Activate the caller's own pending device by an identity-key signature (first device, recovery)
+      description: |
+        `sig` is a hybrid Ed25519 + ML-DSA-65 signature by the live directory key `keyId` over
+        "NYXDEV-ACTIVATE-v1" || user_id(16) || device_id(16) || key_id(16) || SHA-256(device pubkey)(32),
+        UUIDs in RFC 9562 byte order (specification/04-rest-api.md).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [keyId, sig]
+              properties:
+                keyId: { $ref: '#/components/schemas/Uuid' }
+                sig: { $ref: '#/components/schemas/Bytes' }
+      responses:
+        '204': { description: 'Active.' }
+        '400': { $ref: '#/components/responses/Problem' }
+        '404': { $ref: '#/components/responses/Problem' }
   /devices/me/enrollment:
     get:
       tags: [devices]
@@ -1065,6 +1475,7 @@ paths:
       responses:
         '204': { description: 'Stored.' }
         '400': { $ref: '#/components/responses/Problem' }
+        '403': { description: 'device_not_active (replacing a blob from a session without an active device).', $ref: '#/components/responses/Problem' }
 
   # ---------------------------------------------------------------- key transparency (17)
   /kt/log-key:
@@ -2224,6 +2635,18 @@ paths:
       responses:
         '200': { description: 'Ready.' }
         '503': { description: 'Not ready.' }
+  /openapi/v1.json:
+    servers: [{ url: 'https://{host}', variables: { host: { default: nyxite.example.org } } }]
+    get:
+      tags: [ops]
+      security: []
+      summary: This document as JSON (04 §4.1)
+      responses:
+        '200':
+          description: The OpenAPI document.
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
 
 components:
   securitySchemes:
@@ -2274,6 +2697,13 @@ components:
       schema: { type: string, minLength: 8, maxLength: 128 }
       description: Stored 24 h scoped to (user, endpoint); same key with a different body gives 409 idempotency_conflict.
 
+    StepUpHeader:
+      name: Nyxite-Step-Up
+      in: header
+      required: true
+      schema: { type: string }
+      description: Step-up token from POST /auth/step-up (08 §8.2); a header because DELETE bodies are unreliable and URLs are logged.
+
   responses:
     Problem:
       description: RFC 9457 problem (codes in 04 §4.4).
@@ -2310,7 +2740,10 @@ components:
             - token_expired
             - acl_denied
             - 2fa_required
+            - email_unverified
+            - account_blocked
             - pairing_code_invalid
+            - device_not_active
             - not_found
             - conflict
             - version_conflict
@@ -2340,6 +2773,19 @@ components:
             winner: { $ref: '#/components/schemas/Version' }
             sibling: { $ref: '#/components/schemas/Version' }
 
+    ClientKind:
+      type: string
+      enum: [desktop, android, web, admin]
+      description: Stored as sessions.client_kind (03 §3.2).
+    SecondFactorMethod:
+      type: string
+      enum: [totp, email, backup_code]
+      description: A method that completes a password login (08 §8.1(a)).
+    EmailCode: { type: string, pattern: '^[0-9]{8}$', description: 'Emailed one-time code' }
+    StepUpTokenRequest:
+      type: object
+      properties:
+        stepUpToken: { type: string, description: 'From POST /auth/step-up; required once the account has a second factor' }
     TokenPair:
       type: object
       required: [accessToken, refreshToken, accessTokenExpiresAt]
@@ -2738,7 +3184,7 @@ components:
         id: { $ref: '#/components/schemas/Uuid' }
         deviceId: { $ref: '#/components/schemas/NullableUuid' }
         clientKind: { type: string, enum: [desktop, android, web, admin] }
-        authMethod: { type: string, enum: [password_totp, passkey, oidc] }
+        authMethod: { type: string, enum: [password_totp, password_email, password_backup_code, passkey, oidc] }
         createdAt: { type: string, format: date-time }
         lastSeenAt: { type: string, format: date-time }
         expiresAt: { type: string, format: date-time }

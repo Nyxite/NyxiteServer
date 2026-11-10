@@ -85,8 +85,8 @@ Recorded `action` values (non-exhaustive) **[P]**:
 
 | Category | Examples |
 |----------|----------|
-| Auth | `auth.login`, `auth.2fa_challenge`, `auth.guest_session`, `auth.logout`, `auth.refresh_reuse` (a used refresh token was presented again; the session is revoked — [03 §3.2](03-data-model.md)) |
-| Keys/devices | `device.enroll`, `device.revoke`, `key.publish`, `key.rotate`, `recovery.use` |
+| Auth | `auth.register`, `auth.login`, `auth.login_failed` (detail `reason` only, never the email or password), `auth.2fa_challenge` (detail `methods`), `auth.totp_enrolled`, `auth.email_otp_enabled`, `auth.passkey_registered`, `auth.backup_codes_generated` (count only), `auth.backup_code_used` (remaining count), `auth.email_code_sent` (detail `purpose`), `auth.email_verified`, `auth.email_verify_failed`, `auth.step_up`, `auth.step_up_failed` (detail `method`), `auth.unverified_account_purged` (actor `system`), `auth.guest_session`, `auth.logout`, `auth.refresh_reuse` (a used refresh token was presented again; the session is revoked — [03 §3.2](03-data-model.md)) |
+| Keys/devices | `device.enroll` (detail `step`: `register`, `approve`, `fetch`, `activate`), `device.revoke`, `key.publish`, `key.rotate`, `recovery.set`, `recovery.use` (a fetch of the recovery blob) |
 | Sharing | `share.create`, `share.update`, `share.revoke`, `share.link_access` |
 | Admin | `admin.user_update`, `admin.user_block`, `admin.user_unblock`, `admin.quota_set`, `admin.bulk_update`, `admin.role_change`, `admin.group_change`, `admin.group_max_members_set`, `admin.session_revoke`, `admin.user_import`, `admin.config_view`, `admin.device_revoke` |
 | Groups (file-sharing) | `group.enroll`, `group.enroll_rejected` (over-limit / transparency-unverified), `group.member_remove`, `group.key_rotate` |
@@ -95,7 +95,7 @@ Recorded `action` values (non-exhaustive) **[P]**:
 Each entry: `occurred_at`, `actor_id`/`actor_kind`, `action`, `target_type`/`target_id`, structural `detail`, `ip`, `user_agent`.
 
 ### Integrity & retention
-- App DB role has **no UPDATE/DELETE** on `audit_log` (append-only by grant). **[P]**
+- App DB role has **no UPDATE/DELETE** on `audit_log` (append-only by grant, `nyxite_app` in [03 §3.5](03-data-model.md)). **[P]** The retention purge below therefore does not run in the server process. It is the CLI step `nyxite-server purge-audit`, run as the **migration role** (`NYXITE__Database__MigrationConnectionString`) on a schedule the deploy sets up, so retention stays a privileged, operator-driven action and the running server never holds `DELETE` on the trail. A `SECURITY DEFINER` purge function callable by the app role was rejected, because a compromised server could call it with a short retention.
 - Optional tamper-evidence: hash-chained entries / periodic signed checkpoints. **[P]**
 - Operator-configured retention; rotation/export via the admin API; expiry purge is itself audited.
 

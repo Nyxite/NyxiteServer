@@ -1,0 +1,6 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <RootNamespace>Nyxite.BlobStore</RootNamespace>
+  </PropertyGroup>
+
+</Project>

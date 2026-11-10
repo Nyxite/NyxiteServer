@@ -1,0 +1,8 @@
+{
+  "password": "636f727265637420686f727365206261747465727920737461706c65",
+  "salt": "d0d1d2d3d4d5d6d7d8d9dadbdcdddedf",
+  "memoryKiB": 65536,
+  "iterations": 3,
+  "parallelism": 1,
+  "output": "75118809c931b741b4d54a9d655cd652d9e65b7394a6217099ca995cea7aabd0"
+}

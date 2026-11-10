@@ -22,6 +22,9 @@ CREATE TABLE users (
   password_verifier bytea,                    -- Argon2id (m=64MiB,t=3,p=1) over HMAC-SHA256(password, pepper); NULL for passkey-only / enterprise accounts
   password_pepper_version int,                -- which PASSWORD_PEPPER version this verifier used; drives lazy re-pepper at next login (§08); NULL when no verifier
   totp_secret_enc   bytea,                    -- enrolled TOTP secret, encrypted at rest; required alongside a password
+  totp_last_step    bigint,                   -- last accepted TOTP time step; a code is only accepted for a later step (RFC 6238 §5.2)
+  email_verified_at timestamptz,              -- when control of `email` was proven; NULL = unverified, purged after NYXITE__Auth__UnverifiedAccountLifetime
+  email_otp_enabled_at timestamptz,           -- when emailed one-time codes were enabled as a second factor; NULL = not enabled
   external_idp      text,                     -- enterprise IdP name (e.g. 'keycloak'); NULL for native accounts
   external_idp_sub  text,                     -- OIDC `sub` from the enterprise IdP; NULL for native accounts
   role              text NOT NULL DEFAULT 'user' CHECK (role IN ('user','admin')),  -- bootstrap flag only; fine-grained access is RBAC (§3.2a)
@@ -33,7 +36,7 @@ CREATE TABLE users (
   UNIQUE (external_idp, external_idp_sub)     -- enterprise-linked identity, when present
 );
 ```
-> Native, server-owned account ([08](08-authentication.md)): `password_verifier` is an **Argon2id hash over an HMAC-SHA256(password, pepper) pre-hash** (the password never feeds content-key derivation; the **pepper** is a server secret held outside Postgres — [14](14-deployment-and-config.md)), `password_pepper_version` records the pepper version so rotation can **re-pepper lazily at next login**, `totp_secret_enc` the required second factor; passkeys live in `webauthn_credentials`. `external_idp`/`external_idp_sub` are populated **only** for enterprise OIDC-linked accounts. `display_name`/`email` are account identity (needed for sharing-by-account and presence), not file content. User *settings* are client-encrypted. `status='blocked'` and `storage_quota_bytes` are admin-set and **server-enforced** ([12 §12.6](12-administration.md)) — both operate on metadata/sizes only, never content.
+> Native, server-owned account ([08](08-authentication.md)): `password_verifier` is an **Argon2id hash over an HMAC-SHA256(password, pepper) pre-hash** (the password never feeds content-key derivation; the **pepper** is a server secret held outside Postgres — [14](14-deployment-and-config.md)), `password_pepper_version` records the pepper version so rotation can **re-pepper lazily at next login**, `totp_secret_enc` the TOTP second factor, `email_otp_enabled_at` the email second factor; passkeys live in `webauthn_credentials` and backup codes in `backup_codes`. `totp_last_step` makes every TOTP code single-use: the accepting request sets it with a conditional `UPDATE ... WHERE totp_last_step IS NULL OR totp_last_step < $step`, so of two requests with the same code exactly one wins. `email_verified_at` stays NULL until the emailed verification code is confirmed ([08 §8.1](08-authentication.md)), and an account still unverified after `NYXITE__Auth__UnverifiedAccountLifetime` is purged, so a registration with someone else's address cannot hold it. `external_idp`/`external_idp_sub` are populated **only** for enterprise OIDC-linked accounts. `display_name`/`email` are account identity (needed for sharing-by-account and presence), not file content. User *settings* are client-encrypted. `status='blocked'` and `storage_quota_bytes` are admin-set and **server-enforced** ([12 §12.6](12-administration.md)) — both operate on metadata/sizes only, never content.
 
 ### Access control — roles, permissions, groups (admin RBAC) — §3.2a
 
@@ -154,6 +157,20 @@ CREATE INDEX ix_webauthn_user ON webauthn_credentials(user_id);
 ```
 > Only **public** credential material is stored; a passkey is phishing-resistant and sufficient on its own ([08 §8.1](08-authentication.md)). Nothing here is content-derivable.
 
+### backup_codes  (single-use stand-ins for a lost second factor)
+```sql
+CREATE TABLE backup_codes (
+  id             uuid PRIMARY KEY,
+  user_id        uuid NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  code_hash      bytea NOT NULL,              -- HMAC-SHA256(HKDF(pepper_v, "nyxite-one-time-code-v1"), "backup_code" ‖ 0x00 ‖ code)
+  pepper_version int NOT NULL,                -- pepper version of the HMAC key
+  created_at     timestamptz NOT NULL DEFAULT now(),
+  used_at        timestamptz                  -- set when the code completes a login or a step-up; a used code is never valid again
+);
+CREATE INDEX ix_backup_codes_user_unused ON backup_codes(user_id) WHERE used_at IS NULL;
+```
+> A set of `NYXITE__Auth__BackupCodeCount` codes of 10 Crockford base32 characters (50 bits) is shown once by `POST /auth/backup-codes` ([08 §8.1](08-authentication.md)) and replaces the previous set. 50 bits are far too few for an unkeyed hash, so the stored value is an HMAC under a key derived from the password pepper, which lives outside Postgres: a DB-only leak cannot brute-force the codes. Argon2id per code was rejected because a login would have to run it once per unused code. Backup codes complete a password login or a step-up but are never a factor on their own, so an account needs TOTP, email codes or a passkey before it can create them.
+
 ### user_keys  (public-key directory)
 ```sql
 CREATE TABLE user_keys (
@@ -217,8 +234,8 @@ CREATE TABLE sessions (
   client_kind     text NOT NULL
                     CHECK (client_kind IN ('desktop','android','web','admin')),
   auth_method     text NOT NULL
-                    CHECK (auth_method IN ('password_totp','passkey','oidc')),
-  mfa_verified_at timestamptz NOT NULL,        -- last second factor on this session; drives `403 2fa_required` step-up (08 §8.2)
+                    CHECK (auth_method IN ('password_totp','password_email','password_backup_code','passkey','oidc')),
+  mfa_verified_at timestamptz,                 -- last second factor on this session; NULL = enrollment-limited session (08 §8.2)
   created_at      timestamptz NOT NULL DEFAULT now(),
   last_seen_at    timestamptz NOT NULL DEFAULT now(),  -- bumped on refresh; idle timeout is measured from here
   expires_at      timestamptz NOT NULL,        -- absolute lifetime; refresh never extends it
@@ -232,7 +249,7 @@ CREATE TABLE sessions (
 CREATE INDEX ix_sessions_user_active ON sessions(user_id) WHERE revoked_at IS NULL;
 CREATE INDEX ix_sessions_device      ON sessions(device_id) WHERE revoked_at IS NULL;
 ```
-> A session is the server-side anchor for **revocation**: `/auth/logout`, admin force-logout (`DELETE /admin/users/{id}/sessions/{sid}`, [12](12-administration.md)), device revocation, blocking a user and a password/TOTP/passkey change all set `revoked_at` + `revoke_reason`, which kills every refresh token of the session at once. Access tokens stay **stateless** ([08 §8.7](08-authentication.md)); a revoked session therefore loses access within one access-token lifetime (~5 min) — the server does **not** look up `sessions` on every request, because that would make every call a DB round-trip for a 5-minute gain. Holds no key material and nothing content-derived.
+> A session is the server-side anchor for **revocation**: `/auth/logout`, admin force-logout (`DELETE /admin/users/{id}/sessions/{sid}`, [12](12-administration.md)), device revocation, blocking a user (for a web session, at its next refresh) and a credential change (password, or adding or replacing TOTP, email codes, a passkey or backup codes on an account that already had a factor) all set `revoked_at` + `revoke_reason`, which kills every refresh token of the session at once. Access tokens stay **stateless** ([08 §8.7](08-authentication.md)); a revoked session therefore loses access within one access-token lifetime (~5 min) — the server does **not** look up `sessions` on every request, because that would make every call a DB round-trip for a 5-minute gain. Holds no key material and nothing content-derived.
 
 ### refresh_tokens  (rotate-on-use chain within a session)
 ```sql
@@ -259,20 +276,27 @@ CREATE INDEX ix_refresh_session ON refresh_tokens(session_id);
 CREATE TABLE ephemeral_tokens (
   token_hash  bytea PRIMARY KEY,             -- SHA-256 of the opaque 256-bit random token; the raw token is never stored
   kind        text NOT NULL
-                CHECK (kind IN ('mfa','socket_ticket','password_reset','invite','oidc_state','oidc_handoff')),
-  user_id     uuid REFERENCES users(id),     -- NULL only for 'oidc_state' (no user is known before the IdP answers)
+                CHECK (kind IN ('mfa','socket_ticket','password_reset','invite','oidc_state','oidc_handoff',
+                                'webauthn_challenge','totp_enroll','email_verify','email_code','step_up')),
+  user_id     uuid REFERENCES users(id),     -- NULL only for 'oidc_state' and a passkey-login 'webauthn_challenge' (no user known yet)
   session_id  uuid REFERENCES sessions(id) ON DELETE CASCADE,  -- socket_ticket: the session it was minted from; NULL for 'mfa'
   attempts    int NOT NULL DEFAULT 0,        -- 'mfa': failed TOTP codes; at NYXITE__Auth__MfaMaxAttempts the token is void
-  detail      jsonb,                         -- 'oidc_state' only: { nonce, codeVerifier, redirectUri, client }
+  detail      jsonb,                         -- 'oidc_state': { nonce, codeVerifier, redirectUri, client }; 'mfa': { clientKind };
+                                             -- 'webauthn_challenge': { type, options }; 'totp_enroll': { secret } (encrypted);
+                                             -- 'email_verify' / 'email_code': { h, v } (HMAC of the code and its pepper version)
   issued_at   timestamptz NOT NULL DEFAULT now(),
   expires_at  timestamptz NOT NULL,
   used_at     timestamptz                    -- set by the consuming request; a used token is never valid again
 );
 ALTER TABLE ephemeral_tokens ADD CONSTRAINT ck_ephemeral_user
-  CHECK (user_id IS NOT NULL OR kind = 'oidc_state');
+  CHECK (user_id IS NOT NULL OR kind IN ('oidc_state','webauthn_challenge'));
 CREATE INDEX ix_ephemeral_expires ON ephemeral_tokens(expires_at);
 ```
 - **What lives here.** The interim `mfaToken` between `POST /auth/login` and `POST /auth/login/totp` (lifetime `NYXITE__Auth__MfaTokenLifetime`); the relay **socket ticket** minted from a user bearer (single-use, **60 s**, [08 §8.4](08-authentication.md)); the **password-reset** token of `/auth/password/forgot` (30 min); the **invite** token sent to an admin-imported user (7 days, [12 §12.2](12-administration.md)); and the enterprise OIDC `oidc_state` (10 min, its `state`/`nonce`/PKCE verifier kept in a `detail jsonb` column) and `oidc_handoff` (60 s) values ([08 §8.1](08-authentication.md)). Lifetimes are config keys `NYXITE__Auth__Lifetimes__<Kind>` ([14](14-deployment-and-config.md)). Both must be **single-use**, which a stateless signed token cannot enforce, so they need server state.
+- **Passkey challenges and pending TOTP enrollments.** A WebAuthn challenge is stored as kind `webauthn_challenge` under `SHA-256(challenge)` with the original options in `detail`, because the finishing request must be verified against exactly those options, on any node, once. A login challenge has no `user_id`, since discoverable passkeys identify the user only in the assertion. The secret of `POST /auth/totp/enroll` waits as kind `totp_enroll` under `SHA-256("totp_enroll:" ‖ session_id)` until `POST /auth/totp/verify`, encrypted like `users.totp_secret_enc` ([08 §8.1](08-authentication.md)), so an unconfirmed secret never reaches `users`. Wrong codes count in `attempts` against `NYXITE__Auth__MfaMaxAttempts` for `mfa`, `totp_enroll`, `email_verify` and `email_code`.
+- **Emailed codes.** An 8-digit code sent by email waits as kind `email_verify` (registration, keyed by the user) or `email_code` (keyed by purpose and scope: the `mfaToken` for a login, the session for email-code enrollment and for a step-up). Issuing again replaces the row. Only the HMAC of the code is stored, keyed like `backup_codes.code_hash` with the purpose in the MAC input, so a code for one purpose never verifies another.
+- **Step-up tokens.** `POST /auth/step-up` ([08 §8.2](08-authentication.md)) issues a random token of kind `step_up` bound to the user and the session, valid for `NYXITE__Auth__StepUpLifetime`. The request that starts a factor change consumes it. A token of another session is refused, so a token is useless outside the session that proved the factor.
+- **Enrollment-limited session.** `sessions.mfa_verified_at` is NULL for the session that `POST /auth/register` (or a login of an account without any second factor) creates. Its tokens carry `amr: ["pwd"]` and may only verify the email, enroll a factor, refresh and log out. Enrollment waits until the email is verified. Enrolling TOTP, email codes or a passkey sets the column, and the next refresh yields a full token. A sentinel timestamp was rejected because the column would then claim a second factor that never happened.
 - **Consume = one statement.** `UPDATE ephemeral_tokens SET used_at = now() WHERE token_hash = $1 AND kind = $2 AND used_at IS NULL AND expires_at > now() RETURNING …` — exactly one request can win, with no read-then-write race, and it works unchanged when several server nodes share the database.
 - **Why Postgres, not in-memory or Redis.** In-memory state is lost on restart and is invisible to a second node, so a ticket minted on node A would fail on node B. Redis would work but would turn an **optional** component (today only the multi-node relay backplane, [14](14-deployment-and-config.md)) into a **required** part of the default stack. The row volume is tiny (one row per login attempt and per socket connect, gone within minutes), so Postgres carries it without cost. Access goes through an `IEphemeralTokenStore` interface, so a Redis implementation can be added later for large multi-node deployments without a schema change.
 - **Cleanup.** The ops job deletes rows past `expires_at`; nothing here is kept for audit, because login and relay events are already in `audit_log`.
@@ -280,6 +304,23 @@ CREATE INDEX ix_ephemeral_expires ON ephemeral_tokens(expires_at);
 ### Guest share-session token — stateless, not stored
 
 The 15-minute guest **share-session token** ([08 §8.2](08-authentication.md), [09 §9.6](09-sharing-and-acl.md)) has **no table**. It is a token signed with the server's token-signing key, carrying the `share_id`, the link permission (read/write) and `exp`. It need not be single-use, so the main reason for server state is absent, and every **renewal** re-checks the `shares` row, which already gives the specified "revoked within one renewal cycle". Not storing it also means the server keeps **no per-guest record** beyond the `auth.guest_session` audit event, which is the privacy-preferring choice.
+
+### email_outbox  (account email waiting to be sent)
+```sql
+CREATE TABLE email_outbox (
+  id              uuid PRIMARY KEY,
+  payload_enc     bytea NOT NULL,            -- AES-256-GCM over {to, subject, body}, key held outside Postgres
+  attempts        int NOT NULL DEFAULT 0,
+  created_at      timestamptz NOT NULL DEFAULT now(),
+  next_attempt_at timestamptz NOT NULL,      -- due time, pushed back after each failed attempt
+  expires_at      timestamptz NOT NULL       -- when the code in the mail stops working
+);
+CREATE INDEX ix_email_outbox_due ON email_outbox(next_attempt_at);
+```
+- Every account email (verification, sign-in code, step-up code, password reset) is queued here in the transaction of the change it belongs to and sent by a background worker ([08 §8.1](08-authentication.md)). The request never waits for the mail relay, so it answers equally fast whether or not a mail goes out, and a slow or failing relay cannot stall or fail a request.
+- The table was chosen over an in-memory queue, because a queued mail then survives a restart and several server nodes can share the work. The worker claims a row with `FOR UPDATE SKIP LOCKED`, so no mail is sent twice.
+- **Encrypted payload.** The body carries a usable code or reset token, and everywhere else the database only holds hashes of those. The payload is therefore AES-256-GCM ciphertext under `HKDF-SHA256(pepper_v, info = "nyxite-email-outbox-v1")`, layout `pepper_version(u32) ‖ nonce(12) ‖ ciphertext ‖ tag(16)`, AAD `"NYXMAIL1" ‖ id(16)`. The pepper lives outside Postgres ([14](14-deployment-and-config.md)), so a database-only leak shows nothing of an unsent mail. Deriving the key from the pepper was chosen over a dedicated secret, because it adds no secret for an operator to manage, the same way `totp_secret_enc` is protected.
+- **Lifetime.** A row is deleted in the transaction that sent it. A failed attempt is retried after 10 s, 20 s, 40 s and so on up to 5 min, at most `NYXITE__Email__OutboxMaxAttempts` times. A mail past `expires_at` is dropped instead of delivered late, because its code no longer works.
 
 ### idempotency_keys  (replay store for `Idempotency-Key`)
 ```sql
@@ -501,7 +542,7 @@ CREATE TABLE audit_log (
   user_agent  text
 );
 CREATE INDEX ix_audit_time   ON audit_log(occurred_at DESC);
-CREATE INDEX ix_audit_actor  ON audit_log(actor_id);
+CREATE INDEX ix_audit_actor  ON audit_log(actor_id, occurred_at DESC);  -- one account's recent events: the second-factor failure cap reads them on every code attempt
 CREATE INDEX ix_audit_action ON audit_log(action);
 ```
 
@@ -540,5 +581,6 @@ public interface IBlobStore
 ## 3.5 Migrations & integrity
 
 - EF Core migrations are the schema authority.
+- **Two database roles.** Migrations run as a **migration role** that owns every table and needs `CREATEROLE`, via `nyxite-server migrate` ([14 §14.4](14-deployment-and-config.md)). The server connects as a login role that is a member of the NOLOGIN group role **`nyxite_app`**, which a migration creates and grants `SELECT, INSERT, UPDATE, DELETE` on ordinary tables, `SELECT` only on `__EFMigrationsHistory`, and `SELECT, INSERT` only on the **append-only** tables (`audit_log`, `kt_leaves`, and later `kt_nodes`, `kt_checkpoints`). The privileges live in a migration rather than in the deploy scripts, so the schema and its privileges are versioned together and cannot drift. Default privileges give new tables full DML, so every migration that adds an append-only table revokes `UPDATE, DELETE, TRUNCATE` for it. A trigger-based guard was rejected, because the table owner can drop a trigger and so it protects against bugs but not against a compromised app role.
 - The server validates structure, ACLs, and write-once addressing — but **cannot** validate plaintext or content-hash correctness ([07 §7.5](07-encryption.md)); clients are trusted to address and encrypt honestly.
 - Deletes are soft; the only hard delete is admin/GC purge, which is audited.

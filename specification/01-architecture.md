@@ -90,9 +90,9 @@ v1.0.0 is single-node. The relay's no-merge design makes horizontal scale-out (R
 | **AuthZ** | Server ACL gates ciphertext/relay; crypto layer gates decryption. [09](09-sharing-and-acl.md) |
 | **Validation** | Structure/ACL DTOs validated at the edge; **content is opaque** (server can't validate plaintext). |
 | **Errors** | RFC 9457 `application/problem+json`. [04 §4.4](04-rest-api.md) |
-| **Logging** | Structured logs (Serilog **[P]**), correlation IDs; security events → audit log; **never content** (there is none readable). |
+| **Logging** | Structured JSON logs (built-in .NET console logger, [14 §14.5](14-deployment-and-config.md)), correlation IDs; security events → audit log; **never content** (there is none readable). |
 | **Config** | `IOptions` from env + mounted secrets. [14](14-deployment-and-config.md) |
-| **Telemetry** | OpenTelemetry **[P]**; health/readiness. |
+| **Telemetry** | Prometheus metrics on a separate port ([14 §14.5](14-deployment-and-config.md)); health/readiness. |
 | **Idempotency** | Content-addressed writes are idempotent; `Idempotency-Key` **required on POST creates** — the server stores `key → response` for 24h scoped to `(user, endpoint)`; a replay returns the original response/status; the same key with a different body → `409 idempotency_conflict` ([04](04-rest-api.md)). **[P]** |
 | **Background work** | Blob GC, share-token/expiry sweeps, audit retention. **No** snapshotting/indexing (those are client-side). |
 

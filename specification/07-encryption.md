@@ -59,14 +59,16 @@ The **asymmetric** seams ship **hybrid classical + post-quantum (concatenated)**
 | Purpose | Algorithm |
 |---------|-----------|
 | Symmetric AEAD everywhere (content / CRDT / snapshots / names / recovery blob) | **AES-256-GCM**, 96-bit (12B) nonce, 128-bit (16B) tag *(unchanged — quantum-safe)* |
-| Public-key wrap to a recipient public key (file-key to members; device enrollment to a device pubkey) | **HPKE base mode** with a **hybrid KEM** — DHKEM(X25519, HKDF-SHA256) **concatenated with ML-KEM-768** / HKDF-SHA256 / AES-256-GCM. Hybrid suite id **`X25519MLKEM768`** (carried on `alg_id`) |
+| Public-key wrap to a recipient public key (file-key to members; device enrollment to a device pubkey) | **HPKE base mode** (RFC 9180) with the hybrid KEM **X-Wing** (draft-connolly-cfrg-xwing-kem: X25519 + ML-KEM-768, HPKE `KEM 0x647a`) / HKDF-SHA256 (`KDF 0x0001`) / AES-256-GCM (`AEAD 0x0002`). Hybrid suite id **`X25519MLKEM768`** (carried on `alg_id`) |
 | Recovery blob wrap | **AES-256-GCM** under an **Argon2id**-derived key (NOT HPKE — see the rule below) *(unchanged)* |
-| Identity key agreement | **X25519 + ML-KEM-768** (hybrid; classical DHKEM(X25519) half retained, ML-KEM-768 concatenated) |
+| Identity key agreement | **X25519 + ML-KEM-768** (hybrid, X-Wing) |
 | Signing (updates, key directory entries, device enrollment, key transparency, audit) | **Ed25519 + ML-DSA-65** (hybrid dual signature) |
 | Recovery-key derivation | **Argon2id** — m=64 MiB, t=3, p=1 (tunable; persisted in `recovery_blobs.kdf_params`) *(unchanged)* |
 | Plaintext hashing (content address) | **BLAKE3-256** of plaintext *(unchanged)* |
 
 > **Size consequence.** Hybrid enlarges the small key material only, never content ciphertext: each wrapped-key row grows by the **ML-KEM-768 ciphertext (~+1.1 KB)** and each signature by the **ML-DSA-65 signature (≈ 3.3 KB)**. Level 3 (not level 5) was chosen partly to keep signatures smaller on the signed-CRDT-update hot path.
+
+> **Hybrid KEM = X-Wing.** The KEM is X-Wing as published in draft-connolly-cfrg-xwing-kem, not a construction of our own. The earlier wording, "DHKEM(X25519) concatenated with ML-KEM-768", did not say how the two shared secrets are mixed, and all four codebases must mix them identically. X-Wing fixes that rule (`SHA3-256(ss_M ‖ ss_X ‖ ct_X ‖ pk_X ‖ label)`), has public test vectors and existing libraries (for the web `@hpke/hybridkem-x-wing`), so no client has to implement or audit a home-made combiner. A custom HKDF-based concatenation that kept the old byte order was rejected for exactly that reason. Layouts, all fixed length: decapsulation key = a 32-byte seed, public key = `mlkem768_pk(1184) ‖ x25519_pk(32)` (1216 B), encapsulation = `mlkem768_ct(1088) ‖ x25519_share(32)` (1120 B). The ML-KEM part comes first, which reverses the order of the earlier draft of this chapter. The total sizes are unchanged, so no column or size check changes. The `alg_id` string stays `X25519MLKEM768` and names X-Wing. Vectors: `xwing-kem.json` (the draft's own) and `hybrid-hpke.json`, whose output an independent implementation (hpke-js) opens.
 
 > **System rule — HPKE vs AES-256-GCM:** use **HPKE wherever the target is a public key** (file-key wrap to members, **DEK/group-key wrap to a group pubkey**, device enrollment to a device pubkey); use **AES-256-GCM wherever the key is symmetric** (all content + the recovery blob).
 
@@ -81,7 +83,7 @@ magic(4) | version(1) | key_id(16) | nonce(12) | ciphertext(...) | gcm_tag(16)
 - **magic** = ASCII `"NYXC"` (`0x4E 0x59 0x58 0x43`); **version** = `0x01`.
 - **AAD** = `magic ‖ version ‖ key_id ‖ file_id(16) ‖ object_kind(1)` — binds the frame to its file and kind.
 - **`object_kind`** enum: `blob=1`, `snapshot=2`, `crdt=3`, `name=4`, `metadata=5`, `awareness=6`, `settings=7`, `chunk=8`, `chunk_manifest=9` ([§7.4a](#74a-chunked-encryption-for-large-files-phase-51-p)).
-- **HPKE wrap output framing** (a wrapped file-key): `enc(HPKE encapsulated key) ‖ ciphertext ‖ tag(16)`. Under the hybrid KEM `enc` is the **X25519 share (32B) concatenated with the ML-KEM-768 ciphertext (~1088B)** rather than a bare 32B share; the `alg_id` fixes its length.
+- **HPKE wrap output framing** (a wrapped file-key): `enc(HPKE encapsulated key) ‖ ciphertext ‖ tag(16)`. Under the hybrid KEM (X-Wing, §7.3) `enc` is the **ML-KEM-768 ciphertext (1088 B) followed by the X25519 share (32 B)**, 1120 B in total, rather than a bare 32 B share. The `alg_id` fixes its length.
 
 `key_id` identifies which **file key** (and its 1:1 rotation generation) was used; the server cannot resolve it to a usable key.
 

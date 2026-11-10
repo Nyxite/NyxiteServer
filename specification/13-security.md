@@ -48,9 +48,12 @@ Concrete starting values (tunable):
 
 | Surface | Limit (tunable) |
 |---------|------------------|
-| Auth / login | **10/min/IP** |
+| Auth / login, second-factor steps, step-up, email verification | **10/min/IP**, one shared bucket ([08 §8.9](08-authentication.md)) |
+| Wrong second-factor codes | **10 per 15 min per account**, across all `mfaToken`s ([08 §8.1](08-authentication.md)) |
+| Password hashing | At most `NYXITE__Auth__MaxConcurrentPasswordHashes` Argon2id derivations at once (default one per CPU core). A sign-in waits up to 5 s for a slot, then gets `429`. The per-IP bucket alone does not bound memory, because many addresses can sign in at the same moment and each derivation holds 64 MiB |
+| `POST /auth/password/forgot` mail | **3 per hour per account**, dropped silently beyond that, so the endpoint cannot flood a mailbox from many addresses |
 | `GET /keys/directory` | **60/min/user** (limits social-graph probing) |
-| `POST /devices` enrollment | strict per-user |
+| `POST /devices` enrollment | **5/hour/user** (each pending device holds a guessable pairing code) |
 | `POST /shares` | **30/min/user** |
 | `/share/{token}*` guest access | **30/min/IP** |
 | Blob upload | **60/min/user** |
@@ -106,7 +109,7 @@ Two-layered: **instant server-ACL cutoff** + **client-driven key rotation** for 
 
 ## 13.9 Hardening checklist (build-time) **[P]**
 
-- HSTS, secure headers, strict CORS (known client origins only).
+- HSTS, secure headers, strict CORS (known client origins only). Every response carries `X-Content-Type-Options: nosniff`, `X-Frame-Options: DENY`, `Referrer-Policy: no-referrer`, `Content-Security-Policy: default-src 'none'; frame-ancestors 'none'` and `Cache-Control: no-store`, and `Strict-Transport-Security` when the request arrived over HTTPS. CORS allows only `NYXITE__Network__CorsOrigins` ([14](14-deployment-and-config.md)).
 - Least-privilege DB roles (app role: no audit UPDATE/DELETE; migrations under a separate role).
 - Signed CRDT updates / key-directory entries (**hybrid Ed25519 + ML-DSA-65**) to detect relay tampering and key swaps. **[P]**
 - Secrets never logged; structured logs scrubbed.

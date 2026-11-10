@@ -53,7 +53,7 @@ ASP.NET Core (C#) backend. The core service: API, sync engine, real-time collabo
 
 ## Authentication
 
-- **Native, server-owned auth** — password (**Argon2id over a secret HMAC-SHA256 pepper**, rotatable, held outside the DB) + required TOTP, plus co-equal **passkeys (WebAuthn)**; the server **issues its own access + refresh tokens**. The login password never feeds content-key derivation; decryption is governed by device/identity keys. **Keycloak/OIDC is a pluggable enterprise IdP** resolving to the same internal token — a **licensed enterprise feature** (gated off in community mode; see *Licensing & enterprise entitlement* below). (See [SPECIFICATION §10](https://github.com/Nyxite/Nyxite/blob/main/docs/SPECIFICATION.md).)
+- **Native, server-owned auth** — password (**Argon2id over a secret HMAC-SHA256 pepper**, rotatable, held outside the DB) + a required second factor (TOTP, emailed code or backup code), plus co-equal **passkeys (WebAuthn)**, with the email verified before enrollment and a step-up for factor changes; the server **issues its own access + refresh tokens**. The login password never feeds content-key derivation; decryption is governed by device/identity keys. **Keycloak/OIDC is a pluggable enterprise IdP** resolving to the same internal token — a **licensed enterprise feature** (gated off in community mode; see *Licensing & enterprise entitlement* below). (See [SPECIFICATION §10](https://github.com/Nyxite/Nyxite/blob/main/docs/SPECIFICATION.md).)
 
 ## Admin API & audit
 

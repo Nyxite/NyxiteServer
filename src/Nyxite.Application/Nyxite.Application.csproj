@@ -1,0 +1,18 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <RootNamespace>Nyxite.Application</RootNamespace>
+  </PropertyGroup>
+  <ItemGroup>
+    <FrameworkReference Include="Microsoft.AspNetCore.App" />
+    <PackageReference Include="Otp.NET" />
+    <PackageReference Include="Fido2" />
+    <PackageReference Include="Microsoft.IdentityModel.JsonWebTokens" />
+  </ItemGroup>
+  <ItemGroup>
+    <ProjectReference Include="../Nyxite.Domain/Nyxite.Domain.csproj" />
+    <ProjectReference Include="../Nyxite.Contracts/Nyxite.Contracts.csproj" />
+    <ProjectReference Include="../Nyxite.Crypto/Nyxite.Crypto.csproj" />
+    <ProjectReference Include="../Nyxite.Persistence/Nyxite.Persistence.csproj" />
+    <ProjectReference Include="../Nyxite.BlobStore/Nyxite.BlobStore.csproj" />
+  </ItemGroup>
+</Project>

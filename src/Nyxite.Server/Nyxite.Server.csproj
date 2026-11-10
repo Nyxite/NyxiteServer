@@ -1,0 +1,17 @@
+<Project Sdk="Microsoft.NET.Sdk.Web">
+  <PropertyGroup>
+    <RootNamespace>Nyxite.Server</RootNamespace>
+    <InvariantGlobalization>true</InvariantGlobalization>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="Microsoft.AspNetCore.Authentication.JwtBearer" />
+    <PackageReference Include="YamlDotNet" />
+  </ItemGroup>
+  <ItemGroup>
+    <ProjectReference Include="../Nyxite.Application/Nyxite.Application.csproj" />
+  </ItemGroup>
+  <ItemGroup>
+    <!-- the contract-first OpenAPI document, served as /openapi/v1.json (04 §4.1) -->
+    <EmbeddedResource Include="../../openapi/v1.yaml" LogicalName="Nyxite.Server.openapi.v1.yaml" />
+  </ItemGroup>
+</Project>
