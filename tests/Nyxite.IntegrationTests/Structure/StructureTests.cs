@@ -353,10 +353,13 @@ public sealed class StructureTests(PostgresFixture pg)
     {
         private int _probes;
 
-        public Task<BlobRef> PutAsync(ReadOnlyMemory<byte> ciphertext, BlobAddress address, CancellationToken ct) => throw new IOException("read-only");
+        public Task<StagedBlob> StageAsync(Stream source, long maxBytes, CancellationToken ct) => throw new IOException("read-only");
+        public Task<BlobRef> CommitAsync(StagedBlob staged, BlobAddress address, CancellationToken ct) => throw new IOException("read-only");
         public Task<Stream> OpenReadAsync(BlobRef reference, CancellationToken ct) => throw new IOException("read-only");
         public Task<bool> ExistsAsync(BlobAddress address, CancellationToken ct) => Task.FromResult(false);
-        public Task DeleteAsync(BlobRef reference, CancellationToken ct) => throw new IOException("read-only");
+        public IAsyncEnumerable<StoredBlob> ListAsync(CancellationToken ct) => AsyncEnumerable.Empty<StoredBlob>();
+        public Task DeleteAsync(BlobAddress address, CancellationToken ct) => throw new IOException("read-only");
+        public Task<int> DeleteStaleStagingAsync(TimeSpan olderThan, CancellationToken ct) => Task.FromResult(0);
 
         public Task ProbeAsync(CancellationToken ct) =>
             Interlocked.Increment(ref _probes) > healthyProbes ? throw new IOException("/var/lib/nyxite/blobs is read-only") : Task.CompletedTask;

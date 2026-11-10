@@ -53,6 +53,7 @@ Native, server-owned auth ([08 §8.1](08-authentication.md)); these endpoints is
 | `POST` | `/auth/webauthn/assert/options` / `/auth/webauthn/assert` | Passkey login → `{ accessToken, refreshToken }` (sufficient alone) |
 | `POST` | `/auth/refresh` | Rotate a refresh token → new `{ accessToken, refreshToken }` |
 | `POST` | `/auth/logout` | Revoke the presented refresh token / session |
+| `POST` | `/auth/socket-ticket` | Mint a single-use relay socket ticket `{ ticket, expiresAt }` (60 s, [08 §8.4](08-authentication.md)). Needs a full session |
 | `POST` | `/auth/password/forgot` / `/auth/password/reset` | Email-based reset — **restores login only**, never content ([08 §8.1](08-authentication.md)) |
 
 ### Projects / Folders / Files (structure)

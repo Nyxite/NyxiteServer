@@ -10,7 +10,7 @@
 
 ## 5.2 Transport
 
-- **SignalR** over WebSocket. A single hub, `RelayHub`, at `/hubs/relay` (outside `/api/v1`), multiplexes per-document rooms via SignalR groups keyed by `file:{fileId}`. **[P]** The access token travels as `Authorization: Bearer` or, because a browser cannot set a header on a WebSocket upgrade, as the `access_token` query value on that path only.
+- **SignalR** over WebSocket. A single hub, `RelayHub`, at `/hubs/relay` (outside `/api/v1`), multiplexes per-document rooms via SignalR groups keyed by `file:{fileId}`. **[P]** The access token travels as `Authorization: Bearer` or, because a browser cannot set a header on a WebSocket upgrade, as the `access_token` query value on that path only. A browser sends a single-use socket ticket there instead of its access token ([08 §8.4](08-authentication.md)), so no reusable credential lands in a URL.
 - **Upgrade auth:** the server's own access token (users) or a short-lived **share token** (guests) ([08](08-authentication.md)). The share token authorizes **relay access**; the **decryption key** comes from the link's URL fragment, never the server ([09](09-sharing-and-acl.md)).
 - **Fallback:** REST encrypted-update endpoints ([04](04-rest-api.md)) for offline catch-up.
 

@@ -1,0 +1,5 @@
+{
+  "updateCount": 200,
+  "intervalSeconds": 300,
+  "onLastParticipantLeaving": true
+}

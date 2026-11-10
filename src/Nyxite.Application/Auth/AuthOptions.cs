@@ -103,6 +103,9 @@ public sealed class AuthOptions
 public sealed class TokenLifetimes
 {
     public TimeSpan PasswordReset { get; set; } = TimeSpan.FromMinutes(30);
+
+    /// <summary>Relay socket ticket (08 §8.4): single-use and short, because it travels in a URL.</summary>
+    public TimeSpan SocketTicket { get; set; } = TimeSpan.FromSeconds(60);
 }
 
 /// <summary><c>NYXITE__Auth__WebAuthn__*</c>. Passkey flows answer <c>503</c> until <see cref="RelyingPartyId"/> is set.</summary>

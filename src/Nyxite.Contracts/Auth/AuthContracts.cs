@@ -24,6 +24,9 @@ public sealed record TotpEnrollmentDto(string Secret, string OtpauthUri);
 public sealed record BackupCodesDto(IReadOnlyList<string> Codes);
 public sealed record StepUpDto(string StepUpToken, DateTimeOffset ExpiresAt);
 public sealed record TokenPairDto(string AccessToken, string RefreshToken, DateTimeOffset AccessTokenExpiresAt);
+
+/// <summary>Single-use relay socket ticket (08 §8.4).</summary>
+public sealed record SocketTicketDto(string Ticket, DateTimeOffset ExpiresAt);
 public sealed record ForgotRequest(string? Email);
 public sealed record ResetRequest(string? ResetToken, string? NewPassword);
 public sealed record ChangePasswordRequest(string? CurrentPassword, string? NewPassword, string? StepUpToken);

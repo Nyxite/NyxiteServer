@@ -98,6 +98,14 @@ public sealed class ConformanceVectorTests
                 userId = UserId, deviceId = DeviceId, keyId = KeyId, devicePubkey = H(kemPublic),
                 signedMessage = H(activation), signature = H(UserKey.Sign(activation)), signerPublicKey = H(UserKey.PublicKey),
             },
+            ["object-kinds.json"] = ObjectKinds(key),
+            ["text-path.json"] = TextPath(key),
+            ["snapshot-triggers.json"] = new
+            {
+                updateCount = Nyxite.Contracts.Content.SnapshotTriggers.UpdateCount,
+                intervalSeconds = (int)Nyxite.Contracts.Content.SnapshotTriggers.Interval.TotalSeconds,
+                onLastParticipantLeaving = Nyxite.Contracts.Content.SnapshotTriggers.OnLastParticipantLeaving,
+            },
             ["license-token.json"] = new
             {
                 ed25519Seed = H(Bytes(32, 0x50)), mlDsa65Seed = H(Bytes(32, 0x70)), publicKey = H(VendorKey.PublicKey),
@@ -106,6 +114,60 @@ public sealed class ConformanceVectorTests
                 lease = LicenseEnvelope.Sign(Lease, VendorKey),
             },
         }.ToDictionary(kv => kv.Key, kv => JsonSerializer.Serialize(kv.Value, Json) + "\n");
+    }
+
+    /// <summary>The kinds of the text path besides <c>blob</c>: one frame each, so a client that mixes up a kind fails here.</summary>
+    private static object ObjectKinds(byte[] key) =>
+        new[] { ObjectKind.Snapshot, ObjectKind.Crdt, ObjectKind.Name, ObjectKind.Metadata, ObjectKind.Awareness }.Select(kind =>
+        {
+            var nonce = Bytes(12, 0x10 * (int)kind);
+            var plaintext = Encoding.UTF8.GetBytes($"Nyxite {kind.ToString().ToLowerInvariant()} vector");
+            var aad = NyxcFrame.BuildAad(KeyId, FileId, kind);
+            return new
+            {
+                objectKind = (int)kind, name = kind.ToString().ToLowerInvariant(), key = H(key), keyId = KeyId, fileId = FileId,
+                nonce = H(nonce), plaintext = H(plaintext), aad = H(aad), frame = H(NyxcFrame.Seal(key, KeyId, nonce, aad, plaintext)),
+            };
+        }).ToArray();
+
+    /// <summary>
+    /// The text path end to end (P1.1-CORE-1): real Yjs 13.6.33 updates (case <c>insert-and-delete</c> of the CRDT
+    /// vectors) sealed as <c>crdt</c> frames in log order, and a snapshot of the first two as a <c>snapshot</c> frame.
+    /// A client opens every frame, applies them to an empty document and must reach <c>finalText</c>, both from the
+    /// whole log and from the snapshot plus the updates after its <c>crdtSeq</c>.
+    /// </summary>
+    private static object TextPath(byte[] key)
+    {
+        string[] updates =
+        [
+            "01010100040107636f6e74656e741354686520717569636b2062726f776e20666f7800", "000101010406",
+            "01010113c40109010a05736c6f772000", "000101010004",
+        ];
+        const string snapshotState = "01010100040107636f6e74656e741354686520717569636b2062726f776e20666f780101010406";
+        var crdtAad = NyxcFrame.BuildAad(KeyId, FileId, ObjectKind.Crdt);
+        var snapshotAad = NyxcFrame.BuildAad(KeyId, FileId, ObjectKind.Snapshot);
+        var snapshotNonce = Bytes(12, 0xe0);
+        var state = Convert.FromHexString(snapshotState);
+        return new
+        {
+            engine = "yjs 13.6.33", encoding = "update v1", textName = "content", key = H(key), keyId = KeyId, fileId = FileId,
+            updates = updates.Select((u, i) =>
+            {
+                var nonce = Bytes(12, 0x40 + i * 12);
+                var bytes = Convert.FromHexString(u);
+                return new
+                {
+                    seq = i + 1, clientUpdateId = Guid.Parse($"01890a5d-ac96-774b-bcce-b302099a81{i:x2}"), nonce = H(nonce), update = u,
+                    frame = H(NyxcFrame.Seal(key, KeyId, nonce, crdtAad, bytes)),
+                };
+            }).ToArray(),
+            snapshot = new
+            {
+                crdtSeq = 2, state = snapshotState, text = "The brown fox", contentHash = H(Blake3.Hash(state)), nonce = H(snapshotNonce),
+                frame = H(NyxcFrame.Seal(key, KeyId, snapshotNonce, snapshotAad, state)),
+            },
+            finalText = "slow brown fox",
+        };
     }
 
     public static TheoryData<string> Files() => [.. Generate().Keys];
@@ -211,6 +273,50 @@ public sealed class ConformanceVectorTests
         // A lease is not a token and the other way round.
         Assert.False(LicenseEnvelope.TryVerifyToken(v.GetProperty("lease").GetString(), keys, out _));
         Assert.False(LicenseEnvelope.TryVerifyLease(token, keys, out _));
+    }
+
+    [Fact]
+    public void Each_object_kind_opens_only_under_its_own_kind()
+    {
+        var kinds = Load("object-kinds.json").EnumerateArray().ToList();
+        Assert.Equal([2, 3, 4, 5, 6], kinds.Select(k => k.GetProperty("objectKind").GetInt32()));
+        foreach (var v in kinds)
+        {
+            Assert.Equal(B(v, "plaintext"), NyxcFrame.Open(B(v, "key"), B(v, "frame"), B(v, "aad")));
+            foreach (var other in kinds.Where(o => o.GetProperty("objectKind").GetInt32() != v.GetProperty("objectKind").GetInt32()))
+                Assert.ThrowsAny<CryptographicException>(() => NyxcFrame.Open(B(v, "key"), B(v, "frame"), B(other, "aad")));
+        }
+    }
+
+    [Fact]
+    public void Text_path_frames_open_to_the_yjs_updates_and_the_snapshot()
+    {
+        var v = Load("text-path.json");
+        var key = B(v, "key");
+        var keyId = v.GetProperty("keyId").GetGuid();
+        var fileId = v.GetProperty("fileId").GetGuid();
+        var seqs = new List<long>();
+        foreach (var u in v.GetProperty("updates").EnumerateArray())
+        {
+            seqs.Add(u.GetProperty("seq").GetInt64());
+            Assert.Equal(B(u, "update"), NyxcFrame.Open(key, B(u, "frame"), NyxcFrame.BuildAad(keyId, fileId, ObjectKind.Crdt)));
+        }
+
+        Assert.Equal([1L, 2L, 3L, 4L], seqs);
+        var snapshot = v.GetProperty("snapshot");
+        Assert.Equal(B(snapshot, "state"), NyxcFrame.Open(key, B(snapshot, "frame"), NyxcFrame.BuildAad(keyId, fileId, ObjectKind.Snapshot)));
+        Assert.Equal(B(snapshot, "contentHash"), Blake3.Hash(B(snapshot, "state")));
+        // A snapshot frame is not accepted as an update, so a relay mix-up cannot pass as content.
+        Assert.ThrowsAny<CryptographicException>(() => NyxcFrame.Open(key, B(snapshot, "frame"), NyxcFrame.BuildAad(keyId, fileId, ObjectKind.Crdt)));
+    }
+
+    [Fact]
+    public void Snapshot_triggers_are_the_shared_values()
+    {
+        var v = Load("snapshot-triggers.json");
+        Assert.Equal(200, v.GetProperty("updateCount").GetInt32());
+        Assert.Equal(300, v.GetProperty("intervalSeconds").GetInt32());
+        Assert.True(v.GetProperty("onLastParticipantLeaving").GetBoolean());
     }
 
     private static string SourceDirectory([CallerFilePath] string file = "") =>

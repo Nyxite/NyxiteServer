@@ -16,7 +16,8 @@ public sealed record TokenPair(string AccessToken, string RefreshToken, DateTime
 /// access token and the rotating refresh-token chain, and revokes sessions (03 §3.2, 08 §8.7).
 /// </summary>
 public sealed class SessionService(
-    NyxiteDbContext db, AccessTokenService tokens, AuditWriter audit, TimeProvider time, IOptions<AuthOptions> options)
+    NyxiteDbContext db, AccessTokenService tokens, AuditWriter audit, IEphemeralTokenStore ephemeral, TimeProvider time,
+    IOptions<AuthOptions> options)
 {
     private readonly AuthOptions _options = options.Value;
 
@@ -108,6 +109,39 @@ public sealed class SessionService(
 
         var (access, expires) = tokens.Issue(user.Id, session.Id, user.Role, session.AuthMethod, session.MfaVerifiedAt is not null);
         return new TokenPair(access, next, expires);
+    }
+
+    /// <summary>
+    /// Mints a relay socket ticket from a session (08 §8.4). A browser must put its credential into the WebSocket URL,
+    /// where proxies and browser history can see it, so it sends this single-use 60 s value instead of its access token.
+    /// </summary>
+    public async Task<(string Ticket, DateTimeOffset ExpiresAt)> IssueSocketTicketAsync(Guid userId, Guid sessionId, CancellationToken ct)
+    {
+        var lifetime = _options.Lifetimes.SocketTicket;
+        var expires = time.GetUtcNow() + lifetime;
+        var ticket = await ephemeral.IssueAsync(EphemeralTokenKind.SocketTicket, userId, sessionId, lifetime, null, ct);
+        return (ticket, expires);
+    }
+
+    /// <summary>
+    /// Turns a socket ticket into a short access token for the relay connection, or null when the ticket is unknown,
+    /// used, expired, or its session ended. <paramref name="consume"/> false only checks it: SignalR's negotiate request
+    /// carries the ticket ahead of the upgrade, and the upgrade is the one use.
+    /// </summary>
+    public async Task<string?> RedeemSocketTicketAsync(string ticket, bool consume, CancellationToken ct)
+    {
+        var hash = IEphemeralTokenStore.Hash(ticket);
+        var row = consume
+            ? await ephemeral.ConsumeAsync(EphemeralTokenKind.SocketTicket, hash, ct)
+            : await ephemeral.FindLiveAsync(EphemeralTokenKind.SocketTicket, hash, ct);
+        if (row?.SessionId is not { } sessionId) return null;
+        var now = time.GetUtcNow();
+        var session = await db.Sessions.AsNoTracking()
+            .SingleOrDefaultAsync(s => s.Id == sessionId && s.RevokedAt == null && s.ExpiresAt > now, ct);
+        if (session is null) return null;
+        var user = await db.Users.AsNoTracking().SingleAsync(u => u.Id == session.UserId, ct);
+        if (IsBlockedFor(user, session.ClientKind)) return null;
+        return tokens.Issue(user.Id, session.Id, user.Role, session.AuthMethod, session.MfaVerifiedAt is not null).Token;
     }
 
     public async Task RevokeAsync(Guid sessionId, Guid userId, RevokeReason reason, RequestInfo request, CancellationToken ct)

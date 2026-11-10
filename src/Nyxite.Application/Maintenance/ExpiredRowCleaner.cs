@@ -22,8 +22,23 @@ public sealed class RetentionOptions
     /// </summary>
     public int TrashWindowDays { get; set; } = 30;
 
+    /// <summary>
+    /// How long a deleted object stays restorable by an admin after its Trash window, before it is purged for good
+    /// (03 §3.3, DL-4). Purge happens at Trash window plus grace window, about 60 days by default.
+    /// </summary>
+    public int GraceWindowDays { get; set; } = 30;
+
     /// <summary>How often the maintenance job deletes expired rows.</summary>
     public TimeSpan CleanupInterval { get; set; } = TimeSpan.FromHours(1);
+
+    /// <summary>How often purged content is removed and the blob store is swept for unreferenced ciphertext.</summary>
+    public TimeSpan PurgeInterval { get; set; } = TimeSpan.FromHours(6);
+
+    /// <summary>
+    /// Minimum age of an unreferenced blob or staging file before the sweep deletes it, so an upload in flight is left
+    /// alone. A day covers the slowest upload by far.
+    /// </summary>
+    public int OrphanBlobAgeHours { get; set; } = 24;
 }
 
 /// <summary>
@@ -78,6 +93,38 @@ public sealed class MaintenanceWorker(
             catch (Exception e)
             {
                 logger.LogWarning(e, "The maintenance run failed.");
+            }
+        }
+    }
+}
+
+/// <summary>
+/// Runs the purge of the deletion lifecycle and the blob garbage collection every <c>Retention:PurgeInterval</c>
+/// (03 §3.3, 10 §10.6). Separate from <see cref="MaintenanceWorker"/>, because sweeping the blob store reads every
+/// file name and is too heavy for the hourly row cleanup.
+/// </summary>
+public sealed class StorageCollectionWorker(
+    IServiceScopeFactory scopes, TimeProvider time, IOptions<RetentionOptions> options, ILogger<StorageCollectionWorker> logger)
+    : BackgroundService
+{
+    protected override async Task ExecuteAsync(CancellationToken stoppingToken)
+    {
+        while (!stoppingToken.IsCancellationRequested)
+        {
+            try
+            {
+                await Task.Delay(options.Value.PurgeInterval, time, stoppingToken);
+                await using var scope = scopes.CreateAsyncScope();
+                await scope.ServiceProvider.GetRequiredService<Structure.TrashPurger>().RunAsync(stoppingToken);
+                await scope.ServiceProvider.GetRequiredService<Content.BlobCollector>().SweepAsync(stoppingToken);
+            }
+            catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
+            {
+                return;
+            }
+            catch (Exception e)
+            {
+                logger.LogWarning(e, "The storage collection run failed.");
             }
         }
     }

@@ -49,6 +49,8 @@ public static class ServiceCollectionExtensions
         services.AddOptions<Content.RelayOptions>().Bind(configuration.GetSection(Content.RelayOptions.Section));
         services.AddScoped<Content.ContentService>();
         services.AddScoped<Content.CrdtLogPruner>();
+        services.AddScoped<Content.BlobCollector>();
+        services.AddScoped<Structure.TrashPurger>();
         services.TryAddSingleton(LicenseKeys.Embedded);
         services.AddSingleton<IEntitlement, Entitlement>();
         services.AddOptions<RetentionOptions>().Bind(configuration.GetSection(RetentionOptions.Section));
@@ -60,6 +62,7 @@ public static class ServiceCollectionExtensions
         services.AddHostedService<UnverifiedAccountSweeper>();
         services.AddHostedService<EmailOutboxWorker>();
         services.AddHostedService<MaintenanceWorker>();
+        services.AddHostedService<StorageCollectionWorker>();
         return services;
     }
 

@@ -22,4 +22,7 @@
   <ItemGroup>
     <Using Include="Xunit" />
   </ItemGroup>
+  <ItemGroup>
+    <None Include="../Nyxite.UnitTests/Resources/vectors/text-path.json" Link="Resources/vectors/text-path.json" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
 </Project>

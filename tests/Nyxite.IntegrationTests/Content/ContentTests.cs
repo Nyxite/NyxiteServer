@@ -266,13 +266,21 @@ public sealed class ContentTests(PostgresFixture pg)
         public List<string> Errors { get; } = [];
         public HubConnection Connection => connection;
 
-        public static async Task<Peer> ConnectAsync(NyxiteApp app, string? token)
+        public static async Task<Peer> ConnectAsync(NyxiteApp app, string? token, bool webSockets = false)
         {
             var connection = new HubConnectionBuilder()
                 .WithUrl("http://localhost" + RelayHub.Path, o =>
                 {
                     o.HttpMessageHandlerFactory = _ => app.Server.CreateHandler();
-                    o.Transports = Microsoft.AspNetCore.Http.Connections.HttpTransportType.LongPolling;
+                    o.Transports = webSockets
+                        ? Microsoft.AspNetCore.Http.Connections.HttpTransportType.WebSockets
+                        : Microsoft.AspNetCore.Http.Connections.HttpTransportType.LongPolling;
+                    // The upgrade carries the credential as access_token in the URL, as a browser has to send it.
+                    o.WebSocketFactory = async (context, ct) =>
+                    {
+                        var uri = token is null ? context.Uri : new Uri(context.Uri + "&access_token=" + Uri.EscapeDataString(token));
+                        return await app.Server.CreateWebSocketClient().ConnectAsync(uri, ct);
+                    };
                     if (token is not null) o.AccessTokenProvider = () => Task.FromResult<string?>(token);
                 })
                 .AddMessagePackProtocol()
@@ -358,5 +366,221 @@ public sealed class ContentTests(PostgresFixture pg)
 
         Assert.Equal(4L, await Sql.ScalarAsync<long>(app.ConnectionString, "SELECT count(*) FROM crdt_updates"));
         Assert.DoesNotContain("Hello", string.Join("", await Sql.ListAsync<string>(app.ConnectionString, "SELECT encode(update_enc, 'escape') FROM crdt_updates")));
+    }
+
+    /// <summary>08 §8.4: a browser opens the WebSocket with a single-use ticket instead of putting its access token in the URL.</summary>
+    [Fact]
+    public async Task A_socket_ticket_opens_one_relay_connection_over_websockets()
+    {
+        await using var app = new NyxiteApp(await pg.CreateDatabaseAsync());
+        var auth = new AuthDriver(app);
+        var (account, _, _, _) = await new KeyDriver(auth).AccountWithActiveDeviceAsync();
+        var client = auth.Client().WithBearer(account.Tokens.AccessToken);
+        var s = new StructureDriver(client);
+        var file = await s.FileAsync(await s.ProjectAsync("p"), "note.md");
+
+        async Task<string> TicketAsync()
+        {
+            var response = await client.PostAsync("/api/v1/auth/socket-ticket", null);
+            Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+            var body = await response.JsonAsync();
+            Assert.True(body.GetProperty("expiresAt").GetDateTimeOffset() <= DateTimeOffset.UtcNow.AddSeconds(61));
+            return body.GetProperty("ticket").GetString()!;
+        }
+
+        // Negotiate and upgrade both carry the ticket, and the upgrade uses it up.
+        var ticket = await TicketAsync();
+        Assert.DoesNotContain('.', ticket);
+        await using (var peer = await Peer.ConnectAsync(app, ticket, webSockets: true))
+        {
+            await peer.Connection.InvokeAsync("JoinDocument", file.Id.ToString(), 0L);
+            Assert.Equal(1, await peer.Connection.InvokeAsync<long>("SubmitUpdate", file.Id.ToString(),
+                new EncryptedUpdate(0, Seal(file, "via ticket", ObjectKind.Crdt), file.KeyId.ToString())));
+        }
+
+        await Assert.ThrowsAnyAsync<Exception>(() => Peer.ConnectAsync(app, ticket, webSockets: true));
+        await Assert.ThrowsAnyAsync<Exception>(() => Peer.ConnectAsync(app, "not-a-ticket", webSockets: true));
+
+        // The bearer still works on WebSockets, and a ticket dies with its session.
+        await (await Peer.ConnectAsync(app, account.Tokens.AccessToken, webSockets: true)).DisposeAsync();
+        var orphan = await TicketAsync();
+        Assert.Equal(HttpStatusCode.NoContent, (await client.PostAsync("/api/v1/auth/logout", null)).StatusCode);
+        await Assert.ThrowsAnyAsync<Exception>(() => Peer.ConnectAsync(app, orphan, webSockets: true));
+        Assert.Equal(HttpStatusCode.Unauthorized, (await auth.Client().PostAsync("/api/v1/auth/socket-ticket", null)).StatusCode);
+    }
+
+    private static List<string> StoredBlobs(NyxiteApp app) =>
+        Directory.EnumerateFiles(app.BlobRoot, "*", SearchOption.AllDirectories)
+            .Where(p => !p.Contains(Path.DirectorySeparatorChar + ".tmp" + Path.DirectorySeparatorChar)).Select(Path.GetFileName).Order().ToList()!;
+
+    private static async Task<int> PurgeAsync(NyxiteApp app)
+    {
+        await using var scope = app.Services.CreateAsyncScope();
+        return await scope.ServiceProvider.GetRequiredService<Nyxite.Application.Structure.TrashPurger>().RunAsync(CancellationToken.None);
+    }
+
+    /// <summary>03 §3.3 DL-2/DL-5: at Trash plus grace a delete is purged with its history, keys and ciphertext, and not earlier.</summary>
+    [Fact]
+    public async Task Purge_removes_a_deleted_tree_with_its_history_and_ciphertext_after_the_grace_window()
+    {
+        await using var app = new NyxiteApp(await pg.CreateDatabaseAsync());
+        var (s, _) = await SignedInAsync(app);
+        var project = await s.ProjectAsync("p");
+        var folder = await s.FolderAsync(project, "f");
+        var inner = await s.FolderAsync(project, "inner", folder);
+        var binary = await s.FileAsync(project, "a.bin", inner, contentType: "binary");
+        await PutBlobAsync(s, binary, 0, "first");
+        await PutBlobAsync(s, binary, 1, "second");
+        var note = await s.FileAsync(project, "n.md", folder);
+        await s.PostAsync($"/files/{note.Id}/crdt/log", Updates(note, (Guid.CreateVersion7(), "x")), null);
+        await PutSnapshotAsync(s, note, 1, "x");
+        var alone = await s.FileAsync(project, "b.bin", contentType: "binary");
+        await PutBlobAsync(s, alone, 0, "alone");
+        var live = await s.FileAsync(project, "c.bin", contentType: "binary");
+        await PutBlobAsync(s, live, 0, "live");
+        Assert.Equal(5, StoredBlobs(app).Count);
+
+        Assert.Equal(HttpStatusCode.NoContent, (await s.DeleteAsync($"/folders/{folder.Id}")).StatusCode);
+        Assert.Equal(HttpStatusCode.NoContent, (await s.DeleteAsync($"/files/{alone.Id}")).StatusCode);
+        Assert.Equal(0, await PurgeAsync(app));
+
+        // Past Trash but inside grace: kept for an admin. Past both: purged.
+        await Sql.ExecAsync(app.ConnectionString, $"UPDATE files SET deleted_at = now() - interval '45 days' WHERE id = '{alone.Id}'");
+        await Sql.ExecAsync(app.ConnectionString, "UPDATE folders SET deleted_at = now() - interval '61 days' WHERE deleted_at IS NOT NULL");
+        await Sql.ExecAsync(app.ConnectionString, $"UPDATE files SET deleted_at = now() - interval '61 days' WHERE deleted_root_id = '{folder.Id}'");
+        Assert.Equal(1, await PurgeAsync(app));
+
+        Assert.Equal(0L, await Sql.ScalarAsync<long>(app.ConnectionString, $"SELECT count(*) FROM folders WHERE id IN ('{folder.Id}', '{inner.Id}')"));
+        Assert.Equal(0L, await Sql.ScalarAsync<long>(app.ConnectionString, $"SELECT count(*) FROM files WHERE id IN ('{binary.Id}', '{note.Id}')"));
+        Assert.Equal(0L, await Sql.ScalarAsync<long>(app.ConnectionString, $"SELECT count(*) FROM file_versions WHERE file_id IN ('{binary.Id}', '{note.Id}')"));
+        Assert.Equal(0L, await Sql.ScalarAsync<long>(app.ConnectionString, "SELECT count(*) FROM crdt_updates"));
+        Assert.Equal(0L, await Sql.ScalarAsync<long>(app.ConnectionString, $"SELECT count(*) FROM file_keys WHERE file_id IN ('{binary.Id}', '{note.Id}')"));
+        Assert.Equal(0L, await Sql.ScalarAsync<long>(app.ConnectionString, $"SELECT count(*) FROM structure_keys WHERE folder_id IN ('{folder.Id}', '{inner.Id}')"));
+        Assert.Equal(2, StoredBlobs(app).Count);
+        Assert.Equal(HttpStatusCode.NotFound, (await s.PostAsync($"/trash/folders/{folder.Id}/restore", new { }, null)).StatusCode);
+        var audit = await Sql.ScalarAsync<string>(app.ConnectionString, "SELECT detail::text FROM audit_log WHERE action = 'trash.purged'");
+        Assert.Contains("\"files\": 2", audit);
+        Assert.Contains("\"folders\": 2", audit);
+        Assert.Contains("\"versions\": 3", audit);
+
+        await Sql.ExecAsync(app.ConnectionString, $"UPDATE files SET deleted_at = now() - interval '61 days' WHERE id = '{alone.Id}'");
+        Assert.Equal(1, await PurgeAsync(app));
+        Assert.Single(StoredBlobs(app));
+        Assert.Equal(HttpStatusCode.OK, (await s.GetAsync($"/files/{live.Id}/blob")).StatusCode);
+
+        // A whole project goes with its keys.
+        Assert.Equal(HttpStatusCode.NoContent, (await s.DeleteAsync($"/projects/{project.Id}")).StatusCode);
+        await Sql.ExecAsync(app.ConnectionString, "UPDATE projects SET deleted_at = now() - interval '61 days'");
+        Assert.Equal(1, await PurgeAsync(app));
+        Assert.Equal(0L, await Sql.ScalarAsync<long>(app.ConnectionString, "SELECT count(*) FROM projects"));
+        Assert.Equal(0L, await Sql.ScalarAsync<long>(app.ConnectionString, "SELECT count(*) FROM structure_keys"));
+        Assert.Empty(StoredBlobs(app));
+        Assert.Equal(0L, (await (await s.GetAsync("/me")).JsonAsync()).GetProperty("usageBytes").GetInt64());
+    }
+
+    /// <summary>10 §10.6: the sweep deletes old unreferenced blobs only, and never one a writer holds the address lock on.</summary>
+    [Fact]
+    public async Task Blob_sweep_removes_old_orphans_and_respects_the_address_lock()
+    {
+        await using var app = new NyxiteApp(await pg.CreateDatabaseAsync());
+        var (s, _) = await SignedInAsync(app);
+        var file = await s.FileAsync(await s.ProjectAsync("p"), "a.bin", contentType: "binary");
+        await PutBlobAsync(s, file, 0, "kept");
+        var store = app.Services.GetRequiredService<Nyxite.BlobStore.IBlobStore>();
+        var frame = Seal(file, "orphan");
+        Nyxite.BlobStore.BlobAddress Orphan(string name) => Nyxite.BlobStore.BlobAddress.From(Blake3.Hash(Encoding.UTF8.GetBytes(name)));
+        await store.PutAsync(frame, Orphan("old"), CancellationToken.None);
+        await store.PutAsync(frame, Orphan("locked"), CancellationToken.None);
+        await store.PutAsync(frame, Orphan("young"), CancellationToken.None);
+        foreach (var path in Directory.EnumerateFiles(app.BlobRoot, "*", SearchOption.AllDirectories))
+            if (Path.GetFileName(path) != Orphan("young").Hex) File.SetLastWriteTimeUtc(path, DateTime.UtcNow.AddDays(-2));
+
+        await using var scope = app.Services.CreateAsyncScope();
+        var db = scope.ServiceProvider.GetRequiredService<Nyxite.Persistence.NyxiteDbContext>();
+        await using (var tx = await db.Database.BeginTransactionAsync())
+        {
+            await Nyxite.Application.Content.BlobCollector.LockAddressAsync(db, Orphan("locked"), CancellationToken.None);
+            await using var sweep = app.Services.CreateAsyncScope();
+            Assert.Equal(1, await sweep.ServiceProvider.GetRequiredService<Nyxite.Application.Content.BlobCollector>().SweepAsync(CancellationToken.None));
+        }
+
+        var left = StoredBlobs(app);
+        Assert.Equal(3, left.Count);
+        Assert.DoesNotContain(Orphan("old").Hex, left);
+        Assert.Contains(Orphan("locked").Hex, left);
+        Assert.Contains(Orphan("young").Hex, left);
+        Assert.Equal(HttpStatusCode.OK, (await s.GetAsync($"/files/{file.Id}/blob")).StatusCode);
+    }
+
+    /// <summary>An upload over the limit is cut off while streaming and leaves no staging file behind.</summary>
+    [Fact]
+    public async Task An_oversized_upload_is_cut_off_without_a_length_header()
+    {
+        await using var app = new NyxiteApp(await pg.CreateDatabaseAsync(), overrides: new Dictionary<string, string?> { ["Limits:MaxInlineBlobBytes"] = "1000" });
+        var (s, _) = await SignedInAsync(app);
+        var file = await s.FileAsync(await s.ProjectAsync("p"), "a.bin", contentType: "binary");
+        var frame = Seal(file, new string('x', 2000));
+        var request = new HttpRequestMessage(HttpMethod.Put, $"/api/v1/files/{file.Id}/blob")
+        {
+            Content = new StreamContent(new MemoryStream(frame)) { Headers = { ContentType = new("application/octet-stream") } },
+        };
+        request.Headers.TransferEncodingChunked = true;
+        request.Headers.Add("Nyxite-Content-Hash", Base64UrlCodec.Encode(Blake3.Hash("big"u8)));
+        request.Headers.Add("Nyxite-Key-Id", file.KeyId.ToString());
+        request.Headers.TryAddWithoutValidation("If-Match", "0");
+
+        var response = await s.Client.SendAsync(request);
+
+        Assert.Equal(HttpStatusCode.RequestEntityTooLarge, response.StatusCode);
+        Assert.Equal("payload_too_large", await response.ProblemCodeAsync());
+        Assert.Empty(Directory.EnumerateFiles(app.BlobRoot, "*", SearchOption.AllDirectories));
+    }
+
+    /// <summary>
+    /// P1.1-CORE-1 through the server: the shared text-path vector frames go into the log and the snapshot and come
+    /// back out of REST and the relay byte for byte, which is what lets every client merge them to the same text.
+    /// </summary>
+    [Fact]
+    public async Task Text_path_vector_frames_pass_the_log_snapshot_and_relay_unchanged()
+    {
+        var v = JsonDocument.Parse(File.ReadAllText(Path.Combine(AppContext.BaseDirectory, "Resources", "vectors", "text-path.json"))).RootElement;
+        byte[] B(JsonElement e, string name) => Convert.FromHexString(e.GetProperty(name).GetString()!);
+        await using var app = new NyxiteApp(await pg.CreateDatabaseAsync());
+        var (s, token) = await SignedInAsync(app);
+        var project = await s.ProjectAsync("p");
+        var file = new StructureDriver.Sealed(v.GetProperty("fileId").GetGuid(), v.GetProperty("keyId").GetGuid(), B(v, "key"));
+        Assert.Equal(HttpStatusCode.Created, (await s.PostAsync("/files", s.FileBody(file, project, "vector.md"))).StatusCode);
+        var updates = v.GetProperty("updates").EnumerateArray().ToList();
+
+        var body = new
+        {
+            updates = updates.Select(u => new
+            {
+                clientUpdateId = u.GetProperty("clientUpdateId").GetGuid(), keyId = file.KeyId, updateEnc = Base64UrlCodec.Encode(B(u, "frame")),
+            }),
+        };
+        var acks = (await (await s.PostAsync($"/files/{file.Id}/crdt/log", body, null)).JsonAsync()).GetProperty("acks");
+        Assert.Equal(updates.Select(u => u.GetProperty("seq").GetInt64()), acks.EnumerateArray().Select(a => a.GetProperty("seq").GetInt64()));
+
+        var snapshot = v.GetProperty("snapshot");
+        var put = new HttpRequestMessage(HttpMethod.Put, $"/api/v1/files/{file.Id}/snapshot")
+        {
+            Content = new ByteArrayContent(B(snapshot, "frame")) { Headers = { ContentType = new("application/octet-stream") } },
+        };
+        put.Headers.Add("Nyxite-Content-Hash", Base64UrlCodec.Encode(B(snapshot, "contentHash")));
+        put.Headers.Add("Nyxite-Key-Id", file.KeyId.ToString());
+        put.Headers.Add("Nyxite-Snapshot-Seq", snapshot.GetProperty("crdtSeq").GetInt64().ToString());
+        Assert.Equal(HttpStatusCode.Created, (await s.Client.SendAsync(put)).StatusCode);
+
+        Assert.Equal(B(snapshot, "frame"), await (await s.GetAsync($"/files/{file.Id}/snapshot")).Content.ReadAsByteArrayAsync());
+        var log = (await (await s.GetAsync($"/files/{file.Id}/crdt/log?since=0")).JsonAsync()).GetProperty("items").EnumerateArray().ToList();
+        Assert.Equal(updates.Select(u => B(u, "frame")), log.Select(i => Base64UrlCodec.Decode(i.GetProperty("updateEnc").GetString()!)));
+
+        // A device joining from the snapshot gets the pointer and exactly the tail after it.
+        await using var peer = await Peer.ConnectAsync(app, token);
+        await peer.Connection.InvokeAsync("JoinDocument", file.Id.ToString(), snapshot.GetProperty("crdtSeq").GetInt64());
+        await Peer.UntilAsync(() => peer.Updates.Count == 2 && peer.Snapshots.Count == 1);
+        Assert.Equal(updates.Skip(2).Select(u => B(u, "frame")), peer.Updates.Select(u => u.Ciphertext));
+        Assert.Equal(2L, peer.Snapshots[0].CrdtSeq);
     }
 }

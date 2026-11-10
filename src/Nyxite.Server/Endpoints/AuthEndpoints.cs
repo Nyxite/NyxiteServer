@@ -170,6 +170,13 @@ public static class AuthEndpoints
             return Results.NoContent();
         }).RequireAuthorization(AuthSetup.Enrollment);
 
+        // Full session required: an enrollment-limited session has no content to collaborate on.
+        auth.MapPost("/socket-ticket", async (SessionService sessions, HttpContext http, CancellationToken ct) =>
+        {
+            var (ticket, expires) = await sessions.IssueSocketTicketAsync(http.User.UserId(), http.User.SessionIdOf(), ct);
+            return Results.Ok(new SocketTicketDto(ticket, expires));
+        }).RequireAuthorization();
+
         return api;
     }
 

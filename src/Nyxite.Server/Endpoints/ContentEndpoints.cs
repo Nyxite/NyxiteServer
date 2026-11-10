@@ -1,3 +1,4 @@
+using Nyxite.BlobStore;
 using Microsoft.AspNetCore.Http.Features;
 using Nyxite.Application.Auth;
 using Nyxite.Application.Content;
@@ -25,11 +26,11 @@ public static class ContentEndpoints
             return read is null ? Results.StatusCode(StatusCodes.Status304NotModified) : Stream(http, read);
         });
 
-        files.MapPut("/{id:guid}/blob", async (Guid id, ContentService content, HttpContext http, CancellationToken ct) =>
+        files.MapPut("/{id:guid}/blob", async (Guid id, ContentService content, IBlobStore blobs, HttpContext http, CancellationToken ct) =>
         {
             if (!long.TryParse(http.Request.Headers.IfMatch.ToString().Trim('"'), out var parentSeq) || parentSeq < 0)
                 throw AuthException.Validation("If-Match must be the version seq the upload is based on, 0 for the first.");
-            var body = await ReadBodyAsync(http, content.MaxInlineBlobBytes, ct);
+            using var body = await StageBodyAsync(http, blobs, content.MaxInlineBlobBytes, ct);
             var result = await content.PutBlobAsync(http.User, id, parentSeq, http.Request.Headers[ContentHashHeader], KeyId(http), body, ct);
             return result.Winner is null
                 ? Results.Json(result.Version, statusCode: StatusCodes.Status201Created)
@@ -77,11 +78,11 @@ public static class ContentEndpoints
             return Stream(http, read);
         });
 
-        files.MapPut("/{id:guid}/snapshot", async (Guid id, ContentService content, HttpContext http, CancellationToken ct) =>
+        files.MapPut("/{id:guid}/snapshot", async (Guid id, ContentService content, IBlobStore blobs, HttpContext http, CancellationToken ct) =>
         {
             if (!long.TryParse(http.Request.Headers[SnapshotSeqHeader], out var crdtSeq))
                 throw AuthException.Validation("Nyxite-Snapshot-Seq must be the seq of the last update the snapshot contains.");
-            var body = await ReadBodyAsync(http, content.MaxInlineBlobBytes, ct);
+            using var body = await StageBodyAsync(http, blobs, content.MaxInlineBlobBytes, ct);
             var version = await content.PutSnapshotAsync(http.User, id, crdtSeq, http.Request.Headers[ContentHashHeader], KeyId(http), body, ct);
             return Results.Json(version, statusCode: StatusCodes.Status201Created);
         });
@@ -101,22 +102,21 @@ public static class ContentEndpoints
     }
 
     /// <summary>
-    /// Reads an upload of at most <paramref name="max"/> bytes into memory. The server's general body limit is lifted
-    /// for this request and replaced by this one, so a larger upload stops after <paramref name="max"/> bytes.
+    /// Streams an upload of at most <paramref name="max"/> bytes to the blob store's staging area, so a large upload
+    /// never sits in memory. The server's general body limit is lifted for this request and replaced by this one, so a
+    /// larger upload stops after <paramref name="max"/> bytes.
     /// </summary>
-    private static async Task<ReadOnlyMemory<byte>> ReadBodyAsync(HttpContext http, long max, CancellationToken ct)
+    private static async Task<StagedBlob> StageBodyAsync(HttpContext http, IBlobStore blobs, long max, CancellationToken ct)
     {
         if (http.Request.ContentLength > max) throw ContentService.PayloadTooLarge("The upload is larger than the inline limit.");
         if (http.Features.Get<IHttpMaxRequestBodySizeFeature>() is { IsReadOnly: false } feature) feature.MaxRequestBodySize = max;
-        using var buffer = new MemoryStream(http.Request.ContentLength is { } length ? (int)length : 0);
-        var chunk = new byte[81920];
-        int read;
-        while ((read = await http.Request.Body.ReadAsync(chunk, ct)) > 0)
+        try
         {
-            if (buffer.Length + read > max) throw ContentService.PayloadTooLarge("The upload is larger than the inline limit.");
-            buffer.Write(chunk, 0, read);
+            return await blobs.StageAsync(http.Request.Body, max, ct);
         }
-
-        return buffer.GetBuffer().AsMemory(0, (int)buffer.Length);
+        catch (BlobTooLargeException)
+        {
+            throw ContentService.PayloadTooLarge("The upload is larger than the inline limit.");
+        }
     }
 }

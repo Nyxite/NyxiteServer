@@ -26,13 +26,30 @@ public static class AuthSetup
                 o.TokenValidationParameters = parameters;
                 o.Events = new JwtBearerEvents
                 {
-                    // A browser cannot set a header on a WebSocket upgrade, so the relay also takes the token as a query value.
-                    OnMessageReceived = context =>
+                    // A browser cannot set a header on a WebSocket upgrade, so the relay also takes its credential as the
+                    // access_token query value. That credential is either an access token (a JWT, with dots) or a socket
+                    // ticket (08 §8.4, base64url without dots), which is swapped here for a short access token so the
+                    // rest of the pipeline sees an ordinary bearer.
+                    OnMessageReceived = async context =>
                     {
-                        if (context.HttpContext.Request.Path.StartsWithSegments(Realtime.RelayHub.Path)
-                            && context.Request.Query["access_token"].ToString() is { Length: > 0 } token)
+                        var request = context.HttpContext.Request;
+                        if (!request.Path.StartsWithSegments(Realtime.RelayHub.Path)) return;
+                        var token = request.Query["access_token"].ToString();
+                        if (token.Length == 0 && request.Headers.Authorization.ToString() is { } header
+                            && header.StartsWith("Bearer ", StringComparison.OrdinalIgnoreCase))
+                            token = header["Bearer ".Length..].Trim();
+                        if (token.Length == 0) return;
+                        if (token.Contains('.'))
+                        {
                             context.Token = token;
-                        return Task.CompletedTask;
+                            return;
+                        }
+
+                        var negotiate = request.Path.StartsWithSegments(Realtime.RelayHub.Path + "/negotiate");
+                        var sessions = context.HttpContext.RequestServices.GetRequiredService<SessionService>();
+                        var access = await sessions.RedeemSocketTicketAsync(token, consume: !negotiate, context.HttpContext.RequestAborted);
+                        if (access is null) context.Fail("Unknown or used socket ticket.");
+                        else context.Token = access;
                     },
                     OnChallenge = async context =>
                     {

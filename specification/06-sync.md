@@ -29,7 +29,7 @@ Two tiers: a full **manifest** to (re)establish state, and a cursor-based **delt
 
 ### 6.3.1 Manifest reconcile (`GET /sync/manifest?projectId=&cursor=&limit=`)
 
-Paginated with the standard envelope ([04 §4.1](04-rest-api.md)), default `limit` 500, max 1000.
+Paginated with the standard envelope ([04 §4.1](04-rest-api.md)), default `limit` 500, max 1000. `keys=false` leaves `wrappedKey` out of the items, like on every structure read (ST-4).
 
 ```jsonc
 {
@@ -47,6 +47,8 @@ Paginated with the standard envelope ([04 §4.1](04-rest-api.md)), default `limi
     "keyId": "uuid",
     "keyGeneration": 3,
     "crdtHeadSeq": 1810,              // text types only: highest crdt_updates seq; null otherwise
+    "crdtDocId": "uuid|null",         // text types only
+    "wrappedKey": WrappedKey,         // the file key wrapped to the caller; absent with keys=false (ST-4)
     "updatedAt": "…", "deletedAt": "…|null"
   } ],
   "nextCursor": "opaque|null"         // manifest page cursor (not the delta cursor)
@@ -59,7 +61,7 @@ All structural/opaque, no names, no content. The client diffs locally to decide 
 
 ```jsonc
 // request
-{ "projectId": "uuid", "since": "opaque|null", "limit": 500,
+{ "projectId": "uuid", "since": "opaque|null", "limit": 500, "keys": true,
   "localChanges": [ LocalChange … ] }       // at most 200
 // response
 { "results": [ LocalChangeResult … ],     // one per localChanges entry, same order
@@ -76,11 +78,13 @@ LocalChange = {
   "ref": StructureRef | DeleteRef }
 
 StructureRef = {
-  "entity": "project|folder|file", "id": "uuid", "op": "create|update",
+  "entity": "project|folder|file", "id": "uuid", "op": "create|update",  // project: update only
   "parentFolderId": "uuid|null",            // folder/file; null = project root
   "contentType": "…",                       // file create only; immutable afterwards
+  "crdtDocId": "uuid",                      // file create only; text types only
   "nameEnc": "base64url", "metadataEnc": "base64url",
-  "syncPolicy": "server-default|excluded" } // fields absent on update = unchanged
+  "syncPolicy": "server-default|excluded|null", // null only for a folder: follow the parent (ST-3)
+  "ownerWrappedKey": WrappedKey }           // create only, required there (ST-1); fields absent on update = unchanged
 DeleteRef = { "entity": "project|folder|file", "id": "uuid" }
 
 LocalChangeResult = {
@@ -88,6 +92,8 @@ LocalChangeResult = {
   "status": "applied|rejected",
   "error": "problem code|null" }            // e.g. validation_failed (move cycle), not_found, acl_denied
 ```
+
+**Frozen for Phase 1.1 [P].** A create in `localChanges` carries exactly what the matching `POST /folders` or `POST /files` requires, and the server applies it through the same code path: the client-allocated id (ST-2, a taken id is `rejected` with `conflict`), the object's own key wrapped to the caller (ST-1) and, for a text file, its `crdtDocId`. A project is never created here, because the batch is scoped to a project that must already exist, so a new project goes through `POST /projects` first. The replay of an offline Trash restore is not part of the batch either, because restore has its own rules (ST-5) and is rare enough to wait for the network.
 
 Items are applied **in order**, each in its own transaction, so one rejected item does not block the rest. Concurrent structure edits are **last-write-wins per field by server-received time**; structure carries no history, and a lost rename is visible and cheap to redo, so a conflict protocol would cost more than it saves. A replayed `clientChangeId` returns the stored result without re-applying.
 
@@ -97,7 +103,7 @@ ServerChange = { "seq": 9001, "at": "…", "kind": "structure|blob|crdt|delete|k
 
 | `kind` | `ref` | Client action |
 |---|---|---|
-| `structure` | `{ entity, id, parentFolderId, contentType?, nameEnc, metadataEnc, syncPolicy?, updatedAt }`, the **full** current row | Upsert, decrypt `nameEnc` |
+| `structure` | `{ entity, id, parentFolderId, contentType?, crdtDocId?, nameEnc, metadataEnc, syncPolicy?, wrappedKey?, updatedAt }`, the **full** current row. `wrappedKey` is absent with `keys: false` | Upsert, decrypt `nameEnc`. A Trash restore arrives as this upsert |
 | `blob` | `{ fileId, seq, contentHash, layout, sizeCipher, keyId, isHead, url }`, `url` = `/api/v1/files/{id}/versions/{seq}/blob` | Mark pending pull; fetch eagerly or on demand. `isHead=false` = an LWW losing sibling ([§6.5](#65-ink--binary-sync-lww-encrypted)) |
 | `crdt` | `{ fileId, fromSeq, toSeq }` | Fetch `GET /files/{id}/crdt/log?since=<local>` unless the relay already delivered them. Consecutive updates to one file are **coalesced** into one change |
 | `delete` | `{ entity, id, deletedAt, reason: "deleted|purged|access_revoked" }` | Propagate soft delete; on `purged` or `access_revoked` drop local ciphertext and plaintext cache |
@@ -106,7 +112,24 @@ ServerChange = { "seq": 9001, "at": "…", "kind": "structure|blob|crdt|delete|k
 - **Cursor.** `nextCursor` is **opaque base64url**: monotonic, resumable, tied to `change_log.seq` ([03](03-data-model.md)); clients must not parse it. `hasMore=true` means call again immediately with `nextCursor`. `since: null` is only valid right after a manifest; otherwise the client sends the cursor it stored.
 - **Expired cursor.** The change log is pruned after `NYXITE__Retention__ChangeLogDays`. A cursor older than that gets **`410 cursor_expired`**, and the client falls back to a full manifest reconcile. Nothing is lost, because the manifest is authoritative.
 - **ACL filtering.** The server returns only changes to items the caller can currently reach. Losing reach produces exactly one `delete` with `reason: "access_revoked"`; gaining reach (a new share) produces `structure` upserts for the newly visible items.
-- **Shared conformance fixture.** These shapes are part of `P1.1-CORE-2`; the JSON schemas live in the OpenAPI document ([04 §4.1](04-rest-api.md)).
+- **Shared conformance fixture.** These shapes are part of `P1.1-CORE-2`; the JSON schemas live in the OpenAPI document ([04 §4.1](04-rest-api.md)). The integration suite checks every response the server sends against that document, so the server cannot drift from the frozen shapes unnoticed.
+- **Trash and purge in the delta.** A move to Trash produces `delete` with `reason: "deleted"`, a restore the `structure` upsert of every row it brings back, and the purge at the end of the grace window `delete` with `reason: "purged"` ([10 §10.6](10-version-history.md)).
+
+### 6.3.3 Per-file sync state machine
+
+Every client keeps the same per-file state set, so a badge means the same on every device (desktop and Android 08 §8.8, web 08 §8.9): `Synced`, `PendingPush`, `PendingPull`, `Downloading`, `Uploading`, `Conflicted`, `Rotating`, `Excluded`, `Error(code)`. The state lives only on the client, because it describes the relation between one device's copy and the server. The server's part is the signals that move a file between states.
+
+| Server signal | Transition |
+| --- | --- |
+| `blob` change with `isHead: true` and a `contentHash` other than the local one, or `crdt` change past the local cursor | `Synced` to `PendingPull` |
+| Download or log catch-up finished | `Downloading` to `Synced` |
+| `PUT /files/{id}/blob` answered `201` with the version as head | `Uploading` to `Synced` |
+| `PUT /files/{id}/blob` answered `409 conflict` with the winner, the upload kept as a sibling | `Uploading` to `Conflicted` |
+| `412 key_generation_stale`, or a `keyrotate` change | to `Rotating`, back once the new wrapped key is fetched |
+| `409 excluded_content`, or `syncPolicy: "excluded"` in a `structure` change | to `Excluded` |
+| `413 payload_too_large`, `404`, or another problem code | to `Error(code)` |
+
+`Rotating` is part of the set although the Phase 1.1 step text omits it, because a key rotation blocks writes like no other state does and the clients already list it.
 
 ## 6.4 Text sync (CRDT, encrypted)
 

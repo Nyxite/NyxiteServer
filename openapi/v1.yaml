@@ -556,6 +556,27 @@ paths:
       responses:
         '204': { description: 'Signed out.' }
         '401': { $ref: '#/components/responses/Problem' }
+  /auth/socket-ticket:
+    post:
+      tags: [auth]
+      summary: Mint a single-use relay socket ticket (60 s)
+      description: >-
+        For the relay WebSocket (05, 08 §8.4). A browser has to put its credential into the upgrade URL as the
+        `access_token` query value; it sends this ticket there instead of its access token. The ticket is checked on the
+        SignalR negotiate request and used up by the WebSocket upgrade, so it serves exactly one WebSockets connection;
+        long polling and server-sent events need the access token. It dies with its session. Needs a full session.
+      responses:
+        '200':
+          description: The ticket; only its hash is stored.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [ticket, expiresAt]
+                properties:
+                  ticket: { type: string, description: 'base64url, 43 characters, never a JWT' }
+                  expiresAt: { type: string, format: date-time }
+        '401': { $ref: '#/components/responses/Problem' }
   /auth/factors:
     get:
       tags: [auth]
@@ -2043,6 +2064,7 @@ paths:
         - { name: projectId, in: query, required: true, schema: { type: string, format: uuid } }
         - { $ref: '#/components/parameters/Cursor' }
         - { name: limit, in: query, schema: { type: integer, minimum: 1, maximum: 1000, default: 500 } }
+        - { $ref: '#/components/parameters/Keys' }
       responses:
         '200':
           description: Manifest page.
@@ -2065,6 +2087,7 @@ paths:
                 projectId: { $ref: '#/components/schemas/Uuid' }
                 since: { type: [string, 'null'] }
                 limit: { type: integer, minimum: 1, maximum: 1000, default: 500 }
+                keys: { type: boolean, default: true, description: 'false leaves wrappedKey out of structure changes (ST-4)' }
                 localChanges: { type: array, maxItems: 200, items: { $ref: '#/components/schemas/LocalChange' } }
       responses:
         '200':
@@ -3265,6 +3288,8 @@ components:
               keyId: { $ref: '#/components/schemas/Uuid' }
               keyGeneration: { type: integer }
               crdtHeadSeq: { type: [integer, 'null'], format: int64 }
+              crdtDocId: { $ref: '#/components/schemas/NullableUuid' }
+              wrappedKey: { $ref: '#/components/schemas/WrappedKey', description: "The file key wrapped to the caller; absent with keys=false (ST-4)" }
               updatedAt: { type: string, format: date-time }
               deletedAt: { type: [string, 'null'], format: date-time }
         nextCursor: { type: [string, 'null'] }
@@ -3280,6 +3305,11 @@ components:
             - $ref: '#/components/schemas/DeleteRef'
     StructureRef:
       type: object
+      description: >-
+        A structure edit replayed from a device's outbox (06 §6.3.2). A project is only updated here, because the batch is
+        scoped to an existing project; a new project goes through POST /projects. Create carries what the matching POST
+        requires: the client-allocated id (ST-2), nameEnc and the object's own key wrapped to the caller (ST-1), and for a
+        text file its crdtDocId. Fields absent on update are unchanged.
       required: [entity, id, op]
       properties:
         entity: { type: string, enum: [project, folder, file] }
@@ -3287,9 +3317,13 @@ components:
         op: { type: string, enum: [create, update] }
         parentFolderId: { $ref: '#/components/schemas/NullableUuid' }
         contentType: { $ref: '#/components/schemas/ContentType' }
+        crdtDocId: { $ref: '#/components/schemas/NullableUuid', description: 'File create only; required for markdown/plaintext/sourcecode' }
         nameEnc: { $ref: '#/components/schemas/Bytes' }
         metadataEnc: { $ref: '#/components/schemas/Bytes' }
-        syncPolicy: { $ref: '#/components/schemas/SyncPolicy' }
+        syncPolicy:
+          oneOf: [{ $ref: '#/components/schemas/SyncPolicy' }, { type: 'null' }]
+          description: 'null only for a folder, meaning follow the parent (ST-3)'
+        ownerWrappedKey: { $ref: '#/components/schemas/WrappedKey', description: 'Create only, required there' }
     DeleteRef:
       type: object
       required: [entity, id]
@@ -3314,15 +3348,18 @@ components:
           oneOf:
             - type: object
               title: StructureChange
+              description: The full current row. A Trash restore arrives as this upsert, because the row is live again.
               required: [entity, id, parentFolderId, nameEnc, updatedAt]
               properties:
                 entity: { type: string, enum: [project, folder, file] }
                 id: { $ref: '#/components/schemas/Uuid' }
                 parentFolderId: { $ref: '#/components/schemas/NullableUuid' }
                 contentType: { $ref: '#/components/schemas/ContentType' }
+                crdtDocId: { $ref: '#/components/schemas/NullableUuid' }
                 nameEnc: { $ref: '#/components/schemas/Bytes' }
                 metadataEnc: { oneOf: [{ $ref: '#/components/schemas/Bytes' }, { type: 'null' }] }
-                syncPolicy: { $ref: '#/components/schemas/SyncPolicy' }
+                syncPolicy: { oneOf: [{ $ref: '#/components/schemas/SyncPolicy' }, { type: 'null' }] }
+                wrappedKey: { $ref: '#/components/schemas/WrappedKey', description: "The object's key wrapped to the caller; absent with keys=false (ST-4)" }
                 updatedAt: { type: string, format: date-time }
             - type: object
               title: BlobChange

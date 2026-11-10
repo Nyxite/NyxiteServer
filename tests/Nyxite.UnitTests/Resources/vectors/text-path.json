@@ -1,0 +1,47 @@
+{
+  "engine": "yjs 13.6.33",
+  "encoding": "update v1",
+  "textName": "content",
+  "key": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+  "keyId": "01890a5d-ac96-774b-bcce-b302099a8057",
+  "fileId": "01890a5d-ac96-774b-bcce-b302099a8058",
+  "updates": [
+    {
+      "seq": 1,
+      "clientUpdateId": "01890a5d-ac96-774b-bcce-b302099a8100",
+      "nonce": "404142434445464748494a4b",
+      "update": "01010100040107636f6e74656e741354686520717569636b2062726f776e20666f7800",
+      "frame": "4e5958430101890a5dac96774bbcceb302099a8057404142434445464748494a4be3b8af23223d8060a2aa6353f510000f11a3722dc25c6c4857253c8ae07dcdbdf770f3a3db9cabb654d32f9cda369d15c86c81"
+    },
+    {
+      "seq": 2,
+      "clientUpdateId": "01890a5d-ac96-774b-bcce-b302099a8101",
+      "nonce": "4c4d4e4f5051525354555657",
+      "update": "000101010406",
+      "frame": "4e5958430101890a5dac96774bbcceb302099a80574c4d4e4f505152535455565712b3eddead7df069fdec370a1c6246b77f9b25db519c"
+    },
+    {
+      "seq": 3,
+      "clientUpdateId": "01890a5d-ac96-774b-bcce-b302099a8102",
+      "nonce": "58595a5b5c5d5e5f60616263",
+      "update": "01010113c40109010a05736c6f772000",
+      "frame": "4e5958430101890a5dac96774bbcceb302099a805758595a5b5c5d5e5f60616263fa3882987045d72395ec912363ca7a9fee13571a90cb0f3e9e28581855b27c24"
+    },
+    {
+      "seq": 4,
+      "clientUpdateId": "01890a5d-ac96-774b-bcce-b302099a8103",
+      "nonce": "6465666768696a6b6c6d6e6f",
+      "update": "000101010004",
+      "frame": "4e5958430101890a5dac96774bbcceb302099a80576465666768696a6b6c6d6e6f481adf6779ed2fbe4ae0e7d05f3fc7e1dedca927378e"
+    }
+  ],
+  "snapshot": {
+    "crdtSeq": 2,
+    "state": "01010100040107636f6e74656e741354686520717569636b2062726f776e20666f780101010406",
+    "text": "The brown fox",
+    "contentHash": "d9cb29266f06fabc34ccfd8067763aed3649cbef1800018e1dcd254e90ec32a3",
+    "nonce": "e0e1e2e3e4e5e6e7e8e9eaeb",
+    "frame": "4e5958430101890a5dac96774bbcceb302099a8057e0e1e2e3e4e5e6e7e8e9eaeb35c3c883f1c18d48af6d0a2b3068ebd7adc01b968bedae73bce318127b5f08ec3c9ae0f378a1fef7e5c3aff27e60719130453e24dce219"
+  },
+  "finalText": "slow brown fox"
+}

@@ -617,13 +617,19 @@ Content-addressed store behind `IBlobStore` (unchanged interface). Stores **ciph
 ```csharp
 public interface IBlobStore
 {
-    Task<BlobRef> PutAsync(ReadOnlyMemory<byte> ciphertext, BlobAddress address, CancellationToken ct);
-    Task<Stream>  OpenReadAsync(BlobRef reference, CancellationToken ct);  // returns ciphertext
-    Task<bool>    ExistsAsync(BlobAddress address, CancellationToken ct);
-    Task          DeleteAsync(BlobRef reference, CancellationToken ct);    // GC only
-    Task          ProbeAsync(CancellationToken ct);                        // startup and readiness: proves the store takes writes
+    Task<StagedBlob> StageAsync(Stream source, long maxBytes, CancellationToken ct);           // receives an upload, no name yet
+    Task<BlobRef>    CommitAsync(StagedBlob staged, BlobAddress address, CancellationToken ct); // names it, write-once
+    Task<BlobRef>    PutAsync(ReadOnlyMemory<byte> ciphertext, BlobAddress address, CancellationToken ct); // both, in memory
+    Task<Stream>     OpenReadAsync(BlobRef reference, CancellationToken ct);  // returns ciphertext
+    Task<bool>       ExistsAsync(BlobAddress address, CancellationToken ct);
+    IAsyncEnumerable<StoredBlob> ListAsync(CancellationToken ct);             // GC only
+    Task             DeleteAsync(BlobAddress address, CancellationToken ct);  // GC only
+    Task<int>        DeleteStaleStagingAsync(TimeSpan olderThan, CancellationToken ct); // GC only
+    Task             ProbeAsync(CancellationToken ct);                        // startup and readiness: proves the store takes writes
 }
 ```
+
+- **Staging [P].** An upload streams into `blobs/.tmp` while no database lock is held, and stops with `413` once it passes the limit, also without a `Content-Length`. The staged upload exposes its length and first bytes, so the frame header, the key id and the quota are checked before it gets a name. Reading uploads into memory was rejected, because ten parallel 100 MiB uploads would need a gigabyte of server memory. Commit renews the write time of an address that already exists, so the GC age check sees that it is wanted again. How writers and GC serialise on an address is in [10 §10.6](10-version-history.md).
 
 ## 3.5 Migrations & integrity
 

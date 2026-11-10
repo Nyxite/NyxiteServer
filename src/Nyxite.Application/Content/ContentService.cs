@@ -54,7 +54,7 @@ public sealed class ContentService(
     /// the head, and the caller gets the winner back, so nothing is lost and the client can offer both.
     /// </summary>
     public async Task<BlobWriteResult> PutBlobAsync(ClaimsPrincipal principal, Guid fileId, long parentSeq, string? contentHash, Guid keyId,
-        ReadOnlyMemory<byte> ciphertext, CancellationToken ct)
+        StagedBlob ciphertext, CancellationToken ct)
     {
         var userId = await WriterAsync(principal, ct);
         var hash = ContentHash(contentHash);
@@ -217,7 +217,7 @@ public sealed class ContentService(
     /// head, because the head tells every client where to start reading the log.
     /// </summary>
     public async Task<VersionDto> PutSnapshotAsync(ClaimsPrincipal principal, Guid fileId, long crdtSeq, string? contentHash, Guid keyId,
-        ReadOnlyMemory<byte> ciphertext, CancellationToken ct)
+        StagedBlob ciphertext, CancellationToken ct)
     {
         var userId = await WriterAsync(principal, ct);
         var hash = ContentHash(contentHash);
@@ -257,11 +257,11 @@ public sealed class ContentService(
 
     // ---------------------------------------------------------------- shared steps
 
-    private async Task CheckUploadAsync(FileEntity file, Guid userId, Guid keyId, ReadOnlyMemory<byte> ciphertext, CancellationToken ct)
+    private async Task CheckUploadAsync(FileEntity file, Guid userId, Guid keyId, StagedBlob ciphertext, CancellationToken ct)
     {
         if (file.SyncPolicy == SyncPolicies.Excluded) throw ExcludedContent();
         if (ciphertext.Length > _options.MaxInlineBlobBytes) throw PayloadTooLarge("The upload is larger than the inline limit.");
-        if (!NyxcFrame.TryParseHeader(ciphertext.Span, out var header) || header.KeyId != keyId)
+        if (ciphertext.Length < NyxcFrame.Overhead || !NyxcFrame.TryParseHeader(ciphertext.Head.Span, out var header) || header.KeyId != keyId)
             throw AuthException.Validation("The body must be an NYXC frame sealed with the key named in Nyxite-Key-Id.");
         if (keyId != await CurrentKeyIdAsync(file, ct)) throw KeyGenerationStale();
 
@@ -270,12 +270,15 @@ public sealed class ContentService(
             throw PayloadTooLarge("The upload would exceed the storage quota.");
     }
 
-    private async Task<FileVersionEntity> AddVersionAsync(FileEntity file, Guid userId, byte[] contentHash, Guid keyId, ReadOnlyMemory<byte> ciphertext,
+    private async Task<FileVersionEntity> AddVersionAsync(FileEntity file, Guid userId, byte[] contentHash, Guid keyId, StagedBlob ciphertext,
         long? crdtSeq, bool becomesHead, CancellationToken ct)
     {
-        // The blob is stored before the row that points to it. A crash in between leaves an unreferenced blob for the
-        // garbage collector, never a version without bytes.
-        var reference = await blobs.PutAsync(ciphertext, StorageAddress(file.Id, keyId, contentHash), ct);
+        // The blob is named before the row that points to it. A crash in between leaves an unreferenced blob for the
+        // garbage collector, never a version without bytes. The address lock keeps the collector from deleting a blob
+        // that this transaction is about to reference again (BlobCollector).
+        var address = StorageAddress(file.Id, keyId, contentHash);
+        await BlobCollector.LockAddressAsync(db, address, ct);
+        var reference = await blobs.CommitAsync(ciphertext, address, ct);
         var now = time.GetUtcNow();
         var version = new FileVersionEntity
         {
