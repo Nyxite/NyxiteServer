@@ -89,7 +89,17 @@ Rules of the structure endpoints **[P]**:
 | `PUT` | `/files/{id}/blob` | Upload new **ciphertext** for ink/binary (LWW); body is already encrypted. Client sends the parent version as **`If-Match: <seq>`**. If the server head `!= seq` (concurrent write) the server applies **last-write-wins by server-received time** and returns **`409 conflict`** with the winning version metadata, **retaining the losing bytes as a sibling `file_versions` row** (not head) so nothing is lost ([06 §6.5](06-sync.md)) |
 | `GET` | `/files/{id}/crdt/log?since={seq}` | Encrypted CRDT updates after a cursor (REST fallback for the relay) |
 | `POST` | `/files/{id}/crdt/log` | Submit **encrypted** CRDT update(s) (REST fallback) |
-| `GET` | `/files/{id}/snapshot` | Pointer/stream of the latest **encrypted** snapshot blob |
+| `GET` | `/files/{id}/snapshot` | Stream of the latest **encrypted** snapshot; `Nyxite-Snapshot-Seq` names the last update it contains |
+| `PUT` | `/files/{id}/snapshot` | Upload a client-made **encrypted** snapshot of a text file. Headers `Nyxite-Snapshot-Seq`, `Nyxite-Content-Hash`, `Nyxite-Key-Id`. It becomes the head version. A snapshot older than the stored head answers `409 conflict`, one that names an update the log does not have `400` |
+
+Rules of the content endpoints **[P]**:
+
+- **Bodies are raw NYXC frames**, at most `NYXITE__Limits__MaxInlineBlobBytes`. The server checks the frame layout and that the frame's `key_id` equals `Nyxite-Key-Id` and the file's current key, otherwise `412 key_generation_stale`. It cannot check that the content hash matches the content.
+- **Text files have no blob upload.** A text file is written through its update log and snapshots, a blob file through `PUT /files/{id}/blob`. The other path answers `400`.
+- **`If-Match` is the version `seq` the upload is based on**, `0` for the first version. The `409` of a lost write carries `winner` and `sibling`, the version the lost bytes were kept as.
+- **`excluded` files take no content** (`409 excluded_content`). An upload that would exceed the owner's quota answers `413 payload_too_large`. Usage is the ciphertext size of all versions of all files the user owns, Trash included, and is reported as `usageBytes` by `GET /me`.
+- **Update log.** `POST /files/{id}/crdt/log` takes up to 100 updates, each with a client-chosen `clientUpdateId`, and answers the `seq` of each. `GET` returns up to 500 updates after `since`. Updates a snapshot covers may be pruned, so a client that is behind the head snapshot loads the snapshot first.
+- **Who may write** and **reach** are as for the structure endpoints.
 
 #### Chunked upload / download (Phase 5.1, [07 §7.4a](07-encryption.md))
 | Method | Path | Purpose |

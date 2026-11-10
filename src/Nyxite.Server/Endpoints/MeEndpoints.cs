@@ -12,12 +12,12 @@ public static class MeEndpoints
 {
     public static RouteGroupBuilder MapMeEndpoints(this RouteGroupBuilder api)
     {
-        api.MapGet("/me", async (HttpContext http, NyxiteDbContext db, IEntitlement entitlement, CancellationToken ct) =>
+        api.MapGet("/me", async (HttpContext http, NyxiteDbContext db, IEntitlement entitlement, Nyxite.Application.Content.ContentService content, CancellationToken ct) =>
         {
             var id = http.User.UserId();
             var user = await db.Users.AsNoTracking().SingleOrDefaultAsync(u => u.Id == id, ct) ?? throw AuthException.Unauthenticated();
             return Results.Ok(new MeDto(user.Id, user.Email, user.DisplayName, DbValue.Of(user.Role), DbValue.Of(user.Status),
-                user.StorageQuotaBytes, 0, new CapabilitiesDto(false, [.. entitlement.Flags], Entitlement.Name(entitlement.State))));
+                user.StorageQuotaBytes, await content.UsageBytesAsync(id, ct), new CapabilitiesDto(false, [.. entitlement.Flags], Entitlement.Name(entitlement.State))));
         }).RequireAuthorization();
         return api;
     }

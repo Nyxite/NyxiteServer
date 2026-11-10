@@ -79,6 +79,12 @@ internal sealed class FileConfiguration : IEntityTypeConfiguration<FileEntity>
         b.Property(x => x.SyncPolicy).HasColumnName("sync_policy").HasDefaultValueSql("'server-default'");
         b.Property(x => x.CurrentVersionId).HasColumnName("current_version_id");
         b.Property(x => x.CrdtDocId).HasColumnName("crdt_doc_id");
+        b.Property(x => x.VersionSeq).HasColumnName("version_seq").HasDefaultValue(0L);
+        b.Property(x => x.CrdtHeadSeq).HasColumnName("crdt_head_seq").HasDefaultValue(0L);
+        b.Property(x => x.PendingRestoreSeq).HasColumnName("pending_restore_seq");
+        b.HasOne<FileVersionEntity>().WithMany().HasForeignKey(x => x.CurrentVersionId).OnDelete(DeleteBehavior.Restrict)
+            .HasConstraintName("fk_files_current_version");
+        b.HasIndex(x => x.CrdtDocId).IsUnique().HasFilter("crdt_doc_id IS NOT NULL").HasDatabaseName("uq_files_crdt_doc");
         b.Property(x => x.KeyGeneration).HasColumnName("key_generation").HasDefaultValue(1);
         b.Property(x => x.MetadataEnc).HasColumnName("metadata_enc");
         b.Property(x => x.CreatedAt).HasColumnName("created_at").HasDefaultValueSql("now()");

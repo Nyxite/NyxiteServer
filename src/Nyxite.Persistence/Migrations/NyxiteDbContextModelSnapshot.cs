@@ -129,6 +129,60 @@ namespace Nyxite.Persistence.Migrations
                     b.ToTable("backup_codes", (string)null);
                 });
 
+            modelBuilder.Entity("Nyxite.Persistence.Entities.CrdtUpdateEntity", b =>
+                {
+                    b.Property<long>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("bigint")
+                        .HasColumnName("id");
+
+                    NpgsqlPropertyBuilderExtensions.UseIdentityByDefaultColumn(b.Property<long>("Id"));
+
+                    b.Property<Guid?>("AuthorId")
+                        .HasColumnType("uuid")
+                        .HasColumnName("author_id");
+
+                    b.Property<Guid?>("ClientUpdateId")
+                        .HasColumnType("uuid")
+                        .HasColumnName("client_update_id");
+
+                    b.Property<Guid>("CrdtDocId")
+                        .HasColumnType("uuid")
+                        .HasColumnName("crdt_doc_id");
+
+                    b.Property<DateTimeOffset>("CreatedAt")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("created_at")
+                        .HasDefaultValueSql("now()");
+
+                    b.Property<Guid>("KeyId")
+                        .HasColumnType("uuid")
+                        .HasColumnName("key_id");
+
+                    b.Property<long>("Seq")
+                        .HasColumnType("bigint")
+                        .HasColumnName("seq");
+
+                    b.Property<byte[]>("UpdateEnc")
+                        .IsRequired()
+                        .HasColumnType("bytea")
+                        .HasColumnName("update_enc");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("CrdtDocId", "ClientUpdateId")
+                        .IsUnique()
+                        .HasDatabaseName("uq_crdt_updates_client_id")
+                        .HasFilter("client_update_id IS NOT NULL");
+
+                    b.HasIndex("CrdtDocId", "Seq")
+                        .IsUnique()
+                        .HasDatabaseName("ix_crdt_updates_doc");
+
+                    b.ToTable("crdt_updates", (string)null);
+                });
+
             modelBuilder.Entity("Nyxite.Persistence.Entities.DeviceEntity", b =>
                 {
                     b.Property<Guid>("Id")
@@ -309,6 +363,12 @@ namespace Nyxite.Persistence.Migrations
                         .HasColumnType("uuid")
                         .HasColumnName("crdt_doc_id");
 
+                    b.Property<long>("CrdtHeadSeq")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("bigint")
+                        .HasDefaultValue(0L)
+                        .HasColumnName("crdt_head_seq");
+
                     b.Property<DateTimeOffset>("CreatedAt")
                         .ValueGeneratedOnAdd()
                         .HasColumnType("timestamp with time zone")
@@ -350,6 +410,10 @@ namespace Nyxite.Persistence.Migrations
                         .HasColumnType("uuid")
                         .HasColumnName("owner_id");
 
+                    b.Property<long?>("PendingRestoreSeq")
+                        .HasColumnType("bigint")
+                        .HasColumnName("pending_restore_seq");
+
                     b.Property<Guid>("ProjectId")
                         .HasColumnType("uuid")
                         .HasColumnName("project_id");
@@ -367,7 +431,20 @@ namespace Nyxite.Persistence.Migrations
                         .HasColumnName("updated_at")
                         .HasDefaultValueSql("now()");
 
+                    b.Property<long>("VersionSeq")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("bigint")
+                        .HasDefaultValue(0L)
+                        .HasColumnName("version_seq");
+
                     b.HasKey("Id");
+
+                    b.HasIndex("CrdtDocId")
+                        .IsUnique()
+                        .HasDatabaseName("uq_files_crdt_doc")
+                        .HasFilter("crdt_doc_id IS NOT NULL");
+
+                    b.HasIndex("CurrentVersionId");
 
                     b.HasIndex("DeletedRootId")
                         .HasDatabaseName("ix_files_deleted_root")
@@ -460,6 +537,81 @@ namespace Nyxite.Persistence.Migrations
                     b.ToTable("file_keys", null, t =>
                         {
                             t.HasCheckConstraint("ck_file_keys_member_xor_share", "(member_id IS NOT NULL) <> (share_id IS NOT NULL)");
+                        });
+                });
+
+            modelBuilder.Entity("Nyxite.Persistence.Entities.FileVersionEntity", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .HasColumnType("uuid")
+                        .HasColumnName("id");
+
+                    b.Property<Guid?>("AuthorId")
+                        .HasColumnType("uuid")
+                        .HasColumnName("author_id");
+
+                    b.Property<string>("BlobRef")
+                        .IsRequired()
+                        .HasColumnType("text")
+                        .HasColumnName("blob_ref");
+
+                    b.Property<byte[]>("ContentHash")
+                        .IsRequired()
+                        .HasColumnType("bytea")
+                        .HasColumnName("content_hash");
+
+                    b.Property<long?>("CrdtSeq")
+                        .HasColumnType("bigint")
+                        .HasColumnName("crdt_seq");
+
+                    b.Property<DateTimeOffset>("CreatedAt")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("created_at")
+                        .HasDefaultValueSql("now()");
+
+                    b.Property<Guid>("FileId")
+                        .HasColumnType("uuid")
+                        .HasColumnName("file_id");
+
+                    b.Property<Guid>("KeyId")
+                        .HasColumnType("uuid")
+                        .HasColumnName("key_id");
+
+                    b.Property<string>("Layout")
+                        .IsRequired()
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("text")
+                        .HasColumnName("layout")
+                        .HasDefaultValueSql("'single'");
+
+                    b.Property<long?>("RestoredFromSeq")
+                        .HasColumnType("bigint")
+                        .HasColumnName("restored_from_seq");
+
+                    b.Property<long>("Seq")
+                        .HasColumnType("bigint")
+                        .HasColumnName("seq");
+
+                    b.Property<long>("SizeCipher")
+                        .HasColumnType("bigint")
+                        .HasColumnName("size_cipher");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("AuthorId");
+
+                    b.HasIndex("BlobRef")
+                        .HasDatabaseName("ix_versions_blob_ref");
+
+                    b.HasIndex("FileId", "Seq")
+                        .IsUnique()
+                        .IsDescending(false, true)
+                        .HasDatabaseName("ix_versions_file");
+
+                    b.ToTable("file_versions", null, t =>
+                        {
+                            t.HasCheckConstraint("ck_file_versions_layout", "layout IN ('single','chunked')");
                         });
                 });
 
@@ -1190,6 +1342,12 @@ namespace Nyxite.Persistence.Migrations
 
             modelBuilder.Entity("Nyxite.Persistence.Entities.FileEntity", b =>
                 {
+                    b.HasOne("Nyxite.Persistence.Entities.FileVersionEntity", null)
+                        .WithMany()
+                        .HasForeignKey("CurrentVersionId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .HasConstraintName("fk_files_current_version");
+
                     b.HasOne("Nyxite.Persistence.Entities.FolderEntity", null)
                         .WithMany()
                         .HasForeignKey("FolderId")
@@ -1220,6 +1378,20 @@ namespace Nyxite.Persistence.Migrations
                         .WithMany()
                         .HasForeignKey("MemberId")
                         .OnDelete(DeleteBehavior.Restrict);
+                });
+
+            modelBuilder.Entity("Nyxite.Persistence.Entities.FileVersionEntity", b =>
+                {
+                    b.HasOne("Nyxite.Persistence.Entities.UserEntity", null)
+                        .WithMany()
+                        .HasForeignKey("AuthorId")
+                        .OnDelete(DeleteBehavior.Restrict);
+
+                    b.HasOne("Nyxite.Persistence.Entities.FileEntity", null)
+                        .WithMany()
+                        .HasForeignKey("FileId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
                 });
 
             modelBuilder.Entity("Nyxite.Persistence.Entities.FolderEntity", b =>

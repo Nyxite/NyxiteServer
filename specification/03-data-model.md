@@ -393,6 +393,9 @@ CREATE TABLE files (
   sync_policy        text NOT NULL DEFAULT 'server-default'
                        CHECK (sync_policy IN ('server-default','excluded')),  -- pinned-local is client-local only, never a server value
   current_version_id uuid,                   -- FK added after file_versions; API exposes file_versions.seq as currentVersionSeq
+  version_seq        bigint NOT NULL DEFAULT 0,  -- last file_versions.seq handed out; a counter, so a purged version never frees its number
+  crdt_head_seq      bigint NOT NULL DEFAULT 0,  -- last crdt_updates.seq handed out; a counter, so pruning never moves it back
+  pending_restore_seq bigint,                -- set by POST /files/{id}/restore; the next head records it as restored_from_seq
   crdt_doc_id        uuid,                    -- text types only (client-allocated UUIDv7 at creation)
   key_generation     int NOT NULL DEFAULT 1,  -- current file-key rotation generation
   metadata_enc       bytea,                    -- encrypted per-file metadata
@@ -498,10 +501,13 @@ CREATE TABLE file_versions (
   key_id       uuid NOT NULL,              -- file-key generation used
   layout       text NOT NULL DEFAULT 'single' CHECK (layout IN ('single','chunked')),  -- 'chunked': blob_ref is the chunk manifest (07 §7.4a)
   author_id    uuid REFERENCES users(id), -- null for guests
+  crdt_seq     bigint,                     -- text snapshots: the last crdt_updates.seq the snapshot contains
+  restored_from_seq bigint,                -- set when this head is a recorded restore of that version (10 §10.5)
   created_at   timestamptz NOT NULL DEFAULT now(),
   UNIQUE (file_id, seq)
 );
 CREATE INDEX ix_versions_file ON file_versions(file_id, seq DESC);
+CREATE INDEX ix_versions_blob_ref ON file_versions(blob_ref);  -- garbage collection asks who references a blob
 ALTER TABLE files ADD CONSTRAINT fk_files_current_version
   FOREIGN KEY (current_version_id) REFERENCES file_versions(id);
 ```
@@ -553,11 +559,16 @@ CREATE TABLE crdt_updates (
   update_enc  bytea NOT NULL,             -- ENCRYPTED Yrs update (server cannot read)
   key_id      uuid NOT NULL,
   author_id   uuid,                        -- null for guests
+  client_update_id uuid,                   -- the id the client gave the update
   created_at  timestamptz NOT NULL DEFAULT now(),
   UNIQUE (crdt_doc_id, seq)
 );
 CREATE INDEX ix_crdt_updates_doc ON crdt_updates(crdt_doc_id, seq);
+CREATE UNIQUE INDEX uq_crdt_updates_client_id ON crdt_updates(crdt_doc_id, client_update_id) WHERE client_update_id IS NOT NULL;
+CREATE UNIQUE INDEX uq_files_crdt_doc ON files(crdt_doc_id) WHERE crdt_doc_id IS NOT NULL;
 ```
+> **Sequence numbers come from counters on the file row.** A write locks its file row, increments `files.crdt_head_seq` or `files.version_seq` and uses the new value, so numbers of one file have no gaps and no ties and writes to one file are ordered. `max(seq) + 1` was rejected, because pruning or purging the newest rows would hand a number out twice.
+> **A resent update keeps its number.** `client_update_id` makes a submit repeatable: an update that is already stored under the same id answers with its old `seq` and adds no row ([05 §5.5](05-realtime-collaboration.md)).
 > The server **stores and relays** encrypted updates; it does **not** apply or merge them ([05](05-realtime-collaboration.md)). Compaction into encrypted snapshots is **client-driven**.
 
 ### audit_log  (security events only — no content)
@@ -597,6 +608,7 @@ CREATE INDEX ix_audit_action ON audit_log(action);
 Content-addressed store behind `IBlobStore` (unchanged interface). Stores **ciphertext only**.
 
 - **Address:** client-computed BLAKE3 of plaintext; the server treats it as opaque and enforces write-once.
+- **Storage address:** the blob lies under `BLAKE3(file_id ‖ key_id ‖ content_hash)`, not under the content hash alone. Two files with equal content have equal content hashes and different ciphertexts, because each file has its own key, so an address by content hash alone would hand the second file the first file's bytes, which its key cannot open. Scoped this way, equal content dedups within one file and key generation, which is all [10 §10.3](10-version-history.md) promises. `file_versions.content_hash` keeps the client's address.
 - **Layout (filesystem):** sharded by hash prefix `blobs/<aa>/<bb>/<full-hash>`. **[P]** A blob is written to `blobs/.tmp` and then hard-linked to its final name. The link is atomic and fails when the name exists, so a reader sees a whole blob or none and the first writer of an address wins. A rename was rejected, because it replaces an existing blob.
 - **Frame check:** the store accepts NYXC frames only (magic, version, minimum length), so plaintext sent by a faulty client is refused before it is written.
 - **Stored content:** AES-256-GCM framed ciphertext ([07 §7.4](07-encryption.md)) for blobs, snapshots, and large CRDT updates.

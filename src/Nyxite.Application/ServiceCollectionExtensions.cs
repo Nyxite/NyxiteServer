@@ -45,6 +45,10 @@ public static class ServiceCollectionExtensions
         services.AddScoped<RecoveryService>();
         services.AddOptions<Structure.StructureOptions>().Bind(configuration.GetSection(Structure.StructureOptions.Section));
         services.AddScoped<Structure.StructureService>();
+        services.AddOptions<Content.ContentOptions>().Bind(configuration.GetSection(Structure.StructureOptions.Section));
+        services.AddOptions<Content.RelayOptions>().Bind(configuration.GetSection(Content.RelayOptions.Section));
+        services.AddScoped<Content.ContentService>();
+        services.AddScoped<Content.CrdtLogPruner>();
         services.TryAddSingleton(LicenseKeys.Embedded);
         services.AddSingleton<IEntitlement, Entitlement>();
         services.AddOptions<RetentionOptions>().Bind(configuration.GetSection(RetentionOptions.Section));

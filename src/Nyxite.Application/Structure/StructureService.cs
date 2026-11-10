@@ -741,8 +741,14 @@ public sealed class StructureService(
 
     private async Task<Func<FileEntity, FileDto>> FileMapAsync(IEnumerable<FileEntity> rows, Guid userId, bool keys, CancellationToken ct)
     {
-        var map = await CurrentKeysAsync(File, rows.Select(r => (r.Id, r.KeyGeneration)), userId, keys, ct);
-        return f => ToDto(f, map.GetValueOrDefault(f.Id));
+        var list = rows.ToList();
+        var map = await CurrentKeysAsync(File, list.Select(r => (r.Id, r.KeyGeneration)), userId, keys, ct);
+        // The API shows the head as its seq; the row holds the version id (02 §2.2.5).
+        var heads = list.Where(r => r.CurrentVersionId != null).Select(r => r.CurrentVersionId!.Value).ToList();
+        var seqs = heads.Count == 0
+            ? []
+            : await db.FileVersions.Where(v => heads.Contains(v.Id)).ToDictionaryAsync(v => v.Id, v => v.Seq, ct);
+        return f => ToDto(f, map.GetValueOrDefault(f.Id), f.CurrentVersionId is { } head ? seqs[head] : null);
     }
 
     private async Task<ProjectDto> ToDtoAsync(ProjectEntity p, Guid userId, bool keys, CancellationToken ct) => (await ProjectMapAsync([p], userId, keys, ct))(p);
@@ -758,8 +764,7 @@ public sealed class StructureService(
         new(f.Id, f.ProjectId, f.ParentFolderId, Base64UrlCodec.Encode(f.NameEnc), Encode(f.MetadataEnc), f.SyncPolicy, f.KeyGeneration,
             f.CreatedAt, f.UpdatedAt, f.DeletedAt, key);
 
-    // currentVersionSeq stays null until file_versions exists (Phase 1.1).
-    private static FileDto ToDto(FileEntity f, WrappedKeyDto? key) =>
+    private static FileDto ToDto(FileEntity f, WrappedKeyDto? key, long? currentVersionSeq = null) =>
         new(f.Id, f.ProjectId, f.FolderId, f.OwnerId, Base64UrlCodec.Encode(f.NameEnc), Encode(f.MetadataEnc), f.ContentType, f.SyncPolicy,
-            null, f.CrdtDocId, f.KeyGeneration, f.CreatedAt, f.UpdatedAt, f.DeletedAt, key);
+            currentVersionSeq, f.CrdtDocId, f.KeyGeneration, f.CreatedAt, f.UpdatedAt, f.DeletedAt, key);
 }

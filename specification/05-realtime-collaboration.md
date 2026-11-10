@@ -10,7 +10,7 @@
 
 ## 5.2 Transport
 
-- **SignalR** over WebSocket. A single hub, `RelayHub`, multiplexes per-document rooms via SignalR groups keyed by `file:{fileId}`. **[P]**
+- **SignalR** over WebSocket. A single hub, `RelayHub`, at `/hubs/relay` (outside `/api/v1`), multiplexes per-document rooms via SignalR groups keyed by `file:{fileId}`. **[P]** The access token travels as `Authorization: Bearer` or, because a browser cannot set a header on a WebSocket upgrade, as the `access_token` query value on that path only.
 - **Upgrade auth:** the server's own access token (users) or a short-lived **share token** (guests) ([08](08-authentication.md)). The share token authorizes **relay access**; the **decryption key** comes from the link's URL fragment, never the server ([09](09-sharing-and-acl.md)).
 - **Fallback:** REST encrypted-update endpoints ([04](04-rest-api.md)) for offline catch-up.
 
@@ -19,7 +19,8 @@
 ```csharp
 public interface IRelayHub          // server → client callbacks (all payloads are ciphertext)
 {
-    Task OnUpdates(string fileId, EncryptedUpdate[] updates);  // encrypted CRDT updates since the client's cursor
+    Task OnSnapshot(string fileId, long crdtSeq, long versionSeq); // on join, when a snapshot exists: where to start from
+    Task OnUpdates(string fileId, EncryptedUpdate[] updates);  // encrypted CRDT updates, on join and whenever new ones are stored
     Task OnUpdate(string fileId, EncryptedUpdate update);      // a peer's encrypted update, relayed
     Task OnAwareness(string fileId, byte[] awarenessCipher);   // encrypted ephemeral presence/cursors
     Task OnPresence(string fileId, PresenceDto[] peers);       // join/leave roster (identities only, no content)
@@ -28,7 +29,7 @@ public interface IRelayHub          // server → client callbacks (all payloads
 
 // client → server (hub methods)
 Task JoinDocument(string fileId, long sinceSeq);              // server replies OnUpdates with everything after sinceSeq
-Task SubmitUpdate(string fileId, EncryptedUpdate update);     // server persists + relays; never decrypts
+Task<long> SubmitUpdate(string fileId, EncryptedUpdate update); // server persists + relays; never decrypts; returns the assigned seq
 Task SubmitAwareness(string fileId, byte[] awarenessCipher);  // relayed, not persisted
 Task LeaveDocument(string fileId);
 
@@ -36,6 +37,9 @@ public record EncryptedUpdate(long Seq, byte[] Ciphertext, Guid KeyId);
 ```
 
 > **Wire encoding [P]:** over the SignalR **MessagePack** protocol, `Seq` is an int64, `Ciphertext` raw bytes, and `KeyId` a **canonical UUID string** (e.g. `018f…`); clients map it to their native `Guid`/`UUID` type. (The on-disk frame's `key_id` is the same value as 16 raw bytes — [07 §7.4](07-encryption.md).)
+
+> **Delivery [P]:** every stored update reaches the room as `OnUpdates`, the sender included, whether it was submitted over the hub or over REST. A client therefore sees all updates of a document in `seq` order from one source and drops what it has already applied by `seq`. Sending to the others only was rejected, because the sender would then have to merge its own acknowledgements with the room's stream. The return value of `SubmitUpdate` is the acknowledgement that the update is durable. `OnUpdate` stays in the contract for a single relayed update and is not sent by the server today.
+> **Errors [P]:** an expected failure reaches the caller as `OnError(fileId, code, message)` and as the failed call, whose message is the stable problem code of [04 §4.4](04-rest-api.md).
 
 ## 5.4 Join handshake
 

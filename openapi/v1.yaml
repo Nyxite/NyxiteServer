@@ -1139,6 +1139,7 @@ paths:
           headers:
             Nyxite-Blob-Layout: { schema: { type: string, enum: [single, chunked] } }
             ETag: { schema: { type: string } }
+            Nyxite-Key-Id: { schema: { type: string, format: uuid }, description: 'The key the frame is sealed with' }
           content:
             application/octet-stream:
               schema: { type: string, contentMediaType: application/octet-stream }
@@ -1148,7 +1149,7 @@ paths:
       tags: [content]
       summary: Upload new inline ciphertext (ink/binary, LWW, at most 100 MB)
       parameters:
-        - { name: If-Match, in: header, required: true, schema: { type: string }, description: 'parentSeq the client edited from' }
+        - { name: If-Match, in: header, required: true, schema: { type: string }, description: 'parentSeq the client edited from, 0 for the first version' }
         - { name: Nyxite-Content-Hash, in: header, required: true, schema: { type: string }, description: 'base64url BLAKE3 content address' }
         - { name: Nyxite-Key-Id, in: header, required: true, schema: { type: string, format: uuid } }
       requestBody:
@@ -1314,6 +1315,7 @@ paths:
                         clientUpdateId: { $ref: '#/components/schemas/Uuid' }
                         seq: { type: integer, format: int64 }
         '404': { $ref: '#/components/responses/Problem' }
+        '409': { $ref: '#/components/responses/Problem' }
         '412': { $ref: '#/components/responses/Problem' }
   /files/{id}/snapshot:
     parameters: [{ $ref: '#/components/parameters/Id' }]
@@ -1329,6 +1331,32 @@ paths:
             application/octet-stream:
               schema: { type: string, contentMediaType: application/octet-stream }
         '404': { $ref: '#/components/responses/Problem' }
+    put:
+      tags: [content]
+      summary: Upload a client-made encrypted snapshot of a text file; it becomes the head version
+      description: >-
+        The snapshot is the merged CRDT document, sealed with the file key. Nyxite-Snapshot-Seq names the
+        last update it contains, so clients read the log from there and the server may prune what lies
+        before it, minus the safety tail (05 §5.6). A snapshot older than the stored head answers 409.
+      parameters:
+        - { name: Nyxite-Snapshot-Seq, in: header, required: true, schema: { type: integer, format: int64, minimum: 0 } }
+        - { name: Nyxite-Content-Hash, in: header, required: true, schema: { type: string }, description: 'base64url BLAKE3 content address' }
+        - { name: Nyxite-Key-Id, in: header, required: true, schema: { type: string, format: uuid } }
+      requestBody:
+        required: true
+        content:
+          application/octet-stream:
+            schema: { type: string, contentMediaType: application/octet-stream }
+      responses:
+        '201':
+          description: New head version.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Version' }
+        '404': { $ref: '#/components/responses/Problem' }
+        '409': { $ref: '#/components/responses/Problem' }
+        '412': { $ref: '#/components/responses/Problem' }
+        '413': { $ref: '#/components/responses/Problem' }
 
   # ---------------------------------------------------------------- file keys
   /files/{id}/keys:
@@ -3072,6 +3100,7 @@ components:
         isHead: { type: boolean }
         authorId: { $ref: '#/components/schemas/NullableUuid' }
         restoredFromSeq: { type: [integer, 'null'], format: int64 }
+        crdtSeq: { type: [integer, 'null'], format: int64, description: 'Text snapshots only: the last CRDT update the snapshot contains' }
         createdAt: { type: string, format: date-time }
     CrdtUpdate:
       type: object

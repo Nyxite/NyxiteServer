@@ -4,6 +4,7 @@ using Nyxite.Persistence;
 using Nyxite.Server;
 using Nyxite.Server.Endpoints;
 using Nyxite.Server.Http;
+using Nyxite.Server.Realtime;
 
 if (args is [MigrateCommand.Name, ..])
     return await MigrateCommand.RunAsync(args[1..]);
@@ -34,6 +35,7 @@ builder.Services.AddNyxiteBearer();
 builder.Services.AddNyxiteRateLimiting(builder.Configuration);
 builder.Services.AddNyxiteHealth();
 builder.Services.AddNyxiteBlobStore();
+builder.Services.AddNyxiteRelay();
 builder.Services.AddNyxiteCors(builder.Configuration);
 builder.Services.AddSingleton<MetricsRegistry>();
 builder.Services.AddHostedService<MetricsServer>();
@@ -75,6 +77,8 @@ api.MapAccountSecurityEndpoints();
 api.MapMeEndpoints();
 api.MapKeyEndpoints();
 api.MapStructureEndpoints();
+api.MapContentEndpoints();
+app.MapHub<Nyxite.Server.Realtime.RelayHub>(Nyxite.Server.Realtime.RelayHub.Path).RequireAuthorization();
 
 await app.RunAsync();
 return 0;

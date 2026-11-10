@@ -68,6 +68,7 @@ public sealed class MaintenanceWorker(
                 await Task.Delay(options.Value.CleanupInterval, time, stoppingToken);
                 await using var scope = scopes.CreateAsyncScope();
                 var deleted = await scope.ServiceProvider.GetRequiredService<ExpiredRowCleaner>().RunAsync(stoppingToken);
+                deleted += await scope.ServiceProvider.GetRequiredService<Content.CrdtLogPruner>().RunAsync(stoppingToken);
                 if (deleted > 0) logger.LogInformation("Maintenance deleted {Count} expired rows.", deleted);
             }
             catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)

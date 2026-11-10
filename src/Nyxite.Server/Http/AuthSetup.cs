@@ -26,6 +26,14 @@ public static class AuthSetup
                 o.TokenValidationParameters = parameters;
                 o.Events = new JwtBearerEvents
                 {
+                    // A browser cannot set a header on a WebSocket upgrade, so the relay also takes the token as a query value.
+                    OnMessageReceived = context =>
+                    {
+                        if (context.HttpContext.Request.Path.StartsWithSegments(Realtime.RelayHub.Path)
+                            && context.Request.Query["access_token"].ToString() is { Length: > 0 } token)
+                            context.Token = token;
+                        return Task.CompletedTask;
+                    },
                     OnChallenge = async context =>
                     {
                         context.HandleResponse();

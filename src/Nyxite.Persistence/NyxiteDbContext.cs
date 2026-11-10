@@ -29,6 +29,8 @@ public sealed class NyxiteDbContext(DbContextOptions<NyxiteDbContext> options) :
     public DbSet<FileEntity> Files => Set<FileEntity>();
     public DbSet<FileKeyEntity> FileKeys => Set<FileKeyEntity>();
     public DbSet<StructureKeyEntity> StructureKeys => Set<StructureKeyEntity>();
+    public DbSet<FileVersionEntity> FileVersions => Set<FileVersionEntity>();
+    public DbSet<CrdtUpdateEntity> CrdtUpdates => Set<CrdtUpdateEntity>();
 
     protected override void OnModelCreating(ModelBuilder modelBuilder) =>
         modelBuilder.ApplyConfigurationsFromAssembly(typeof(NyxiteDbContext).Assembly);

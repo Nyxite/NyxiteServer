@@ -33,6 +33,8 @@
 | `NYXITE__Database__MigrationConnectionString` | PostgreSQL DSN of the migration role (table owner, `CREATEROLE`), read only by `nyxite-server migrate` |
 | `NYXITE__BlobStore__Provider` | `filesystem` \| `s3`. Only `filesystem` is implemented; anything else stops the start |
 | `NYXITE__BlobStore__RootPath` | Filesystem blob root (content-addressed, sharded). **Required**: the server refuses to start when it is unset or not writable |
+| `NYXITE__Limits__MaxInlineBlobBytes` / `__MaxCrdtUpdateBytes` / `__MaxAwarenessBytes` | Largest ciphertext of one blob or snapshot upload, of one CRDT update, and of one relayed awareness message ([04 §4.3](04-rest-api.md), [05](05-realtime-collaboration.md)). Defaults **100 MiB** / **1 MiB** / **64 KiB** **[P]** |
+| `NYXITE__Relay__SafetyTailDays` / `__SafetyTailUpdates` | Updates younger than this many days, and this many newest updates of a document, are never pruned, also when a snapshot covers them ([05 §5.6](05-realtime-collaboration.md)). Defaults **7** / **1000** **[P]** |
 | `NYXITE__Limits__NameEncMaxBytes` / `__MetadataEncMaxBytes` | Largest accepted `nameEnc` / `metadataEnc`, frame overhead included ([04 §4.3](04-rest-api.md)). Defaults **2048** / **65536** **[P]**. A 255 character name is about 1 KiB sealed |
 | `NYXITE__BlobStore__S3__*` | Endpoint/bucket/credentials when `s3` |
 | `NYXITE__Auth__TokenSigningKey` (secret) | **Native** token-signing key — signs/validates the server's own access + refresh tokens (always required). Format `{version}:{base64 key}` entries separated by `;`, at least 32 bytes each. The highest version signs and becomes the `kid`, older versions only validate, so a rollover keeps live tokens valid |

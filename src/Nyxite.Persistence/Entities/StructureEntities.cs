@@ -44,6 +44,15 @@ public sealed class FileEntity
     public required string SyncPolicy { get; set; }
     public Guid? CurrentVersionId { get; set; }
     public Guid? CrdtDocId { get; set; }
+
+    /// <summary>The last <c>file_versions.seq</c> handed out for this file. A counter, so a purged version never frees its number.</summary>
+    public long VersionSeq { get; set; }
+
+    /// <summary>The last <c>crdt_updates.seq</c> handed out for this file's document. A counter, so pruning never moves it back.</summary>
+    public long CrdtHeadSeq { get; set; }
+
+    /// <summary>Set by a recorded restore: the version the next head is a restore of (10 §10.5).</summary>
+    public long? PendingRestoreSeq { get; set; }
     public int KeyGeneration { get; set; } = 1;
     public byte[]? MetadataEnc { get; set; }
     public DateTimeOffset CreatedAt { get; set; }
