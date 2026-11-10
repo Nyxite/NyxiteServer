@@ -1,0 +1,488 @@
+using System.Security.Claims;
+using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Options;
+using Nyxite.Application.Audit;
+using Nyxite.Application.Auth;
+using Nyxite.Application.Keys;
+using Nyxite.Contracts.Structure;
+using Nyxite.Crypto;
+using Nyxite.Domain.Identity;
+using Nyxite.Domain.Structure;
+using Nyxite.Persistence;
+using Nyxite.Persistence.Entities;
+
+namespace Nyxite.Application.Structure;
+
+/// <summary>
+/// Projects, folders and files as an opaque tree (server 02, 03 §3.3, 04 "structure"). The server keeps ids, parents,
+/// content type and timestamps. Names and metadata are NYXC frames it cannot open, sealed with the object's own key,
+/// which it stores only wrapped to each member. Ids are allocated by the client, because a name frame is bound to the
+/// id of its object and a client must be able to build a subtree while offline.
+/// <para>
+/// Reach is ownership of the project until shares exist (Phase 2.2). An object the caller cannot reach answers
+/// <c>404</c>, like one that does not exist (04 §4.4). Deleting is always a soft delete (03 §3.3, DL-1).
+/// </para>
+/// </summary>
+public sealed class StructureService(
+    NyxiteDbContext db, DeviceGuard guard, IdempotencyStore idempotency, AuditWriter audit, TimeProvider time,
+    IOptions<StructureOptions> options)
+{
+    public const string CreateProjectEndpoint = "POST /projects";
+    public const string CreateFolderEndpoint = "POST /folders";
+    public const string CreateFileEndpoint = "POST /files";
+
+    public const int DefaultPageSize = 50;
+    public const int MaxPageSize = 200;
+
+    /// <summary>A wrapped object key: the 32-byte AES key sealed with hybrid HPKE.</summary>
+    public const int WrappedKeySize = 32 + HybridHpke.Overhead;
+
+    private readonly StructureOptions _options = options.Value;
+
+    // ---------------------------------------------------------------- projects
+
+    public async Task<PageDto<ProjectDto>> ListProjectsAsync(ClaimsPrincipal principal, string? cursor, int? limit, CancellationToken ct)
+    {
+        var userId = principal.UserId();
+        var (after, take) = Page(cursor, limit);
+        var rows = await db.Projects.AsNoTracking()
+            .Where(p => p.OwnerId == userId && p.DeletedAt == null && p.Id > after)
+            .OrderBy(p => p.Id).Take(take + 1).ToListAsync(ct);
+        return ToPage(rows, take, r => r.Id, ToDto);
+    }
+
+    public async Task<ProjectDto> GetProjectAsync(ClaimsPrincipal principal, Guid id, CancellationToken ct) =>
+        ToDto(await ProjectAsync(principal.UserId(), id, tracked: false, ct));
+
+    public async Task<IdempotentResponse> CreateProjectAsync(ClaimsPrincipal principal, CreateProjectRequest body, string? idempotencyKey, CancellationToken ct)
+    {
+        var userId = await WriterAsync(principal, ct);
+        var (key, hash) = IdempotencyKey(idempotencyKey, body);
+        if (await idempotency.FindAsync(userId, CreateProjectEndpoint, key, hash, ct) is { } replay) return replay;
+
+        var (name, nameKeyId) = Name(body.NameEnc, required: true);
+        var metadata = Metadata(body.MetadataEnc);
+        var policy = Policy(body.SyncPolicy) ?? SyncPolicies.ServerDefault;
+        var wrap = OwnerWrap(body.OwnerWrappedKey, userId, nameKeyId, metadata);
+        NewId(body.Id);
+        if (await db.Projects.AnyAsync(p => p.Id == body.Id, ct)) throw AuthException.Conflict("id is already in use.");
+
+        var now = time.GetUtcNow();
+        var project = new ProjectEntity
+        {
+            Id = body.Id, OwnerId = userId, NameEnc = name!, MetadataEnc = metadata, SyncPolicy = policy, CreatedAt = now, UpdatedAt = now,
+        };
+        db.Projects.Add(project);
+        db.StructureKeys.Add(new StructureKeyEntity
+        {
+            Id = Guid.CreateVersion7(now), ProjectId = project.Id, MemberId = userId, KeyId = wrap.KeyId, WrappedKey = wrap.Ciphertext,
+            Generation = 1, AlgId = wrap.AlgId, CreatedAt = now,
+        });
+        var stored = idempotency.Add(userId, CreateProjectEndpoint, key, hash, 201, ToDto(project));
+        await SaveCreateAsync(ct);
+        return stored;
+    }
+
+    public async Task<ProjectDto> UpdateProjectAsync(ClaimsPrincipal principal, Guid id, UpdateProjectRequest body, CancellationToken ct)
+    {
+        var userId = await WriterAsync(principal, ct);
+        var project = await ProjectAsync(userId, id, tracked: true, ct);
+        var keyId = await db.StructureKeys.Where(k => k.ProjectId == id && k.Generation == project.KeyGeneration).Select(k => k.KeyId).FirstAsync(ct);
+
+        if (Name(body.NameEnc, required: false, keyId) is { Bytes: { } name }) project.NameEnc = name;
+        if (body.MetadataEnc.IsSet) project.MetadataEnc = Metadata(body.MetadataEnc.Value, keyId);
+        if (Policy(body.SyncPolicy) is { } policy) project.SyncPolicy = policy;
+        project.UpdatedAt = time.GetUtcNow();
+        await db.SaveChangesAsync(ct);
+        return ToDto(project);
+    }
+
+    /// <summary>Moves the project and everything in it to Trash, with one timestamp, so a restore finds the same set.</summary>
+    public async Task DeleteProjectAsync(ClaimsPrincipal principal, Guid id, RequestInfo request, CancellationToken ct)
+    {
+        var userId = await WriterAsync(principal, ct);
+        await using var tx = await db.Database.BeginTransactionAsync(ct);
+        var project = await ProjectAsync(userId, id, tracked: true, ct);
+        var now = time.GetUtcNow();
+        var files = await db.Files.Where(f => f.ProjectId == id && f.DeletedAt == null)
+            .ExecuteUpdateAsync(s => s.SetProperty(f => f.DeletedAt, now).SetProperty(f => f.UpdatedAt, now), ct);
+        var folders = await db.Folders.Where(f => f.ProjectId == id && f.DeletedAt == null)
+            .ExecuteUpdateAsync(s => s.SetProperty(f => f.DeletedAt, now).SetProperty(f => f.UpdatedAt, now), ct);
+        project.DeletedAt = now;
+        project.UpdatedAt = now;
+        audit.Add("project.delete", userId, request, targetType: "project", targetId: id, detail: new { folders, files });
+        await db.SaveChangesAsync(ct);
+        await tx.CommitAsync(ct);
+    }
+
+    public async Task<WrappedKeysDto> ProjectKeysAsync(ClaimsPrincipal principal, Guid id, CancellationToken ct)
+    {
+        var userId = principal.UserId();
+        await ProjectAsync(userId, id, tracked: false, ct);
+        return await StructureKeysAsync(db.StructureKeys.Where(k => k.ProjectId == id), userId, ct);
+    }
+
+    // ---------------------------------------------------------------- folders
+
+    public async Task<PageDto<FolderDto>> ListFoldersAsync(ClaimsPrincipal principal, Guid projectId, string? cursor, int? limit, CancellationToken ct)
+    {
+        await ProjectAsync(principal.UserId(), projectId, tracked: false, ct);
+        var (after, take) = Page(cursor, limit);
+        var rows = await db.Folders.AsNoTracking()
+            .Where(f => f.ProjectId == projectId && f.DeletedAt == null && f.Id > after)
+            .OrderBy(f => f.Id).Take(take + 1).ToListAsync(ct);
+        return ToPage(rows, take, r => r.Id, ToDto);
+    }
+
+    public async Task<FolderDto> GetFolderAsync(ClaimsPrincipal principal, Guid id, CancellationToken ct) =>
+        ToDto(await FolderAsync(principal.UserId(), id, tracked: false, ct));
+
+    public async Task<IdempotentResponse> CreateFolderAsync(ClaimsPrincipal principal, CreateFolderRequest body, string? idempotencyKey, CancellationToken ct)
+    {
+        var userId = await WriterAsync(principal, ct);
+        var (key, hash) = IdempotencyKey(idempotencyKey, body);
+        if (await idempotency.FindAsync(userId, CreateFolderEndpoint, key, hash, ct) is { } replay) return replay;
+
+        var (name, nameKeyId) = Name(body.NameEnc, required: true);
+        var metadata = Metadata(body.MetadataEnc);
+        var policy = Policy(body.SyncPolicy);
+        var wrap = OwnerWrap(body.OwnerWrappedKey, userId, nameKeyId, metadata);
+        NewId(body.Id);
+        await ProjectAsync(userId, body.ProjectId, tracked: false, ct);
+        if (body.ParentFolderId is { } parentId) await ParentAsync(body.ProjectId, parentId, ct);
+        if (await db.Folders.AnyAsync(f => f.Id == body.Id, ct)) throw AuthException.Conflict("id is already in use.");
+
+        var now = time.GetUtcNow();
+        var folder = new FolderEntity
+        {
+            Id = body.Id, ProjectId = body.ProjectId, ParentFolderId = body.ParentFolderId, NameEnc = name!, MetadataEnc = metadata,
+            SyncPolicy = policy, CreatedAt = now, UpdatedAt = now,
+        };
+        db.Folders.Add(folder);
+        db.StructureKeys.Add(new StructureKeyEntity
+        {
+            Id = Guid.CreateVersion7(now), FolderId = folder.Id, MemberId = userId, KeyId = wrap.KeyId, WrappedKey = wrap.Ciphertext,
+            Generation = 1, AlgId = wrap.AlgId, CreatedAt = now,
+        });
+        var stored = idempotency.Add(userId, CreateFolderEndpoint, key, hash, 201, ToDto(folder));
+        await SaveCreateAsync(ct);
+        return stored;
+    }
+
+    public async Task<FolderDto> UpdateFolderAsync(ClaimsPrincipal principal, Guid id, UpdateFolderRequest body, CancellationToken ct)
+    {
+        var userId = await WriterAsync(principal, ct);
+        await using var tx = await db.Database.BeginTransactionAsync(ct);
+        var folder = await FolderAsync(userId, id, tracked: true, ct);
+        var keyId = await db.StructureKeys.Where(k => k.FolderId == id && k.Generation == folder.KeyGeneration).Select(k => k.KeyId).FirstAsync(ct);
+
+        if (Name(body.NameEnc, required: false, keyId) is { Bytes: { } name }) folder.NameEnc = name;
+        if (body.MetadataEnc.IsSet) folder.MetadataEnc = Metadata(body.MetadataEnc.Value, keyId);
+        if (body.SyncPolicy.IsSet) folder.SyncPolicy = Policy(body.SyncPolicy.Value);
+        if (body.ParentFolderId.IsSet && body.ParentFolderId.Value != folder.ParentFolderId)
+        {
+            // Moves within one project run one after the other: two crossing moves could otherwise each pass the cycle
+            // check and together close a loop.
+            await db.Database.ExecuteSqlAsync($"SELECT 1 FROM projects WHERE id = {folder.ProjectId} FOR UPDATE", ct);
+            if (body.ParentFolderId.Value is { } parentId)
+            {
+                await ParentAsync(folder.ProjectId, parentId, ct);
+                if (FolderRules.WouldCycle(id, await AncestorsAsync(parentId, ct)))
+                    throw AuthException.Validation("A folder cannot be moved into itself or one of its subfolders.");
+            }
+
+            folder.ParentFolderId = body.ParentFolderId.Value;
+        }
+
+        folder.UpdatedAt = time.GetUtcNow();
+        await db.SaveChangesAsync(ct);
+        await tx.CommitAsync(ct);
+        return ToDto(folder);
+    }
+
+    /// <summary>Moves the folder and its whole subtree to Trash as one audited event (02 §2.6).</summary>
+    public async Task DeleteFolderAsync(ClaimsPrincipal principal, Guid id, RequestInfo request, CancellationToken ct)
+    {
+        var userId = await WriterAsync(principal, ct);
+        await using var tx = await db.Database.BeginTransactionAsync(ct);
+        await FolderAsync(userId, id, tracked: false, ct);
+        var now = time.GetUtcNow();
+        // Files first: the subtree is found through live folders, which the second statement then marks.
+        var files = await db.Database.ExecuteSqlAsync($"""
+            WITH RECURSIVE sub AS (
+                SELECT id FROM folders WHERE id = {id}
+                UNION ALL
+                SELECT f.id FROM folders f JOIN sub ON f.parent_folder_id = sub.id WHERE f.deleted_at IS NULL)
+            UPDATE files SET deleted_at = {now}, updated_at = {now} WHERE folder_id IN (SELECT id FROM sub) AND deleted_at IS NULL
+            """, ct);
+        var folders = await db.Database.ExecuteSqlAsync($"""
+            WITH RECURSIVE sub AS (
+                SELECT id FROM folders WHERE id = {id}
+                UNION ALL
+                SELECT f.id FROM folders f JOIN sub ON f.parent_folder_id = sub.id WHERE f.deleted_at IS NULL)
+            UPDATE folders SET deleted_at = {now}, updated_at = {now} WHERE id IN (SELECT id FROM sub) AND deleted_at IS NULL
+            """, ct);
+        audit.Add("folder.delete", userId, request, targetType: "folder", targetId: id, detail: new { folders, files });
+        await db.SaveChangesAsync(ct);
+        await tx.CommitAsync(ct);
+    }
+
+    public async Task<WrappedKeysDto> FolderKeysAsync(ClaimsPrincipal principal, Guid id, CancellationToken ct)
+    {
+        var userId = principal.UserId();
+        await FolderAsync(userId, id, tracked: false, ct);
+        return await StructureKeysAsync(db.StructureKeys.Where(k => k.FolderId == id), userId, ct);
+    }
+
+    // ---------------------------------------------------------------- files
+
+    /// <summary>The files of a project, or with <paramref name="folderId"/> the files directly in that folder.</summary>
+    public async Task<PageDto<FileDto>> ListFilesAsync(ClaimsPrincipal principal, Guid? projectId, Guid? folderId, string? cursor, int? limit, CancellationToken ct)
+    {
+        var userId = principal.UserId();
+        if (folderId is { } fid) projectId = (await FolderAsync(userId, fid, tracked: false, ct)).ProjectId;
+        else await ProjectAsync(userId, projectId!.Value, tracked: false, ct);
+
+        var (after, take) = Page(cursor, limit);
+        var rows = await db.Files.AsNoTracking()
+            .Where(f => f.ProjectId == projectId && (folderId == null || f.FolderId == folderId) && f.DeletedAt == null && f.Id > after)
+            .OrderBy(f => f.Id).Take(take + 1).ToListAsync(ct);
+        return ToPage(rows, take, r => r.Id, ToDto);
+    }
+
+    public async Task<FileDto> GetFileAsync(ClaimsPrincipal principal, Guid id, CancellationToken ct) =>
+        ToDto(await FileAsync(principal.UserId(), id, tracked: false, ct));
+
+    public async Task<IdempotentResponse> CreateFileAsync(ClaimsPrincipal principal, CreateFileRequest body, string? idempotencyKey, CancellationToken ct)
+    {
+        var userId = await WriterAsync(principal, ct);
+        var (key, hash) = IdempotencyKey(idempotencyKey, body);
+        if (await idempotency.FindAsync(userId, CreateFileEndpoint, key, hash, ct) is { } replay) return replay;
+
+        var (name, nameKeyId) = Name(body.NameEnc, required: true);
+        var metadata = Metadata(body.MetadataEnc);
+        var policy = Policy(body.SyncPolicy) ?? SyncPolicies.ServerDefault;
+        if (body.ContentType is not { } contentType || !ContentTypes.All.Contains(contentType))
+            throw AuthException.Validation("contentType is not a known content type.");
+        if (ContentTypes.IsCrdt(contentType) != body.CrdtDocId.HasValue)
+            throw AuthException.Validation("crdtDocId is required for text content types and must be absent for all others.");
+        if (body.CrdtDocId is { Version: not 7 }) throw AuthException.Validation("crdtDocId must be a UUIDv7.");
+        var wrap = OwnerWrap(body.OwnerWrappedKey, userId, nameKeyId, metadata);
+        NewId(body.Id);
+        await ProjectAsync(userId, body.ProjectId, tracked: false, ct);
+        if (body.FolderId is { } folderId) await ParentAsync(body.ProjectId, folderId, ct);
+        if (await db.Files.AnyAsync(f => f.Id == body.Id, ct)) throw AuthException.Conflict("id is already in use.");
+
+        var now = time.GetUtcNow();
+        var file = new FileEntity
+        {
+            Id = body.Id, ProjectId = body.ProjectId, FolderId = body.FolderId, OwnerId = userId, NameEnc = name!, MetadataEnc = metadata,
+            ContentType = contentType, SyncPolicy = policy, CrdtDocId = body.CrdtDocId, CreatedAt = now, UpdatedAt = now,
+        };
+        db.Files.Add(file);
+        db.FileKeys.Add(new FileKeyEntity
+        {
+            Id = Guid.CreateVersion7(now), FileId = file.Id, MemberId = userId, KeyId = wrap.KeyId, WrappedKey = wrap.Ciphertext,
+            Generation = 1, AlgId = wrap.AlgId, CreatedAt = now,
+        });
+        var stored = idempotency.Add(userId, CreateFileEndpoint, key, hash, 201, ToDto(file));
+        await SaveCreateAsync(ct);
+        return stored;
+    }
+
+    public async Task<FileDto> UpdateFileAsync(ClaimsPrincipal principal, Guid id, UpdateFileRequest body, CancellationToken ct)
+    {
+        var userId = await WriterAsync(principal, ct);
+        var file = await FileAsync(userId, id, tracked: true, ct);
+        var keyId = await db.FileKeys.Where(k => k.FileId == id && k.Generation == file.KeyGeneration).Select(k => k.KeyId).FirstAsync(ct);
+
+        if (Name(body.NameEnc, required: false, keyId) is { Bytes: { } name }) file.NameEnc = name;
+        if (body.MetadataEnc.IsSet) file.MetadataEnc = Metadata(body.MetadataEnc.Value, keyId);
+        if (Policy(body.SyncPolicy) is { } policy) file.SyncPolicy = policy;
+        if (body.ParentFolderId.IsSet && body.ParentFolderId.Value != file.FolderId)
+        {
+            if (body.ParentFolderId.Value is { } folderId) await ParentAsync(file.ProjectId, folderId, ct);
+            file.FolderId = body.ParentFolderId.Value;
+        }
+
+        file.UpdatedAt = time.GetUtcNow();
+        await db.SaveChangesAsync(ct);
+        return ToDto(file);
+    }
+
+    public async Task DeleteFileAsync(ClaimsPrincipal principal, Guid id, RequestInfo request, CancellationToken ct)
+    {
+        var userId = await WriterAsync(principal, ct);
+        var file = await FileAsync(userId, id, tracked: true, ct);
+        var now = time.GetUtcNow();
+        file.DeletedAt = now;
+        file.UpdatedAt = now;
+        audit.Add("file.delete", userId, request, targetType: "file", targetId: id);
+        await db.SaveChangesAsync(ct);
+    }
+
+    public async Task<WrappedKeysDto> FileKeysAsync(ClaimsPrincipal principal, Guid id, CancellationToken ct)
+    {
+        var userId = principal.UserId();
+        await FileAsync(userId, id, tracked: false, ct);
+        var rows = await db.FileKeys.AsNoTracking().Where(k => k.FileId == id && k.MemberId == userId && k.RevokedAt == null)
+            .OrderBy(k => k.Generation).ToListAsync(ct);
+        return new WrappedKeysDto(rows.Select(k => new WrappedKeyDto(k.KeyId, k.MemberId, Base64UrlCodec.Encode(k.WrappedKey), k.Generation, k.AlgId)).ToList());
+    }
+
+    // ---------------------------------------------------------------- reach
+
+    private async Task<ProjectEntity> ProjectAsync(Guid userId, Guid id, bool tracked, CancellationToken ct)
+    {
+        var query = tracked ? db.Projects : db.Projects.AsNoTracking();
+        return await query.SingleOrDefaultAsync(p => p.Id == id && p.OwnerId == userId && p.DeletedAt == null, ct) ?? throw AuthException.NotFound();
+    }
+
+    private async Task<FolderEntity> FolderAsync(Guid userId, Guid id, bool tracked, CancellationToken ct)
+    {
+        var query = tracked ? db.Folders : db.Folders.AsNoTracking();
+        return await query.SingleOrDefaultAsync(f => f.Id == id && f.DeletedAt == null
+                   && db.Projects.Any(p => p.Id == f.ProjectId && p.OwnerId == userId && p.DeletedAt == null), ct)
+               ?? throw AuthException.NotFound();
+    }
+
+    private async Task<FileEntity> FileAsync(Guid userId, Guid id, bool tracked, CancellationToken ct)
+    {
+        var query = tracked ? db.Files : db.Files.AsNoTracking();
+        return await query.SingleOrDefaultAsync(f => f.Id == id && f.DeletedAt == null
+                   && db.Projects.Any(p => p.Id == f.ProjectId && p.OwnerId == userId && p.DeletedAt == null), ct)
+               ?? throw AuthException.NotFound();
+    }
+
+    /// <summary>A folder something is put into: it must be live and in the same project (02 §2.2.4).</summary>
+    private async Task ParentAsync(Guid projectId, Guid folderId, CancellationToken ct)
+    {
+        var parent = await db.Folders.AsNoTracking().Where(f => f.Id == folderId && f.DeletedAt == null).Select(f => new { f.ProjectId }).SingleOrDefaultAsync(ct);
+        if (parent is null || parent.ProjectId != projectId) throw AuthException.NotFound();
+    }
+
+    /// <summary>The folder and all its ancestors, nearest first.</summary>
+    private async Task<List<Guid>> AncestorsAsync(Guid folderId, CancellationToken ct) =>
+        await db.Database.SqlQuery<Guid>($"""
+            WITH RECURSIVE up AS (
+                SELECT id, parent_folder_id FROM folders WHERE id = {folderId}
+                UNION ALL
+                SELECT f.id, f.parent_folder_id FROM folders f JOIN up ON f.id = up.parent_folder_id)
+            SELECT id AS "Value" FROM up
+            """).ToListAsync(ct);
+
+    /// <summary>
+    /// The caller as someone who may change structure: not blocked (12 §12.6), and on an active device, because only a
+    /// device that holds the identity key can have produced the names and wrapped keys it sends.
+    /// </summary>
+    private async Task<Guid> WriterAsync(ClaimsPrincipal principal, CancellationToken ct)
+    {
+        var userId = principal.UserId();
+        await guard.RequireActiveDeviceAsync(principal, ct);
+        var status = await db.Users.Where(u => u.Id == userId).Select(u => u.Status).SingleAsync(ct);
+        return status == UserStatus.Blocked ? throw new AuthException(403, "account_blocked", "This account is blocked for changes.") : userId;
+    }
+
+    // ---------------------------------------------------------------- validation
+
+    private static (string Key, byte[] Hash) IdempotencyKey(string? header, object body) =>
+        (IdempotencyStore.ValidKey(header) ?? throw AuthException.Validation("A valid Idempotency-Key header is required."), IdempotencyStore.Hash(body));
+
+    private static void NewId(Guid id)
+    {
+        if (id.Version != 7) throw AuthException.Validation("id must be a client-allocated UUIDv7.");
+    }
+
+    /// <summary>
+    /// A name frame. The server checks what it can without a key: the frame layout, its size, and that it names the
+    /// object's current key, so a name sealed with a rotated-out key is refused.
+    /// </summary>
+    private (byte[]? Bytes, Guid KeyId) Name(string? nameEnc, bool required, Guid? currentKeyId = null)
+    {
+        if (nameEnc is null && !required) return (null, default);
+        if (!Base64UrlCodec.TryDecode(nameEnc, out var bytes) || bytes.Length > _options.NameEncMaxBytes || !NyxcFrame.TryParseHeader(bytes, out var header))
+            throw AuthException.Validation("nameEnc must be an NYXC frame within the size limit.");
+        if (currentKeyId is { } current && header.KeyId != current) throw AuthException.Validation("nameEnc is not sealed with the object's current key.");
+        return (bytes, header.KeyId);
+    }
+
+    private byte[]? Metadata(string? metadataEnc, Guid? currentKeyId = null)
+    {
+        if (metadataEnc is null) return null;
+        if (!Base64UrlCodec.TryDecode(metadataEnc, out var bytes) || bytes.Length > _options.MetadataEncMaxBytes || !NyxcFrame.TryParseHeader(bytes, out var header))
+            throw AuthException.Validation("metadataEnc must be an NYXC frame within the size limit.");
+        if (currentKeyId is { } current && header.KeyId != current) throw AuthException.Validation("metadataEnc is not sealed with the object's current key.");
+        return bytes;
+    }
+
+    private static string? Policy(string? syncPolicy) =>
+        syncPolicy is null || SyncPolicies.IsValid(syncPolicy) ? syncPolicy : throw new AuthException(400, "bad_sync_policy", "syncPolicy is not a known sync policy.");
+
+    private sealed record Wrap(Guid KeyId, byte[] Ciphertext, string AlgId);
+
+    /// <summary>The creator's own wrapped key of a new object. It must be the key the name and the metadata are sealed with.</summary>
+    private static Wrap OwnerWrap(WrappedKeyRequest? wrap, Guid userId, Guid nameKeyId, byte[]? metadata)
+    {
+        if (wrap is null) throw AuthException.Validation("ownerWrappedKey is required.");
+        if (wrap.MemberId is { } member && member != userId) throw AuthException.Validation("ownerWrappedKey must be wrapped to the caller.");
+        if (wrap.Generation != 1) throw AuthException.Validation("ownerWrappedKey.generation must be 1 for a new object.");
+        if ((wrap.AlgId ?? CryptoSuite.HpkeAlgId) != CryptoSuite.HpkeAlgId) throw AuthException.Validation("ownerWrappedKey.algId is not a supported suite.");
+        if (!Base64UrlCodec.TryDecode(wrap.Ciphertext, out var ciphertext) || ciphertext.Length != WrappedKeySize)
+            throw AuthException.Validation("ownerWrappedKey.ciphertext must be a 32-byte key sealed with hybrid HPKE.");
+        if (wrap.KeyId != nameKeyId) throw AuthException.Validation("nameEnc is not sealed with the key in ownerWrappedKey.");
+        if (metadata is not null && NyxcFrame.TryParseHeader(metadata, out var header) && header.KeyId != wrap.KeyId)
+            throw AuthException.Validation("metadataEnc is not sealed with the key in ownerWrappedKey.");
+        return new Wrap(wrap.KeyId, ciphertext, CryptoSuite.HpkeAlgId);
+    }
+
+    /// <summary>Saves a create. Two creates racing for one id both pass the lookup; the loser answers like a taken id.</summary>
+    private async Task SaveCreateAsync(CancellationToken ct)
+    {
+        try
+        {
+            await db.SaveChangesAsync(ct);
+        }
+        catch (DbUpdateException e) when (e.InnerException is Npgsql.PostgresException { SqlState: Npgsql.PostgresErrorCodes.UniqueViolation })
+        {
+            throw AuthException.Conflict("id is already in use.");
+        }
+    }
+
+    // ---------------------------------------------------------------- paging and mapping
+
+    /// <summary>Pages run in id order, which for UUIDv7 is creation order. The cursor is the last id, opaque to clients.</summary>
+    private static (Guid After, int Take) Page(string? cursor, int? limit)
+    {
+        if (limit is < 1 or > MaxPageSize) throw AuthException.Validation($"limit must be 1 to {MaxPageSize}.");
+        if (cursor is null) return (Guid.Empty, limit ?? DefaultPageSize);
+        if (!Base64UrlCodec.TryDecode(cursor, out var bytes) || bytes.Length != 16) throw AuthException.Validation("cursor is malformed.");
+        return (new Guid(bytes, bigEndian: true), limit ?? DefaultPageSize);
+    }
+
+    private static PageDto<TDto> ToPage<TRow, TDto>(List<TRow> rows, int take, Func<TRow, Guid> id, Func<TRow, TDto> map)
+    {
+        var page = rows.Take(take).ToList();
+        var next = rows.Count > take ? Base64UrlCodec.Encode(id(page[^1]).ToByteArray(bigEndian: true)) : null;
+        return new PageDto<TDto>(page.Select(map).ToList(), next);
+    }
+
+    private async Task<WrappedKeysDto> StructureKeysAsync(IQueryable<StructureKeyEntity> keys, Guid userId, CancellationToken ct)
+    {
+        var rows = await keys.AsNoTracking().Where(k => k.MemberId == userId && k.RevokedAt == null).OrderBy(k => k.Generation).ToListAsync(ct);
+        return new WrappedKeysDto(rows.Select(k => new WrappedKeyDto(k.KeyId, k.MemberId, Base64UrlCodec.Encode(k.WrappedKey), k.Generation, k.AlgId)).ToList());
+    }
+
+    private static string? Encode(byte[]? bytes) => bytes is null ? null : Base64UrlCodec.Encode(bytes);
+
+    private static ProjectDto ToDto(ProjectEntity p) =>
+        new(p.Id, p.OwnerId, Base64UrlCodec.Encode(p.NameEnc), Encode(p.MetadataEnc), p.SyncPolicy, p.KeyGeneration, p.CreatedAt, p.UpdatedAt, p.DeletedAt);
+
+    private static FolderDto ToDto(FolderEntity f) =>
+        new(f.Id, f.ProjectId, f.ParentFolderId, Base64UrlCodec.Encode(f.NameEnc), Encode(f.MetadataEnc), f.SyncPolicy, f.KeyGeneration,
+            f.CreatedAt, f.UpdatedAt, f.DeletedAt);
+
+    // currentVersionSeq stays null until file_versions exists (Phase 1.1).
+    private static FileDto ToDto(FileEntity f) =>
+        new(f.Id, f.ProjectId, f.FolderId, f.OwnerId, Base64UrlCodec.Encode(f.NameEnc), Encode(f.MetadataEnc), f.ContentType, f.SyncPolicy,
+            null, f.CrdtDocId, f.KeyGeneration, f.CreatedAt, f.UpdatedAt, f.DeletedAt);
+}

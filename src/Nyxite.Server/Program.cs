@@ -33,6 +33,7 @@ builder.Services.AddNyxiteAuth(builder.Configuration);
 builder.Services.AddNyxiteBearer();
 builder.Services.AddNyxiteRateLimiting(builder.Configuration);
 builder.Services.AddNyxiteHealth();
+builder.Services.AddNyxiteBlobStore();
 builder.Services.AddNyxiteCors(builder.Configuration);
 builder.Services.AddSingleton<MetricsRegistry>();
 builder.Services.AddHostedService<MetricsServer>();
@@ -42,6 +43,7 @@ builder.Services.Configure<RouteHandlerOptions>(o => o.ThrowOnBadRequest = true)
 var app = builder.Build();
 
 app.Services.ValidateNyxiteAuthSecrets();
+app.Services.ValidateNyxiteBlobStore();
 
 app.UseNyxiteForwardedHeaders(app.Configuration);
 // Created now, so it listens before the first request is measured.
@@ -72,6 +74,7 @@ api.MapAuthEndpoints();
 api.MapAccountSecurityEndpoints();
 api.MapMeEndpoints();
 api.MapKeyEndpoints();
+api.MapStructureEndpoints();
 
 await app.RunAsync();
 return 0;

@@ -24,6 +24,11 @@ public sealed class NyxiteDbContext(DbContextOptions<NyxiteDbContext> options) :
     public DbSet<EmailOutboxEntity> EmailOutbox => Set<EmailOutboxEntity>();
     public DbSet<KtLeafEntity> KtLeaves => Set<KtLeafEntity>();
     public DbSet<KtStateEntity> KtState => Set<KtStateEntity>();
+    public DbSet<ProjectEntity> Projects => Set<ProjectEntity>();
+    public DbSet<FolderEntity> Folders => Set<FolderEntity>();
+    public DbSet<FileEntity> Files => Set<FileEntity>();
+    public DbSet<FileKeyEntity> FileKeys => Set<FileKeyEntity>();
+    public DbSet<StructureKeyEntity> StructureKeys => Set<StructureKeyEntity>();
 
     protected override void OnModelCreating(ModelBuilder modelBuilder) =>
         modelBuilder.ApplyConfigurationsFromAssembly(typeof(NyxiteDbContext).Assembly);

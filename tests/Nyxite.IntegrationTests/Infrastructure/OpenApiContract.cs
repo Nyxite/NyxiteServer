@@ -100,6 +100,12 @@ public static class OpenApiContract
         return errors;
     }
 
+    /// <summary>
+    /// Request fields the contract already documents for a later phase and the server does not read yet: the
+    /// reader-group fields (Phase 4.4) and the share and group members of a wrapped key (Phases 2.2 and 4.4).
+    /// </summary>
+    private static readonly string[] Deferred = ["readerGroupAttachment", "readerGroupWraps", "fileId", "groupId", "scopeId"];
+
     private static void CompareType(Type dto, JsonNode schema, string path, List<string> errors)
     {
         var documented = Properties(schema);
@@ -107,12 +113,13 @@ public static class OpenApiContract
             .ToDictionary(p => JsonNamingPolicy.CamelCase.ConvertName(p.Name), p => p.PropertyType);
 
         foreach (var name in actual.Keys.Except(documented.Keys)) errors.Add($"{path}.{name} is not in the contract");
-        foreach (var name in documented.Keys.Except(actual.Keys)) errors.Add($"{path}.{name} is in the contract, the server does not read it");
+        foreach (var name in documented.Keys.Except(actual.Keys).Except(Deferred)) errors.Add($"{path}.{name} is in the contract, the server does not read it");
 
         foreach (var (name, type) in actual)
         {
             if (!documented.TryGetValue(name, out var propertySchema)) continue;
-            var clr = Nullable.GetUnderlyingType(type) ?? type;
+            var clr = type.IsGenericType && type.GetGenericTypeDefinition() == typeof(Nyxite.Contracts.Structure.Patch<>) ? type.GetGenericArguments()[0] : type;
+            clr = Nullable.GetUnderlyingType(clr) ?? clr;
             if (clr == typeof(JsonElement)) continue;
             var types = Types(propertySchema);
             if (types.Count == 0) continue;

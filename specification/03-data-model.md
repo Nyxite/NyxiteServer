@@ -4,7 +4,7 @@
 
 ## 3.1 Conventions
 
-- Primary keys: `uuid` (UUIDv7, app-generated).
+- Primary keys: `uuid` (UUIDv7, app-generated). The `id` of a project, folder or file is allocated by the **client** and sent on create, because the name frame is bound to that id ([07 §7.4](07-encryption.md)) and a client builds subtrees while offline. The server requires a UUIDv7 and answers `409 conflict` for an id that is taken.
 - Timestamps: `timestamptz`, UTC.
 - Soft delete: nullable `deleted_at`; partial indexes filter `WHERE deleted_at IS NULL`. `deleted_at` is the single timestamp that drives the **staged deletion lifecycle** (Trash → grace → purge, cluster DL-1–DL-5) — see the deletion-lifecycle note under §3.3.
 - Ciphertext / wrapped keys / hashes: `bytea`.
@@ -350,12 +350,16 @@ CREATE TABLE projects (
   owner_id    uuid NOT NULL REFERENCES users(id),
   name_enc    bytea NOT NULL,              -- encrypted project name
   metadata_enc bytea,                       -- encrypted free-form metadata
+  sync_policy text NOT NULL DEFAULT 'server-default'
+                CHECK (sync_policy IN ('server-default','excluded')),  -- default for what is created in the project
+  key_generation int NOT NULL DEFAULT 1,    -- rotation generation of the project's own key (structure_keys)
   created_at  timestamptz NOT NULL DEFAULT now(),
   updated_at  timestamptz NOT NULL DEFAULT now(),
   deleted_at  timestamptz
 );
 CREATE INDEX ix_projects_owner ON projects(owner_id) WHERE deleted_at IS NULL;
 ```
+> **`sync_policy` on projects and folders is a default, not an enforcement point** (decided 2026-11-10). Clients use it as the default for what is created inside, so a default set on one device is known on the others. A folder's `NULL` follows its parent, resolved by the clients. The server enforces only `files.sync_policy` ([06 §6.2](06-sync.md)), because that is the only place where content is accepted or refused.
 
 ### folders
 ```sql
@@ -365,6 +369,8 @@ CREATE TABLE folders (
   parent_folder_id uuid REFERENCES folders(id),
   name_enc         bytea NOT NULL,          -- encrypted folder name
   metadata_enc     bytea,
+  sync_policy      text CHECK (sync_policy IS NULL OR sync_policy IN ('server-default','excluded')),  -- NULL = follow the parent
+  key_generation   int NOT NULL DEFAULT 1,  -- rotation generation of the folder's own key (structure_keys)
   created_at       timestamptz NOT NULL DEFAULT now(),
   updated_at       timestamptz NOT NULL DEFAULT now(),
   deleted_at       timestamptz
@@ -441,6 +447,7 @@ CREATE TABLE file_keys (
   key_id       uuid NOT NULL,                -- which file-key (1:1 with generation)
   wrapped_key  bytea NOT NULL,               -- FK wrapped to member's public key (HPKE)
   generation   int  NOT NULL DEFAULT 1,      -- rotation generation; 1:1 with key_id
+  alg_id       text NOT NULL,                -- wrap suite, 'X25519MLKEM768' ([07 §7.3](07-encryption.md))
   created_at   timestamptz NOT NULL DEFAULT now(),
   revoked_at   timestamptz,
   -- exactly one of a member grant or a link-share grant
@@ -449,7 +456,32 @@ CREATE TABLE file_keys (
 -- partial unique indexes replace the old composite PK (which broke on nullable member_id)
 CREATE UNIQUE INDEX uq_file_keys_member ON file_keys(file_id, key_id, member_id) WHERE member_id IS NOT NULL;
 CREATE UNIQUE INDEX uq_file_keys_share  ON file_keys(file_id, key_id, share_id)  WHERE share_id IS NOT NULL;
+CREATE INDEX ix_file_keys_member_live   ON file_keys(member_id) WHERE revoked_at IS NULL;
 ```
+> `share_id` has no FK until `shares` exists (Phase 2.2); until then every row is a member grant.
+
+### structure_keys  (wrapped project and folder keys)
+```sql
+CREATE TABLE structure_keys (
+  id           uuid PRIMARY KEY,
+  project_id   uuid REFERENCES projects(id),
+  folder_id    uuid REFERENCES folders(id),
+  member_id    uuid REFERENCES users(id),
+  share_id     uuid,                         -- FK added with shares (Phase 2.2)
+  key_id       uuid NOT NULL,
+  wrapped_key  bytea NOT NULL,               -- the object's key wrapped to the member's public key (HPKE)
+  generation   int  NOT NULL DEFAULT 1,
+  alg_id       text NOT NULL,
+  created_at   timestamptz NOT NULL DEFAULT now(),
+  revoked_at   timestamptz,
+  CHECK ((project_id IS NOT NULL) <> (folder_id IS NOT NULL)),
+  CHECK ((member_id IS NOT NULL) <> (share_id IS NOT NULL))
+);
+CREATE UNIQUE INDEX uq_structure_keys_project_member ON structure_keys(project_id, key_id, member_id) WHERE project_id IS NOT NULL AND member_id IS NOT NULL;
+CREATE UNIQUE INDEX uq_structure_keys_folder_member  ON structure_keys(folder_id, key_id, member_id)  WHERE folder_id IS NOT NULL AND member_id IS NOT NULL;
+CREATE INDEX ix_structure_keys_member_live ON structure_keys(member_id) WHERE revoked_at IS NULL;
+```
+> **Every project and every folder has its own key** (decided 2026-11-10), which seals its `name_enc` and `metadata_enc`, exactly as a file key does for a file. It is stored only wrapped, one row per member. One key per project was rejected, because access to one folder would then hand out the key to every folder name of the project. A key tree, where a parent key wraps its children, was rejected, because it does not fit the per-object wrapping that sharing and rotation ([09](09-sharing-and-acl.md)) are built on. The table is separate from `file_keys` so that each target keeps a real foreign key.
 > **The server holds only *wrapped* file keys** — it cannot unwrap them. Link-share keys are not stored at all when carried in the URL fragment ([09](09-sharing-and-acl.md)); a `share_id` row is used only if a link key is server-relayed wrapped to an ephemeral share keypair.
 > **`key_id` vs `generation`:** `key_id` (uuid) names a specific file-key; `generation` (int) is a monotonic rotation counter — **1:1** with `key_id`. `key_id` is the stable reference embedded in frames / `crdt_updates` / `file_versions`; `generation` drives staleness (`412 key_generation_stale`).
 
@@ -564,7 +596,8 @@ CREATE INDEX ix_audit_action ON audit_log(action);
 Content-addressed store behind `IBlobStore` (unchanged interface). Stores **ciphertext only**.
 
 - **Address:** client-computed BLAKE3 of plaintext; the server treats it as opaque and enforces write-once.
-- **Layout (filesystem):** sharded by hash prefix `blobs/<aa>/<bb>/<full-hash>`. **[P]**
+- **Layout (filesystem):** sharded by hash prefix `blobs/<aa>/<bb>/<full-hash>`. **[P]** A blob is written to `blobs/.tmp` and then hard-linked to its final name. The link is atomic and fails when the name exists, so a reader sees a whole blob or none and the first writer of an address wins. A rename was rejected, because it replaces an existing blob.
+- **Frame check:** the store accepts NYXC frames only (magic, version, minimum length), so plaintext sent by a faulty client is refused before it is written.
 - **Stored content:** AES-256-GCM framed ciphertext ([07 §7.4](07-encryption.md)) for blobs, snapshots, and large CRDT updates.
 - **GC:** removes blobs with no live `file_versions`/`crdt_updates`/`file_version_chunks` reference, and pending chunks past their TTL ([10](10-version-history.md), [§3.3](#file_chunks--file_version_chunks--chunked-large-files-phase-51)).
 
@@ -575,6 +608,7 @@ public interface IBlobStore
     Task<Stream>  OpenReadAsync(BlobRef reference, CancellationToken ct);  // returns ciphertext
     Task<bool>    ExistsAsync(BlobAddress address, CancellationToken ct);
     Task          DeleteAsync(BlobRef reference, CancellationToken ct);    // GC only
+    Task          ProbeAsync(CancellationToken ct);                        // startup and readiness: proves the store takes writes
 }
 ```
 

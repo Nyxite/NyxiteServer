@@ -7,8 +7,8 @@ namespace Nyxite.Server.Http;
 
 /// <summary>
 /// <c>/health/live</c> and <c>/health/ready</c> (14 §14.5). Liveness runs no check: the process answering is the signal.
-/// Readiness needs Postgres reachable and fully migrated. The blob-store and IdP checks of P0.1-SRV-5 join once those
-/// components exist; neither is implemented yet.
+/// Readiness needs Postgres reachable and fully migrated and the blob store writable. The IdP check of P0.1-SRV-5 joins
+/// once the enterprise sign-in exists.
 /// </summary>
 public static class Health
 {
@@ -16,7 +16,9 @@ public static class Health
 
     public static IServiceCollection AddNyxiteHealth(this IServiceCollection services)
     {
-        services.AddHealthChecks().AddCheck<DatabaseReadyCheck>("database", tags: [Ready]);
+        services.AddHealthChecks()
+            .AddCheck<DatabaseReadyCheck>("database", tags: [Ready])
+            .AddCheck<BlobStoreReadyCheck>("blob-store", tags: [Ready]);
         return services;
     }
 
@@ -25,6 +27,23 @@ public static class Health
         app.MapHealthChecks("/health/live", new HealthCheckOptions { Predicate = _ => false });
         app.MapHealthChecks("/health/ready", new HealthCheckOptions { Predicate = c => c.Tags.Contains(Ready) });
         return app;
+    }
+
+    private sealed class BlobStoreReadyCheck(Nyxite.BlobStore.IBlobStore blobs) : IHealthCheck
+    {
+        public async Task<HealthCheckResult> CheckHealthAsync(HealthCheckContext context, CancellationToken ct)
+        {
+            try
+            {
+                await blobs.ProbeAsync(ct);
+                return HealthCheckResult.Healthy();
+            }
+            catch (Exception e) when (e is not OperationCanceledException)
+            {
+                // No exception text: the endpoint is public and an I/O error names paths.
+                return HealthCheckResult.Unhealthy("Blob store is not writable.");
+            }
+        }
     }
 
     private sealed class DatabaseReadyCheck(IServiceScopeFactory scopes) : IHealthCheck

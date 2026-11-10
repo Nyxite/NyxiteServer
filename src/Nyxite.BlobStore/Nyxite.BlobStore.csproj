@@ -2,5 +2,7 @@
   <PropertyGroup>
     <RootNamespace>Nyxite.BlobStore</RootNamespace>
   </PropertyGroup>
-
+  <ItemGroup>
+    <ProjectReference Include="../Nyxite.Crypto/Nyxite.Crypto.csproj" />
+  </ItemGroup>
 </Project>

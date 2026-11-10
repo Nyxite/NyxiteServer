@@ -294,6 +294,234 @@ namespace Nyxite.Persistence.Migrations
                         });
                 });
 
+            modelBuilder.Entity("Nyxite.Persistence.Entities.FileEntity", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .HasColumnType("uuid")
+                        .HasColumnName("id");
+
+                    b.Property<string>("ContentType")
+                        .IsRequired()
+                        .HasColumnType("text")
+                        .HasColumnName("content_type");
+
+                    b.Property<Guid?>("CrdtDocId")
+                        .HasColumnType("uuid")
+                        .HasColumnName("crdt_doc_id");
+
+                    b.Property<DateTimeOffset>("CreatedAt")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("created_at")
+                        .HasDefaultValueSql("now()");
+
+                    b.Property<Guid?>("CurrentVersionId")
+                        .HasColumnType("uuid")
+                        .HasColumnName("current_version_id");
+
+                    b.Property<DateTimeOffset?>("DeletedAt")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("deleted_at");
+
+                    b.Property<Guid?>("FolderId")
+                        .HasColumnType("uuid")
+                        .HasColumnName("folder_id");
+
+                    b.Property<int>("KeyGeneration")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("integer")
+                        .HasDefaultValue(1)
+                        .HasColumnName("key_generation");
+
+                    b.Property<byte[]>("MetadataEnc")
+                        .HasColumnType("bytea")
+                        .HasColumnName("metadata_enc");
+
+                    b.Property<byte[]>("NameEnc")
+                        .IsRequired()
+                        .HasColumnType("bytea")
+                        .HasColumnName("name_enc");
+
+                    b.Property<Guid>("OwnerId")
+                        .HasColumnType("uuid")
+                        .HasColumnName("owner_id");
+
+                    b.Property<Guid>("ProjectId")
+                        .HasColumnType("uuid")
+                        .HasColumnName("project_id");
+
+                    b.Property<string>("SyncPolicy")
+                        .IsRequired()
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("text")
+                        .HasColumnName("sync_policy")
+                        .HasDefaultValueSql("'server-default'");
+
+                    b.Property<DateTimeOffset>("UpdatedAt")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("updated_at")
+                        .HasDefaultValueSql("now()");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("FolderId")
+                        .HasDatabaseName("ix_files_folder")
+                        .HasFilter("deleted_at IS NULL");
+
+                    b.HasIndex("OwnerId")
+                        .HasDatabaseName("ix_files_owner")
+                        .HasFilter("deleted_at IS NULL");
+
+                    b.HasIndex("ProjectId")
+                        .HasDatabaseName("ix_files_project")
+                        .HasFilter("deleted_at IS NULL");
+
+                    b.ToTable("files", null, t =>
+                        {
+                            t.HasCheckConstraint("ck_files_content_type", "content_type IN ('markdown','plaintext','ink','office','sourcecode','image','binary')");
+
+                            t.HasCheckConstraint("ck_files_sync_policy", "sync_policy IN ('server-default','excluded')");
+                        });
+                });
+
+            modelBuilder.Entity("Nyxite.Persistence.Entities.FileKeyEntity", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .HasColumnType("uuid")
+                        .HasColumnName("id");
+
+                    b.Property<string>("AlgId")
+                        .IsRequired()
+                        .HasColumnType("text")
+                        .HasColumnName("alg_id");
+
+                    b.Property<DateTimeOffset>("CreatedAt")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("created_at")
+                        .HasDefaultValueSql("now()");
+
+                    b.Property<Guid>("FileId")
+                        .HasColumnType("uuid")
+                        .HasColumnName("file_id");
+
+                    b.Property<int>("Generation")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("integer")
+                        .HasDefaultValue(1)
+                        .HasColumnName("generation");
+
+                    b.Property<Guid>("KeyId")
+                        .HasColumnType("uuid")
+                        .HasColumnName("key_id");
+
+                    b.Property<Guid?>("MemberId")
+                        .HasColumnType("uuid")
+                        .HasColumnName("member_id");
+
+                    b.Property<DateTimeOffset?>("RevokedAt")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("revoked_at");
+
+                    b.Property<Guid?>("ShareId")
+                        .HasColumnType("uuid")
+                        .HasColumnName("share_id");
+
+                    b.Property<byte[]>("WrappedKey")
+                        .IsRequired()
+                        .HasColumnType("bytea")
+                        .HasColumnName("wrapped_key");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("MemberId")
+                        .HasDatabaseName("ix_file_keys_member_live")
+                        .HasFilter("revoked_at IS NULL");
+
+                    b.HasIndex("FileId", "KeyId", "MemberId")
+                        .IsUnique()
+                        .HasDatabaseName("uq_file_keys_member")
+                        .HasFilter("member_id IS NOT NULL");
+
+                    b.HasIndex("FileId", "KeyId", "ShareId")
+                        .IsUnique()
+                        .HasDatabaseName("uq_file_keys_share")
+                        .HasFilter("share_id IS NOT NULL");
+
+                    b.ToTable("file_keys", null, t =>
+                        {
+                            t.HasCheckConstraint("ck_file_keys_member_xor_share", "(member_id IS NOT NULL) <> (share_id IS NOT NULL)");
+                        });
+                });
+
+            modelBuilder.Entity("Nyxite.Persistence.Entities.FolderEntity", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .HasColumnType("uuid")
+                        .HasColumnName("id");
+
+                    b.Property<DateTimeOffset>("CreatedAt")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("created_at")
+                        .HasDefaultValueSql("now()");
+
+                    b.Property<DateTimeOffset?>("DeletedAt")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("deleted_at");
+
+                    b.Property<int>("KeyGeneration")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("integer")
+                        .HasDefaultValue(1)
+                        .HasColumnName("key_generation");
+
+                    b.Property<byte[]>("MetadataEnc")
+                        .HasColumnType("bytea")
+                        .HasColumnName("metadata_enc");
+
+                    b.Property<byte[]>("NameEnc")
+                        .IsRequired()
+                        .HasColumnType("bytea")
+                        .HasColumnName("name_enc");
+
+                    b.Property<Guid?>("ParentFolderId")
+                        .HasColumnType("uuid")
+                        .HasColumnName("parent_folder_id");
+
+                    b.Property<Guid>("ProjectId")
+                        .HasColumnType("uuid")
+                        .HasColumnName("project_id");
+
+                    b.Property<string>("SyncPolicy")
+                        .HasColumnType("text")
+                        .HasColumnName("sync_policy");
+
+                    b.Property<DateTimeOffset>("UpdatedAt")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("updated_at")
+                        .HasDefaultValueSql("now()");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("ParentFolderId")
+                        .HasDatabaseName("ix_folders_parent")
+                        .HasFilter("deleted_at IS NULL");
+
+                    b.HasIndex("ProjectId")
+                        .HasDatabaseName("ix_folders_project")
+                        .HasFilter("deleted_at IS NULL");
+
+                    b.ToTable("folders", null, t =>
+                        {
+                            t.HasCheckConstraint("ck_folders_not_own_parent", "parent_folder_id IS NULL OR parent_folder_id <> id");
+
+                            t.HasCheckConstraint("ck_folders_sync_policy", "sync_policy IS NULL OR sync_policy IN ('server-default','excluded')");
+                        });
+                });
+
             modelBuilder.Entity("Nyxite.Persistence.Entities.IdempotencyKeyEntity", b =>
                 {
                     b.Property<Guid>("UserId")
@@ -408,6 +636,66 @@ namespace Nyxite.Persistence.Migrations
                         {
                             Id = true,
                             TreeSize = 0L
+                        });
+                });
+
+            modelBuilder.Entity("Nyxite.Persistence.Entities.ProjectEntity", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .HasColumnType("uuid")
+                        .HasColumnName("id");
+
+                    b.Property<DateTimeOffset>("CreatedAt")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("created_at")
+                        .HasDefaultValueSql("now()");
+
+                    b.Property<DateTimeOffset?>("DeletedAt")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("deleted_at");
+
+                    b.Property<int>("KeyGeneration")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("integer")
+                        .HasDefaultValue(1)
+                        .HasColumnName("key_generation");
+
+                    b.Property<byte[]>("MetadataEnc")
+                        .HasColumnType("bytea")
+                        .HasColumnName("metadata_enc");
+
+                    b.Property<byte[]>("NameEnc")
+                        .IsRequired()
+                        .HasColumnType("bytea")
+                        .HasColumnName("name_enc");
+
+                    b.Property<Guid>("OwnerId")
+                        .HasColumnType("uuid")
+                        .HasColumnName("owner_id");
+
+                    b.Property<string>("SyncPolicy")
+                        .IsRequired()
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("text")
+                        .HasColumnName("sync_policy")
+                        .HasDefaultValueSql("'server-default'");
+
+                    b.Property<DateTimeOffset>("UpdatedAt")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("updated_at")
+                        .HasDefaultValueSql("now()");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("OwnerId")
+                        .HasDatabaseName("ix_projects_owner")
+                        .HasFilter("deleted_at IS NULL");
+
+                    b.ToTable("projects", null, t =>
+                        {
+                            t.HasCheckConstraint("ck_projects_sync_policy", "sync_policy IN ('server-default','excluded')");
                         });
                 });
 
@@ -571,6 +859,82 @@ namespace Nyxite.Persistence.Migrations
                             t.HasCheckConstraint("ck_sessions_client_kind", "client_kind IN ('desktop','android','web','admin')");
 
                             t.HasCheckConstraint("ck_sessions_revoke_reason", "revoke_reason IN ('logout','admin','device_revoked','user_blocked','credential_change','reuse_detected')");
+                        });
+                });
+
+            modelBuilder.Entity("Nyxite.Persistence.Entities.StructureKeyEntity", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .HasColumnType("uuid")
+                        .HasColumnName("id");
+
+                    b.Property<string>("AlgId")
+                        .IsRequired()
+                        .HasColumnType("text")
+                        .HasColumnName("alg_id");
+
+                    b.Property<DateTimeOffset>("CreatedAt")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("created_at")
+                        .HasDefaultValueSql("now()");
+
+                    b.Property<Guid?>("FolderId")
+                        .HasColumnType("uuid")
+                        .HasColumnName("folder_id");
+
+                    b.Property<int>("Generation")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("integer")
+                        .HasDefaultValue(1)
+                        .HasColumnName("generation");
+
+                    b.Property<Guid>("KeyId")
+                        .HasColumnType("uuid")
+                        .HasColumnName("key_id");
+
+                    b.Property<Guid?>("MemberId")
+                        .HasColumnType("uuid")
+                        .HasColumnName("member_id");
+
+                    b.Property<Guid?>("ProjectId")
+                        .HasColumnType("uuid")
+                        .HasColumnName("project_id");
+
+                    b.Property<DateTimeOffset?>("RevokedAt")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("revoked_at");
+
+                    b.Property<Guid?>("ShareId")
+                        .HasColumnType("uuid")
+                        .HasColumnName("share_id");
+
+                    b.Property<byte[]>("WrappedKey")
+                        .IsRequired()
+                        .HasColumnType("bytea")
+                        .HasColumnName("wrapped_key");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("MemberId")
+                        .HasDatabaseName("ix_structure_keys_member_live")
+                        .HasFilter("revoked_at IS NULL");
+
+                    b.HasIndex("FolderId", "KeyId", "MemberId")
+                        .IsUnique()
+                        .HasDatabaseName("uq_structure_keys_folder_member")
+                        .HasFilter("folder_id IS NOT NULL AND member_id IS NOT NULL");
+
+                    b.HasIndex("ProjectId", "KeyId", "MemberId")
+                        .IsUnique()
+                        .HasDatabaseName("uq_structure_keys_project_member")
+                        .HasFilter("project_id IS NOT NULL AND member_id IS NOT NULL");
+
+                    b.ToTable("structure_keys", null, t =>
+                        {
+                            t.HasCheckConstraint("ck_structure_keys_member_xor_share", "(member_id IS NOT NULL) <> (share_id IS NOT NULL)");
+
+                            t.HasCheckConstraint("ck_structure_keys_one_target", "(project_id IS NOT NULL) <> (folder_id IS NOT NULL)");
                         });
                 });
 
@@ -808,12 +1172,69 @@ namespace Nyxite.Persistence.Migrations
                         .OnDelete(DeleteBehavior.Restrict);
                 });
 
+            modelBuilder.Entity("Nyxite.Persistence.Entities.FileEntity", b =>
+                {
+                    b.HasOne("Nyxite.Persistence.Entities.FolderEntity", null)
+                        .WithMany()
+                        .HasForeignKey("FolderId")
+                        .OnDelete(DeleteBehavior.Restrict);
+
+                    b.HasOne("Nyxite.Persistence.Entities.UserEntity", null)
+                        .WithMany()
+                        .HasForeignKey("OwnerId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+
+                    b.HasOne("Nyxite.Persistence.Entities.ProjectEntity", null)
+                        .WithMany()
+                        .HasForeignKey("ProjectId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+                });
+
+            modelBuilder.Entity("Nyxite.Persistence.Entities.FileKeyEntity", b =>
+                {
+                    b.HasOne("Nyxite.Persistence.Entities.FileEntity", null)
+                        .WithMany()
+                        .HasForeignKey("FileId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+
+                    b.HasOne("Nyxite.Persistence.Entities.UserEntity", null)
+                        .WithMany()
+                        .HasForeignKey("MemberId")
+                        .OnDelete(DeleteBehavior.Restrict);
+                });
+
+            modelBuilder.Entity("Nyxite.Persistence.Entities.FolderEntity", b =>
+                {
+                    b.HasOne("Nyxite.Persistence.Entities.FolderEntity", null)
+                        .WithMany()
+                        .HasForeignKey("ParentFolderId")
+                        .OnDelete(DeleteBehavior.Restrict);
+
+                    b.HasOne("Nyxite.Persistence.Entities.ProjectEntity", null)
+                        .WithMany()
+                        .HasForeignKey("ProjectId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+                });
+
             modelBuilder.Entity("Nyxite.Persistence.Entities.IdempotencyKeyEntity", b =>
                 {
                     b.HasOne("Nyxite.Persistence.Entities.UserEntity", null)
                         .WithMany()
                         .HasForeignKey("UserId")
                         .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+                });
+
+            modelBuilder.Entity("Nyxite.Persistence.Entities.ProjectEntity", b =>
+                {
+                    b.HasOne("Nyxite.Persistence.Entities.UserEntity", null)
+                        .WithMany()
+                        .HasForeignKey("OwnerId")
+                        .OnDelete(DeleteBehavior.Restrict)
                         .IsRequired();
                 });
 
@@ -852,6 +1273,24 @@ namespace Nyxite.Persistence.Migrations
                         .HasForeignKey("UserId")
                         .OnDelete(DeleteBehavior.Restrict)
                         .IsRequired();
+                });
+
+            modelBuilder.Entity("Nyxite.Persistence.Entities.StructureKeyEntity", b =>
+                {
+                    b.HasOne("Nyxite.Persistence.Entities.FolderEntity", null)
+                        .WithMany()
+                        .HasForeignKey("FolderId")
+                        .OnDelete(DeleteBehavior.Restrict);
+
+                    b.HasOne("Nyxite.Persistence.Entities.UserEntity", null)
+                        .WithMany()
+                        .HasForeignKey("MemberId")
+                        .OnDelete(DeleteBehavior.Restrict);
+
+                    b.HasOne("Nyxite.Persistence.Entities.ProjectEntity", null)
+                        .WithMany()
+                        .HasForeignKey("ProjectId")
+                        .OnDelete(DeleteBehavior.Restrict);
                 });
 
             modelBuilder.Entity("Nyxite.Persistence.Entities.UserKeyEntity", b =>

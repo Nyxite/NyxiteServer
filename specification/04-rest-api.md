@@ -60,10 +60,22 @@ Same shape as a normal CRUD tree, but **names are ciphertext**:
 | Method | Path | Purpose |
 |--------|------|---------|
 | `GET/POST` | `/projects`, `/projects/{id}` (+ PATCH/DELETE) | Project CRUD (`nameEnc`) |
-| `GET` | `/projects/{id}/folders` | List folders (tree/flat) |
+| `GET` | `/projects/{id}/folders` | List all folders of a project, flat; the client builds the tree from `parentFolderId` |
+| `GET` | `/projects/{id}/files` | List all files of a project, flat; files at the project root have `folderId` null |
 | `POST/GET/PATCH/DELETE` | `/folders`, `/folders/{id}` | Folder CRUD/move (`nameEnc`, `parentFolderId`) |
-| `GET` | `/folders/{id}/files` | List files in a folder |
+| `GET` | `/folders/{id}/files` | List files directly in a folder |
+| `GET` | `/projects/{id}/keys`, `/folders/{id}/keys` | The caller's wrapped key(s) of the project or folder ([03 `structure_keys`](03-data-model.md)) |
 | `POST/GET/PATCH/DELETE` | `/files`, `/files/{id}` | File CRUD/move/policy. `POST` sets `contentType` (**immutable**); `PATCH` updates **only** `nameEnc`, `syncPolicy`, `parentFolderId` (move), `metadataEnc` |
+
+Rules of the structure endpoints **[P]**:
+
+- **Create.** The client allocates `id` (UUIDv7) and sends `ownerWrappedKey`, the object's own key wrapped to itself, with every project, folder and file. The server checks what it can without a key: `nameEnc` and `metadataEnc` are NYXC frames within `NYXITE__Limits__NameEncMaxBytes` / `__MetadataEncMaxBytes`, their `key_id` is the key in `ownerWrappedKey`, and the wrapped key has the size of a 32-byte key sealed with hybrid HPKE. `Idempotency-Key` is required. A replay answers the stored response, an `id` that is taken answers `409 conflict`.
+- **Update.** `PATCH` changes only what it names. A field sent as `null` is a value where null means something: `parentFolderId` null moves to the project root, `metadataEnc` null clears it, a folder's `syncPolicy` null follows the parent. A new `nameEnc` or `metadataEnc` must name the object's current key.
+- **Move.** A parent must be a live folder of the same project, otherwise `404`. A folder cannot be moved into itself or its subtree (`400`). Moves of one project run one after the other, so two crossing moves cannot close a loop.
+- **Delete.** Always a soft delete (DL-1). A folder takes its subtree with it and a project everything in it, with one `deleted_at` and one audit event that carries the counts. Trashed objects answer `404` and are left out of listings. Listing Trash and restoring from it are not part of this phase.
+- **Who may write.** A session on an **active device**, because only a device that holds the identity key can have produced the names and wrapped keys (`403 device_not_active` otherwise), and an account that is not blocked (`403 account_blocked`). Reading needs a full session only.
+- **Reach.** Until shares exist (Phase 2.2) reach is ownership of the project. Everything else answers `404`.
+- **Paging.** Lists run in id order, which for UUIDv7 is creation order, with the standard envelope and `limit` 1 to 200, default 50.
 
 ### File content (ciphertext)
 | Method | Path | Purpose |

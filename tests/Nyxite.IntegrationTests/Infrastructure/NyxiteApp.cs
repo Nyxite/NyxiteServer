@@ -79,6 +79,7 @@ public sealed class NyxiteApp : WebApplicationFactory<Program>
         _settings = new Dictionary<string, string?>
         {
             ["Database:ConnectionString"] = connectionString,
+            ["BlobStore:RootPath"] = BlobRoot,
             ["Auth:Issuer"] = Origin,
             ["Auth:Audience"] = "nyxite-test",
             ["Auth:TokenSigningKey"] = $"1:{Key(9)}",
@@ -107,6 +108,15 @@ public sealed class NyxiteApp : WebApplicationFactory<Program>
     public ManualTimeProvider Clock { get; }
     public CapturingEmailSender Email { get; } = new();
     public string ConnectionString { get; }
+
+    /// <summary>The blob root of this app instance, removed with it.</summary>
+    public string BlobRoot { get; } = Path.Combine(Path.GetTempPath(), "nyxite-blobs-" + Guid.NewGuid().ToString("N"));
+
+    public override async ValueTask DisposeAsync()
+    {
+        await base.DisposeAsync();
+        if (Directory.Exists(BlobRoot)) Directory.Delete(BlobRoot, recursive: true);
+    }
 
     protected override void ConfigureWebHost(IWebHostBuilder builder)
     {

@@ -82,6 +82,7 @@ magic(4) | version(1) | key_id(16) | nonce(12) | ciphertext(...) | gcm_tag(16)
 ```
 - **magic** = ASCII `"NYXC"` (`0x4E 0x59 0x58 0x43`); **version** = `0x01`.
 - **AAD** = `magic ‖ version ‖ key_id ‖ file_id(16) ‖ object_kind(1)` — binds the frame to its file and kind.
+- **Which key seals a name.** `name` and `metadata` frames are sealed with the key of the object they belong to: a file's with its file key, a project's or folder's with that object's own key ([03 `structure_keys`](03-data-model.md)). `file_id` in the AAD is the id of that object, also for a project or folder, which is why the client allocates ids ([03 §3.1](03-data-model.md)).
 - **`object_kind`** enum: `blob=1`, `snapshot=2`, `crdt=3`, `name=4`, `metadata=5`, `awareness=6`, `settings=7`, `chunk=8`, `chunk_manifest=9` ([§7.4a](#74a-chunked-encryption-for-large-files-phase-51-p)).
 - **HPKE wrap output framing** (a wrapped file-key): `enc(HPKE encapsulated key) ‖ ciphertext ‖ tag(16)`. Under the hybrid KEM (X-Wing, §7.3) `enc` is the **ML-KEM-768 ciphertext (1088 B) followed by the X25519 share (32 B)**, 1120 B in total, rather than a bare 32 B share. The `alg_id` fixes its length.
 

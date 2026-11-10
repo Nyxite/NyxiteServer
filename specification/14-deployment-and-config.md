@@ -31,8 +31,9 @@
 |-----------|---------|
 | `NYXITE__Database__ConnectionString` | PostgreSQL DSN of the server's login role, a member of `nyxite_app` ([03 §3.5](03-data-model.md)) |
 | `NYXITE__Database__MigrationConnectionString` | PostgreSQL DSN of the migration role (table owner, `CREATEROLE`), read only by `nyxite-server migrate` |
-| `NYXITE__BlobStore__Provider` | `filesystem` \| `s3` |
-| `NYXITE__BlobStore__RootPath` | Filesystem blob root (content-addressed, sharded) |
+| `NYXITE__BlobStore__Provider` | `filesystem` \| `s3`. Only `filesystem` is implemented; anything else stops the start |
+| `NYXITE__BlobStore__RootPath` | Filesystem blob root (content-addressed, sharded). **Required**: the server refuses to start when it is unset or not writable |
+| `NYXITE__Limits__NameEncMaxBytes` / `__MetadataEncMaxBytes` | Largest accepted `nameEnc` / `metadataEnc`, frame overhead included ([04 §4.3](04-rest-api.md)). Defaults **2048** / **65536** **[P]**. A 255 character name is about 1 KiB sealed |
 | `NYXITE__BlobStore__S3__*` | Endpoint/bucket/credentials when `s3` |
 | `NYXITE__Auth__TokenSigningKey` (secret) | **Native** token-signing key — signs/validates the server's own access + refresh tokens (always required). Format `{version}:{base64 key}` entries separated by `;`, at least 32 bytes each. The highest version signs and becomes the `kid`, older versions only validate, so a rollover keeps live tokens valid |
 | `NYXITE__Auth__PasswordPepper` (secret; deploy secret `PASSWORD_PEPPER`) | **Versioned, rotatable** account-password **pepper** — the HMAC-SHA256 key applied as a pre-hash before Argon2id ([08 §8.1](08-authentication.md)). Held **outside Postgres** (alongside DB creds) so a **DB-only leak yields uncrackable verifiers**. Format `{version}:{key}` (or a versioned set); rotation adds a new version and **re-peppers lazily at each user's next login**. Account-auth only — **not** applied to the recovery-phrase KDF |
@@ -104,7 +105,7 @@
 | Endpoint | Purpose |
 |----------|---------|
 | `GET /health/live` | Liveness |
-| `GET /health/ready` | Readiness (deps healthy): Postgres reachable with no pending migration. The blob-store and IdP checks of P0.1-SRV-5 join when those components exist. `503` otherwise, without error detail, because the endpoint is public |
+| `GET /health/ready` | Readiness (deps healthy): Postgres reachable with no pending migration, and the blob store writable. The IdP check of P0.1-SRV-5 joins when the enterprise sign-in exists. `503` otherwise, without error detail, because the endpoint is public |
 | `GET /metrics` | Prometheus text format, on its own port `NYXITE__Metrics__Port` and off when unset |
 
 - **Metrics on a separate port.** Metrics show usage patterns, so they must not be public. The listener carries nothing but `/metrics` and the reverse proxy only forwards the API port, so only monitoring inside the deployment network reaches it and no token has to be managed. Serving it on the API port behind a bearer token was rejected, because the endpoint would then be reachable from the internet.

@@ -12,7 +12,9 @@ info:
     - The server is zero-knowledge. Every `*Enc` field, wrapped key, blob and CRDT update is
       client-side ciphertext the server cannot read.
     - Binary values in JSON are base64url without padding (`Bytes`).
-    - IDs are UUIDv7 strings, timestamps RFC 3339 UTC.
+    - IDs are UUIDv7 strings, timestamps RFC 3339 UTC. The client allocates the `id` of a project, folder
+      or file it creates, because the encrypted name is bound to that id and a client builds subtrees
+      while offline. An `id` that is taken answers `409 conflict`.
     - `Idempotency-Key` is required on every POST that creates something.
     - Errors are RFC 9457 `application/problem+json` with a stable `code`.
     - Every operation can answer `400 validation_failed`, `401`, `403`, `429 rate_limited`, `500 internal` and
@@ -781,10 +783,13 @@ paths:
           application/json:
             schema:
               type: object
-              required: [nameEnc]
+              required: [id, nameEnc, ownerWrappedKey]
               properties:
+                id: { $ref: '#/components/schemas/Uuid' }
                 nameEnc: { $ref: '#/components/schemas/Bytes' }
+                metadataEnc: { $ref: '#/components/schemas/Bytes' }
                 syncPolicy: { $ref: '#/components/schemas/SyncPolicy' }
+                ownerWrappedKey: { $ref: '#/components/schemas/WrappedKey', description: "The project's own key, wrapped to the caller; it seals nameEnc and metadataEnc" }
                 readerGroupAttachment: { $ref: '#/components/schemas/Bytes' }
       responses:
         '201':
@@ -817,6 +822,7 @@ paths:
               type: object
               properties:
                 nameEnc: { $ref: '#/components/schemas/Bytes' }
+                metadataEnc: { oneOf: [{ $ref: '#/components/schemas/Bytes' }, { type: 'null' }], description: 'null clears it' }
                 syncPolicy: { $ref: '#/components/schemas/SyncPolicy' }
                 readerGroupAttachment: { $ref: '#/components/schemas/Bytes' }
       responses:
@@ -845,6 +851,31 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/FolderPage' }
         '404': { $ref: '#/components/responses/Problem' }
+  /projects/{id}/files:
+    parameters: [{ $ref: '#/components/parameters/Id' }]
+    get:
+      tags: [structure]
+      summary: List all files of a project, flat (those at the project root have folderId null)
+      parameters: [{ $ref: '#/components/parameters/Cursor' }, { $ref: '#/components/parameters/Limit' }]
+      responses:
+        '200':
+          description: Page of files.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/FilePage' }
+        '404': { $ref: '#/components/responses/Problem' }
+  /projects/{id}/keys:
+    parameters: [{ $ref: '#/components/parameters/Id' }]
+    get:
+      tags: [keys]
+      summary: The caller's wrapped project key(s), which open the project's name and metadata
+      responses:
+        '200':
+          description: Wrapped keys.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/WrappedKeyList' }
+        '404': { $ref: '#/components/responses/Problem' }
   /folders:
     post:
       tags: [structure]
@@ -856,12 +887,15 @@ paths:
           application/json:
             schema:
               type: object
-              required: [projectId, nameEnc]
+              required: [id, projectId, nameEnc, ownerWrappedKey]
               properties:
+                id: { $ref: '#/components/schemas/Uuid' }
                 projectId: { $ref: '#/components/schemas/Uuid' }
                 parentFolderId: { $ref: '#/components/schemas/NullableUuid' }
                 nameEnc: { $ref: '#/components/schemas/Bytes' }
-                syncPolicy: { $ref: '#/components/schemas/SyncPolicy' }
+                metadataEnc: { $ref: '#/components/schemas/Bytes' }
+                syncPolicy: { $ref: '#/components/schemas/SyncPolicy', description: 'Omitted = follow the parent' }
+                ownerWrappedKey: { $ref: '#/components/schemas/WrappedKey', description: "The folder's own key, wrapped to the caller; it seals nameEnc and metadataEnc" }
       responses:
         '201':
           description: Created.
@@ -870,6 +904,7 @@ paths:
               schema: { $ref: '#/components/schemas/Folder' }
         '400': { $ref: '#/components/responses/Problem' }
         '404': { $ref: '#/components/responses/Problem' }
+        '409': { $ref: '#/components/responses/Problem' }
   /folders/{id}:
     parameters: [{ $ref: '#/components/parameters/Id' }]
     get:
@@ -893,8 +928,9 @@ paths:
               type: object
               properties:
                 nameEnc: { $ref: '#/components/schemas/Bytes' }
-                parentFolderId: { $ref: '#/components/schemas/NullableUuid' }
-                syncPolicy: { $ref: '#/components/schemas/SyncPolicy' }
+                parentFolderId: { $ref: '#/components/schemas/NullableUuid', description: 'null moves the folder to the project root' }
+                metadataEnc: { oneOf: [{ $ref: '#/components/schemas/Bytes' }, { type: 'null' }], description: 'null clears it' }
+                syncPolicy: { oneOf: [{ $ref: '#/components/schemas/SyncPolicy' }, { type: 'null' }], description: 'null = follow the parent' }
                 readerGroupAttachment: { $ref: '#/components/schemas/Bytes' }
       responses:
         '200':
@@ -923,6 +959,18 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/FilePage' }
         '404': { $ref: '#/components/responses/Problem' }
+  /folders/{id}/keys:
+    parameters: [{ $ref: '#/components/parameters/Id' }]
+    get:
+      tags: [keys]
+      summary: The caller's wrapped folder key(s), which open the folder's name and metadata
+      responses:
+        '200':
+          description: Wrapped keys.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/WrappedKeyList' }
+        '404': { $ref: '#/components/responses/Problem' }
   /files:
     post:
       tags: [structure]
@@ -941,6 +989,7 @@ paths:
               schema: { $ref: '#/components/schemas/File' }
         '400': { $ref: '#/components/responses/Problem' }
         '404': { $ref: '#/components/responses/Problem' }
+        '409': { $ref: '#/components/responses/Problem' }
   /files/{id}:
     parameters: [{ $ref: '#/components/parameters/Id' }]
     get:
@@ -965,8 +1014,8 @@ paths:
               properties:
                 nameEnc: { $ref: '#/components/schemas/Bytes' }
                 syncPolicy: { $ref: '#/components/schemas/SyncPolicy' }
-                parentFolderId: { $ref: '#/components/schemas/NullableUuid' }
-                metadataEnc: { $ref: '#/components/schemas/Bytes' }
+                parentFolderId: { $ref: '#/components/schemas/NullableUuid', description: 'null moves the file to the project root' }
+                metadataEnc: { oneOf: [{ $ref: '#/components/schemas/Bytes' }, { type: 'null' }], description: 'null clears it' }
       responses:
         '200':
           description: Updated.
@@ -1198,11 +1247,7 @@ paths:
           description: Wrapped keys.
           content:
             application/json:
-              schema:
-                type: object
-                required: [items]
-                properties:
-                  items: { type: array, items: { $ref: '#/components/schemas/WrappedKey' } }
+              schema: { $ref: '#/components/schemas/WrappedKeyList' }
         '404': { $ref: '#/components/responses/Problem' }
     post:
       tags: [keys]
@@ -2833,12 +2878,14 @@ components:
 
     Project:
       type: object
-      required: [id, ownerId, nameEnc, syncPolicy, createdAt, updatedAt]
+      required: [id, ownerId, nameEnc, syncPolicy, keyGeneration, createdAt, updatedAt]
       properties:
         id: { $ref: '#/components/schemas/Uuid' }
         ownerId: { $ref: '#/components/schemas/Uuid' }
         nameEnc: { $ref: '#/components/schemas/Bytes' }
-        syncPolicy: { $ref: '#/components/schemas/SyncPolicy' }
+        metadataEnc: { oneOf: [{ $ref: '#/components/schemas/Bytes' }, { type: 'null' }] }
+        syncPolicy: { $ref: '#/components/schemas/SyncPolicy', description: 'Default for what is created in the project; the server enforces only the value on each file' }
+        keyGeneration: { type: integer, description: "Rotation generation of the project's own key" }
         readerGroupAttachment: { oneOf: [{ $ref: '#/components/schemas/Bytes' }, { type: 'null' }] }
         createdAt: { type: string, format: date-time }
         updatedAt: { type: string, format: date-time }
@@ -2851,13 +2898,15 @@ components:
         nextCursor: { type: [string, 'null'] }
     Folder:
       type: object
-      required: [id, projectId, parentFolderId, nameEnc, createdAt, updatedAt]
+      required: [id, projectId, parentFolderId, nameEnc, keyGeneration, createdAt, updatedAt]
       properties:
         id: { $ref: '#/components/schemas/Uuid' }
         projectId: { $ref: '#/components/schemas/Uuid' }
         parentFolderId: { $ref: '#/components/schemas/NullableUuid' }
         nameEnc: { $ref: '#/components/schemas/Bytes' }
-        syncPolicy: { $ref: '#/components/schemas/SyncPolicy' }
+        metadataEnc: { oneOf: [{ $ref: '#/components/schemas/Bytes' }, { type: 'null' }] }
+        syncPolicy: { oneOf: [{ $ref: '#/components/schemas/SyncPolicy' }, { type: 'null' }], description: 'null = follow the parent; a default for what is created in the folder' }
+        keyGeneration: { type: integer, description: "Rotation generation of the folder's own key" }
         readerGroupAttachment: { oneOf: [{ $ref: '#/components/schemas/Bytes' }, { type: 'null' }] }
         createdAt: { type: string, format: date-time }
         updatedAt: { type: string, format: date-time }
@@ -2894,8 +2943,9 @@ components:
         nextCursor: { type: [string, 'null'] }
     CreateFileRequest:
       type: object
-      required: [projectId, nameEnc, contentType, ownerWrappedKey]
+      required: [id, projectId, nameEnc, contentType, ownerWrappedKey]
       properties:
+        id: { $ref: '#/components/schemas/Uuid' }
         projectId: { $ref: '#/components/schemas/Uuid' }
         folderId: { $ref: '#/components/schemas/NullableUuid' }
         nameEnc: { $ref: '#/components/schemas/Bytes' }
@@ -2929,6 +2979,11 @@ components:
         authorId: { $ref: '#/components/schemas/NullableUuid' }
         createdAt: { type: string, format: date-time }
 
+    WrappedKeyList:
+      type: object
+      required: [items]
+      properties:
+        items: { type: array, items: { $ref: '#/components/schemas/WrappedKey' } }
     WrappedKey:
       type: object
       required: [keyId, ciphertext, generation]

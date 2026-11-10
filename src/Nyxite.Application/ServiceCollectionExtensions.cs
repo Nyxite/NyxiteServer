@@ -43,6 +43,8 @@ public static class ServiceCollectionExtensions
         services.AddScoped<KeyDirectoryService>();
         services.AddScoped<DeviceService>();
         services.AddScoped<RecoveryService>();
+        services.AddOptions<Structure.StructureOptions>().Bind(configuration.GetSection(Structure.StructureOptions.Section));
+        services.AddScoped<Structure.StructureService>();
         services.TryAddSingleton(LicenseKeys.Embedded);
         services.AddSingleton<IEntitlement, Entitlement>();
         services.AddOptions<RetentionOptions>().Bind(configuration.GetSection(RetentionOptions.Section));
