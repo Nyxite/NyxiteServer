@@ -120,6 +120,8 @@ public sealed class NyxiteApp : WebApplicationFactory<Program>
             // Tests send queued mail themselves (Flush), so a mail is never in flight when a test looks for it.
             var worker = services.Single(d => d.ImplementationType == typeof(EmailOutboxWorker));
             services.Remove(worker);
+            // 04 §4.1 contract drift: every response any test receives is checked against openapi/v1.yaml.
+            services.AddSingleton<IStartupFilter>(new ContractCheckFilter());
             _configureServices?.Invoke(services);
         });
     }

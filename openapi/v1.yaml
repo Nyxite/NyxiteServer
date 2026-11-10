@@ -15,6 +15,9 @@ info:
     - IDs are UUIDv7 strings, timestamps RFC 3339 UTC.
     - `Idempotency-Key` is required on every POST that creates something.
     - Errors are RFC 9457 `application/problem+json` with a stable `code`.
+    - Every operation can answer `400 validation_failed`, `401`, `403`, `429 rate_limited`, `500 internal` and
+      `503 unavailable` with a `Problem` body. They are cross-cutting and listed on an operation only where its
+      description has something specific to say. Every other error status an operation can answer is listed on it.
     - A caller without reach to an id-addressed resource gets `404`, never `403`
       (existence-hiding, specification/04-rest-api.md §4.4).
     - The real-time relay is the SignalR hub `RelayHub` (MessagePack), specified in
@@ -498,6 +501,7 @@ paths:
       responses:
         '302': { description: 'Redirect to the allowlisted redirectUri with `handoff`.' }
         '400': { $ref: '#/components/responses/Problem' }
+        '404': { $ref: '#/components/responses/Problem' }
   /auth/oidc/token:
     post:
       tags: [auth]
@@ -519,6 +523,7 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/TokenPair' }
         '401': { $ref: '#/components/responses/Problem' }
+        '404': { $ref: '#/components/responses/Problem' }
   /auth/refresh:
     post:
       tags: [auth]
@@ -2625,7 +2630,10 @@ paths:
       security: []
       summary: Liveness
       responses:
-        '200': { description: 'Alive.' }
+        '200':
+          description: Alive.
+          content:
+            text/plain: { schema: { type: string } }
   /health/ready:
     servers: [{ url: 'https://{host}', variables: { host: { default: nyxite.example.org } } }]
     get:
@@ -2633,8 +2641,14 @@ paths:
       security: []
       summary: Readiness (dependencies healthy)
       responses:
-        '200': { description: 'Ready.' }
-        '503': { description: 'Not ready.' }
+        '200':
+          description: Ready.
+          content:
+            text/plain: { schema: { type: string } }
+        '503':
+          description: Not ready. The body is the bare status word, never a reason.
+          content:
+            text/plain: { schema: { type: string } }
   /openapi/v1.json:
     servers: [{ url: 'https://{host}', variables: { host: { default: nyxite.example.org } } }]
     get:

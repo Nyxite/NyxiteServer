@@ -58,6 +58,29 @@ public sealed class OperationsTests(PostgresFixture pg)
         Assert.Empty(missing);
     }
 
+    /// <summary>04 §4.1 contract drift: every JSON body the server reads has the property names and types the contract documents.</summary>
+    [Fact]
+    public async Task Every_request_body_matches_the_openapi_contract()
+    {
+        await using var app = new NyxiteApp(await pg.CreateDatabaseAsync());
+        var drift = new List<string>();
+        var checkedBodies = 0;
+        foreach (var endpoint in app.Services.GetRequiredService<EndpointDataSource>().Endpoints.OfType<RouteEndpoint>())
+        {
+            if (endpoint.Metadata.GetMetadata<Microsoft.AspNetCore.Http.Metadata.IAcceptsMetadata>() is not { RequestType: { } body }) continue;
+            foreach (var method in endpoint.Metadata.GetMetadata<HttpMethodMetadata>()?.HttpMethods ?? [])
+            {
+                // A route the contract lacks is reported by Every_mapped_route_is_in_the_openapi_contract.
+                if (OpenApiContract.OperationOfRoute(method, endpoint.RoutePattern.RawText!) is not { } operation) continue;
+                checkedBodies++;
+                drift.AddRange(OpenApiContract.CheckRequestType(operation, body).Select(e => $"{method} {endpoint.RoutePattern.RawText}: {e}"));
+            }
+        }
+
+        Assert.Empty(drift);
+        Assert.True(checkedBodies > 20, $"Only {checkedBodies} request bodies were found, the endpoint metadata is not what this test expects.");
+    }
+
     [Fact]
     public async Task Health_live_and_ready_answer_200_on_a_migrated_database()
     {

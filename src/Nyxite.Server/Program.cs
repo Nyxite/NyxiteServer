@@ -50,6 +50,9 @@ app.UseNyxiteHardening();
 app.UseExceptionHandler(new ExceptionHandlerOptions
 {
     ExceptionHandler = Problems.HandleExceptionAsync,
+    // not_found is a regular problem answer (existence-hiding, 04 §4.4). Without this the middleware accepts a 404
+    // only when the body write has already started the response, and turns it into a 500 otherwise.
+    AllowStatusCode404Response = true,
     // A wrong code or a 401 is a normal answer; logging it as an unhandled error would bury real failures.
     SuppressDiagnosticsCallback = context => Hardening.IsExpected(context.Exception),
 });
