@@ -50,6 +50,7 @@ public static class ServiceCollectionExtensions
         services.AddScoped<Structure.StructureService>();
         services.AddOptions<Content.ContentOptions>().Bind(configuration.GetSection(Structure.StructureOptions.Section));
         services.AddOptions<Content.RelayOptions>().Bind(configuration.GetSection(Content.RelayOptions.Section));
+        services.AddScoped<Content.IFileAccess, Content.OwnerFileAccess>();
         services.AddScoped<Content.ContentService>();
         services.AddScoped<Content.CrdtLogPruner>();
         services.AddScoped<Content.BlobCollector>();

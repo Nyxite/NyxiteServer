@@ -257,54 +257,6 @@ public sealed class ContentTests(PostgresFixture pg)
         Assert.Equal(31, next.GetProperty("acks")[0].GetProperty("seq").GetInt64());
     }
 
-    private sealed class Peer(HubConnection connection) : IAsyncDisposable
-    {
-        public List<EncryptedUpdate> Updates { get; } = [];
-        public List<byte[]> Awareness { get; } = [];
-        public List<PresenceDto[]> Presence { get; } = [];
-        public List<(long CrdtSeq, long VersionSeq)> Snapshots { get; } = [];
-        public List<string> Errors { get; } = [];
-        public HubConnection Connection => connection;
-
-        public static async Task<Peer> ConnectAsync(NyxiteApp app, string? token, bool webSockets = false)
-        {
-            var connection = new HubConnectionBuilder()
-                .WithUrl("http://localhost" + RelayHub.Path, o =>
-                {
-                    o.HttpMessageHandlerFactory = _ => app.Server.CreateHandler();
-                    o.Transports = webSockets
-                        ? Microsoft.AspNetCore.Http.Connections.HttpTransportType.WebSockets
-                        : Microsoft.AspNetCore.Http.Connections.HttpTransportType.LongPolling;
-                    // The upgrade carries the credential as access_token in the URL, as a browser has to send it.
-                    o.WebSocketFactory = async (context, ct) =>
-                    {
-                        var uri = token is null ? context.Uri : new Uri(context.Uri + "&access_token=" + Uri.EscapeDataString(token));
-                        return await app.Server.CreateWebSocketClient().ConnectAsync(uri, ct);
-                    };
-                    if (token is not null) o.AccessTokenProvider = () => Task.FromResult<string?>(token);
-                })
-                .AddMessagePackProtocol()
-                .Build();
-            var peer = new Peer(connection);
-            connection.On<string, EncryptedUpdate[]>("OnUpdates", (_, updates) => { lock (peer.Updates) peer.Updates.AddRange(updates); });
-            connection.On<string, EncryptedUpdate>("OnUpdate", (_, update) => { lock (peer.Updates) peer.Updates.Add(update); });
-            connection.On<string, byte[]>("OnAwareness", (_, bytes) => { lock (peer.Awareness) peer.Awareness.Add(bytes); });
-            connection.On<string, PresenceDto[]>("OnPresence", (_, roster) => { lock (peer.Presence) peer.Presence.Add(roster); });
-            connection.On<string, long, long>("OnSnapshot", (_, crdtSeq, versionSeq) => { lock (peer.Snapshots) peer.Snapshots.Add((crdtSeq, versionSeq)); });
-            connection.On<string, string, string>("OnError", (_, code, _) => { lock (peer.Errors) peer.Errors.Add(code); });
-            await connection.StartAsync();
-            return peer;
-        }
-
-        public static async Task UntilAsync(Func<bool> condition)
-        {
-            for (var i = 0; i < 200 && !condition(); i++) await Task.Delay(25);
-            Assert.True(condition(), "The relay did not deliver in time.");
-        }
-
-        public ValueTask DisposeAsync() => connection.DisposeAsync();
-    }
-
     /// <summary>P1.1-TC-1, server side: what one device submits reaches the other through the relay, in order and unread.</summary>
     [Fact]
     public async Task Relay_forwards_encrypted_updates_between_devices()
@@ -316,53 +268,53 @@ public sealed class ContentTests(PostgresFixture pg)
         var fileId = file.Id.ToString();
         EncryptedUpdate Update(string text) => new(0, Seal(file, text, ObjectKind.Crdt), file.KeyId.ToString());
 
-        await using var d1 = await Peer.ConnectAsync(app, token);
-        await using var d2 = await Peer.ConnectAsync(app, token);
+        await using var d1 = await RelayPeer.ConnectAsync(app, token);
+        await using var d2 = await RelayPeer.ConnectAsync(app, token);
         await d1.Connection.InvokeAsync("JoinDocument", fileId, 0L);
         await d2.Connection.InvokeAsync("JoinDocument", fileId, 0L);
-        await Peer.UntilAsync(() => d1.Presence.Count >= 2);
+        await RelayPeer.UntilAsync(() => d1.Presence.Count >= 2);
         Assert.Single(d1.Presence[^1]);
 
         // D1 types. The returned number is the acknowledgement that the update is stored.
         Assert.Equal(1, await d1.Connection.InvokeAsync<long>("SubmitUpdate", fileId, Update("Hello")));
         Assert.Equal(2, await d1.Connection.InvokeAsync<long>("SubmitUpdate", fileId, Update(" world")));
-        await Peer.UntilAsync(() => d2.Updates.Count == 2 && d1.Updates.Count == 2);
+        await RelayPeer.UntilAsync(() => d2.Updates.Count == 2 && d1.Updates.Count == 2);
         Assert.Equal([1L, 2L], d2.Updates.Select(u => u.Seq));
         Assert.Equal("Hello world", string.Concat(d2.Updates.Select(u => Open(file, u.Ciphertext, ObjectKind.Crdt))));
         Assert.Equal(file.KeyId.ToString(), d2.Updates[0].KeyId);
 
         // An update that arrives over REST reaches the room too.
         await s.PostAsync($"/files/{file.Id}/crdt/log", Updates(file, (Guid.CreateVersion7(), "!")), null);
-        await Peer.UntilAsync(() => d2.Updates.Count == 3);
+        await RelayPeer.UntilAsync(() => d2.Updates.Count == 3);
 
         // Awareness goes to the others only and is not stored.
         await d1.Connection.InvokeAsync("SubmitAwareness", fileId, new byte[] { 1, 2, 3 });
-        await Peer.UntilAsync(() => d2.Awareness.Count == 1);
+        await RelayPeer.UntilAsync(() => d2.Awareness.Count == 1);
         Assert.Empty(d1.Awareness);
 
         // A device that joins later starts from the snapshot and its cursor.
         await PutSnapshotAsync(s, file, 2, "Hello world");
-        await using var late = await Peer.ConnectAsync(app, token);
+        await using var late = await RelayPeer.ConnectAsync(app, token);
         await late.Connection.InvokeAsync("JoinDocument", fileId, 2L);
-        await Peer.UntilAsync(() => late.Updates.Count == 1 && late.Snapshots.Count == 1);
+        await RelayPeer.UntilAsync(() => late.Updates.Count == 1 && late.Snapshots.Count == 1);
         Assert.Equal(3, late.Updates[0].Seq);
         Assert.Equal((2L, 1L), late.Snapshots[0]);
 
         // Leaving ends delivery.
         await d2.Connection.InvokeAsync("LeaveDocument", fileId);
         await d1.Connection.InvokeAsync<long>("SubmitUpdate", fileId, Update("?"));
-        await Peer.UntilAsync(() => late.Updates.Count == 2);
+        await RelayPeer.UntilAsync(() => late.Updates.Count == 2);
         Assert.Equal(3, d2.Updates.Count);
 
         // Someone without reach gets nothing, and a room cannot be written to without joining rights either.
-        await using var stranger = await Peer.ConnectAsync(app, strangerToken);
+        await using var stranger = await RelayPeer.ConnectAsync(app, strangerToken);
         var denied = await Assert.ThrowsAsync<HubException>(() => stranger.Connection.InvokeAsync("JoinDocument", fileId, 0L));
         Assert.Contains("not_found", denied.Message);
         await Assert.ThrowsAsync<HubException>(() => stranger.Connection.InvokeAsync<long>("SubmitUpdate", fileId, Update("x")));
         await Assert.ThrowsAsync<HubException>(() => stranger.Connection.InvokeAsync("SubmitAwareness", fileId, new byte[] { 9 }));
-        await Peer.UntilAsync(() => stranger.Errors.Count == 3);
+        await RelayPeer.UntilAsync(() => stranger.Errors.Count == 3);
         Assert.Empty(stranger.Updates);
-        await Assert.ThrowsAnyAsync<Exception>(() => Peer.ConnectAsync(app, null));
+        await Assert.ThrowsAnyAsync<Exception>(() => RelayPeer.ConnectAsync(app, null));
 
         Assert.Equal(4L, await Sql.ScalarAsync<long>(app.ConnectionString, "SELECT count(*) FROM crdt_updates"));
         Assert.DoesNotContain("Hello", string.Join("", await Sql.ListAsync<string>(app.ConnectionString, "SELECT encode(update_enc, 'escape') FROM crdt_updates")));
@@ -391,21 +343,21 @@ public sealed class ContentTests(PostgresFixture pg)
         // Negotiate and upgrade both carry the ticket, and the upgrade uses it up.
         var ticket = await TicketAsync();
         Assert.DoesNotContain('.', ticket);
-        await using (var peer = await Peer.ConnectAsync(app, ticket, webSockets: true))
+        await using (var peer = await RelayPeer.ConnectAsync(app, ticket, webSockets: true))
         {
             await peer.Connection.InvokeAsync("JoinDocument", file.Id.ToString(), 0L);
             Assert.Equal(1, await peer.Connection.InvokeAsync<long>("SubmitUpdate", file.Id.ToString(),
                 new EncryptedUpdate(0, Seal(file, "via ticket", ObjectKind.Crdt), file.KeyId.ToString())));
         }
 
-        await Assert.ThrowsAnyAsync<Exception>(() => Peer.ConnectAsync(app, ticket, webSockets: true));
-        await Assert.ThrowsAnyAsync<Exception>(() => Peer.ConnectAsync(app, "not-a-ticket", webSockets: true));
+        await Assert.ThrowsAnyAsync<Exception>(() => RelayPeer.ConnectAsync(app, ticket, webSockets: true));
+        await Assert.ThrowsAnyAsync<Exception>(() => RelayPeer.ConnectAsync(app, "not-a-ticket", webSockets: true));
 
         // The bearer still works on WebSockets, and a ticket dies with its session.
-        await (await Peer.ConnectAsync(app, account.Tokens.AccessToken, webSockets: true)).DisposeAsync();
+        await (await RelayPeer.ConnectAsync(app, account.Tokens.AccessToken, webSockets: true)).DisposeAsync();
         var orphan = await TicketAsync();
         Assert.Equal(HttpStatusCode.NoContent, (await client.PostAsync("/api/v1/auth/logout", null)).StatusCode);
-        await Assert.ThrowsAnyAsync<Exception>(() => Peer.ConnectAsync(app, orphan, webSockets: true));
+        await Assert.ThrowsAnyAsync<Exception>(() => RelayPeer.ConnectAsync(app, orphan, webSockets: true));
         Assert.Equal(HttpStatusCode.Unauthorized, (await auth.Client().PostAsync("/api/v1/auth/socket-ticket", null)).StatusCode);
     }
 
@@ -577,9 +529,9 @@ public sealed class ContentTests(PostgresFixture pg)
         Assert.Equal(updates.Select(u => B(u, "frame")), log.Select(i => Base64UrlCodec.Decode(i.GetProperty("updateEnc").GetString()!)));
 
         // A device joining from the snapshot gets the pointer and exactly the tail after it.
-        await using var peer = await Peer.ConnectAsync(app, token);
+        await using var peer = await RelayPeer.ConnectAsync(app, token);
         await peer.Connection.InvokeAsync("JoinDocument", file.Id.ToString(), snapshot.GetProperty("crdtSeq").GetInt64());
-        await Peer.UntilAsync(() => peer.Updates.Count == 2 && peer.Snapshots.Count == 1);
+        await RelayPeer.UntilAsync(() => peer.Updates.Count == 2 && peer.Snapshots.Count == 1);
         Assert.Equal(updates.Skip(2).Select(u => B(u, "frame")), peer.Updates.Select(u => u.Ciphertext));
         Assert.Equal(2L, peer.Snapshots[0].CrdtSeq);
     }

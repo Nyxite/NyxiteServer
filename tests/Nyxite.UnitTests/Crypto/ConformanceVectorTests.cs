@@ -100,6 +100,8 @@ public sealed class ConformanceVectorTests
             },
             ["object-kinds.json"] = ObjectKinds(key),
             ["text-path.json"] = TextPath(key),
+            ["awareness.json"] = Awareness(key),
+            ["relay-wire.json"] = RelayWire(key),
             ["snapshot-triggers.json"] = new
             {
                 updateCount = Nyxite.Contracts.Content.SnapshotTriggers.UpdateCount,
@@ -167,6 +169,81 @@ public sealed class ConformanceVectorTests
                 frame = H(NyxcFrame.Seal(key, KeyId, snapshotNonce, snapshotAad, state)),
             },
             finalText = "slow brown fox",
+        };
+    }
+
+    /// <summary>
+    /// Awareness on the relay (P2.1-CORE-1): real y-protocols 1.0.6 awareness updates (on Yjs 13.6.33) sealed as
+    /// <c>awareness</c> frames, <c>object_kind</c> 6. Each entry lists what a decoder must read back: the client id, its
+    /// clock and the state as the JSON text the update carries, <c>null</c> for a client that left. The server forwards
+    /// the frames unread and stores none of them.
+    /// </summary>
+    private static object Awareness(byte[] key)
+    {
+        const string ada = """{"user":{"name":"Ada","color":"#3366ff"},"cursor":{"anchor":3,"head":7}}""";
+        const string adaMoved = """{"user":{"name":"Ada","color":"#3366ff"},"cursor":{"anchor":5,"head":5}}""";
+        const string grace = """{"user":{"name":"Grace","color":"#ff6633"},"cursor":null}""";
+        (string Name, string Update, (int ClientId, int Clock, string State)[] Entries)[] cases =
+        [
+            ("set", "016501487b2275736572223a7b226e616d65223a22416461222c22636f6c6f72223a2223333336366666227d2c22637572736f72223a7b22616e63686f72223a332c2268656164223a377d7d",
+                [(101, 1, ada)]),
+            ("move", "016502487b2275736572223a7b226e616d65223a22416461222c22636f6c6f72223a2223333336366666227d2c22637572736f72223a7b22616e63686f72223a352c2268656164223a357d7d",
+                [(101, 2, adaMoved)]),
+            ("two-clients", "026502487b2275736572223a7b226e616d65223a22416461222c22636f6c6f72223a2223333336366666227d2c22637572736f72223a7b22616e63686f72223a352c2268656164223a357d7dca0101397b2275736572223a7b226e616d65223a224772616365222c22636f6c6f72223a2223666636363333227d2c22637572736f72223a6e756c6c7d",
+                [(101, 2, adaMoved), (202, 1, grace)]),
+            ("leave", "016503046e756c6c", [(101, 3, "null")]),
+        ];
+        var aad = NyxcFrame.BuildAad(KeyId, FileId, ObjectKind.Awareness);
+        return new
+        {
+            engine = "y-protocols 1.0.6 (yjs 13.6.33)", encoding = "awareness update", objectKind = (int)ObjectKind.Awareness, key = H(key),
+            keyId = KeyId, fileId = FileId, aad = H(aad),
+            updates = cases.Select((c, i) =>
+            {
+                var nonce = Bytes(12, 0x60 + i * 12);
+                return new
+                {
+                    name = c.Name, update = c.Update,
+                    entries = c.Entries.Select(e => new { clientId = e.ClientId, clock = e.Clock, state = e.State }).ToArray(),
+                    nonce = H(nonce), frame = H(NyxcFrame.Seal(key, KeyId, nonce, aad, Convert.FromHexString(c.Update))),
+                };
+            }).ToArray(),
+        };
+    }
+
+    /// <summary>
+    /// The relay hub's messages as the SignalR MessagePack protocol puts them on the wire (05 §5.3), length prefix
+    /// included. A record is a map keyed by its PascalCase property names, <c>KeyId</c> a UUID string and ciphertext
+    /// raw bytes. The ciphertexts are the first frames of <c>text-path.json</c> and <c>awareness.json</c>.
+    /// </summary>
+    private static object RelayWire(byte[] key)
+    {
+        var protocol = new Microsoft.AspNetCore.SignalR.Protocol.MessagePackHubProtocol();
+        string Write(Microsoft.AspNetCore.SignalR.Protocol.HubMessage message)
+        {
+            var buffer = new System.Buffers.ArrayBufferWriter<byte>();
+            protocol.WriteMessage(message, buffer);
+            return H(buffer.WrittenSpan);
+        }
+
+        var fileId = FileId.ToString();
+        var update = new Nyxite.Server.Realtime.EncryptedUpdate(1,
+            NyxcFrame.Seal(key, KeyId, Bytes(12, 0x40), NyxcFrame.BuildAad(KeyId, FileId, ObjectKind.Crdt),
+                Convert.FromHexString("01010100040107636f6e74656e741354686520717569636b2062726f776e20666f7800")),
+            KeyId.ToString());
+        var awareness = NyxcFrame.Seal(key, KeyId, Bytes(12, 0x60), NyxcFrame.BuildAad(KeyId, FileId, ObjectKind.Awareness),
+            Convert.FromHexString("016501487b2275736572223a7b226e616d65223a22416461222c22636f6c6f72223a2223333336366666227d2c22637572736f72223a7b22616e63686f72223a332c2268656164223a377d7d"));
+        Nyxite.Server.Realtime.PresenceDto[] roster = [Nyxite.Server.Realtime.PresenceDto.ForUser(UserId, "Ada"), Nyxite.Server.Realtime.PresenceDto.ForGuest()];
+        return new
+        {
+            protocol = "signalr messagepack v1", fileId = FileId, userId = UserId,
+            submitUpdate = Write(new Microsoft.AspNetCore.SignalR.Protocol.InvocationMessage("1", "SubmitUpdate", [fileId, update with { Seq = 0 }])),
+            submitUpdateResult = Write(Microsoft.AspNetCore.SignalR.Protocol.CompletionMessage.WithResult("1", 1L)),
+            onUpdates = Write(new Microsoft.AspNetCore.SignalR.Protocol.InvocationMessage("OnUpdates", [fileId, new[] { update }])),
+            submitAwareness = Write(new Microsoft.AspNetCore.SignalR.Protocol.InvocationMessage("SubmitAwareness", [fileId, awareness])),
+            onAwareness = Write(new Microsoft.AspNetCore.SignalR.Protocol.InvocationMessage("OnAwareness", [fileId, awareness])),
+            onPresence = Write(new Microsoft.AspNetCore.SignalR.Protocol.InvocationMessage("OnPresence", [fileId, roster])),
+            onError = Write(new Microsoft.AspNetCore.SignalR.Protocol.InvocationMessage("OnError", [fileId, "not_found", "Not found."])),
         };
     }
 
@@ -317,6 +394,90 @@ public sealed class ConformanceVectorTests
         Assert.Equal(200, v.GetProperty("updateCount").GetInt32());
         Assert.Equal(300, v.GetProperty("intervalSeconds").GetInt32());
         Assert.True(v.GetProperty("onLastParticipantLeaving").GetBoolean());
+    }
+
+    /// <summary>Reads a y-protocols awareness update: a count, then per client its id, clock and state JSON (lib0 varuint and varstring).</summary>
+    private static List<(long ClientId, long Clock, string State)> DecodeAwareness(byte[] update)
+    {
+        var position = 0;
+        long VarUint()
+        {
+            long value = 0;
+            for (var shift = 0; ; shift += 7)
+            {
+                var b = update[position++];
+                value |= (long)(b & 0x7f) << shift;
+                if (b < 0x80) return value;
+            }
+        }
+
+        var entries = new List<(long, long, string)>();
+        for (var count = VarUint(); count > 0; count--)
+        {
+            var clientId = VarUint();
+            var clock = VarUint();
+            var length = (int)VarUint();
+            entries.Add((clientId, clock, Encoding.UTF8.GetString(update, position, length)));
+            position += length;
+        }
+
+        Assert.Equal(update.Length, position);
+        return entries;
+    }
+
+    [Fact]
+    public void Awareness_frames_open_to_the_y_protocols_updates_and_decode_to_their_entries()
+    {
+        var v = Load("awareness.json");
+        var key = B(v, "key");
+        var aad = NyxcFrame.BuildAad(v.GetProperty("keyId").GetGuid(), v.GetProperty("fileId").GetGuid(), ObjectKind.Awareness);
+        Assert.Equal(6, v.GetProperty("objectKind").GetInt32());
+        Assert.Equal(B(v, "aad"), aad);
+        foreach (var u in v.GetProperty("updates").EnumerateArray())
+        {
+            var update = B(u, "update");
+            Assert.Equal(update, NyxcFrame.Open(key, B(u, "frame"), aad));
+            var expected = u.GetProperty("entries").EnumerateArray()
+                .Select(e => (e.GetProperty("clientId").GetInt64(), e.GetProperty("clock").GetInt64(), e.GetProperty("state").GetString()!));
+            Assert.Equal(expected, DecodeAwareness(update));
+            // An awareness frame is not content: it opens neither as an update nor as a snapshot.
+            var fileId = v.GetProperty("fileId").GetGuid();
+            var keyId = v.GetProperty("keyId").GetGuid();
+            Assert.ThrowsAny<CryptographicException>(() => NyxcFrame.Open(key, B(u, "frame"), NyxcFrame.BuildAad(keyId, fileId, ObjectKind.Crdt)));
+            Assert.ThrowsAny<CryptographicException>(() => NyxcFrame.Open(key, B(u, "frame"), NyxcFrame.BuildAad(keyId, fileId, ObjectKind.Snapshot)));
+        }
+
+        Assert.Equal("null", DecodeAwareness(B(v.GetProperty("updates")[3], "update"))[0].State);
+    }
+
+    [Fact]
+    public void Relay_wire_messages_carry_records_as_maps_with_the_contract_names()
+    {
+        var v = Load("relay-wire.json");
+        string Json(string property)
+        {
+            // A varint length prefix, then exactly one MessagePack array.
+            var bytes = B(v, property);
+            int length = 0, position = 0;
+            for (var shift = 0; ; shift += 7)
+            {
+                var b = bytes[position++];
+                length |= (b & 0x7f) << shift;
+                if (b < 0x80) break;
+            }
+
+            Assert.Equal(bytes.Length, position + length);
+            return MessagePack.MessagePackSerializer.ConvertToJson(bytes.AsMemory(position));
+        }
+
+        var userId = v.GetProperty("userId").GetString();
+        Assert.Contains($$"""[{"Kind":"user","UserId":"{{userId}}","DisplayName":"Ada"},{"Kind":"guest","UserId":null,"DisplayName":null}]""", Json("onPresence"));
+        Assert.Contains($$"""{"Seq":1,"Ciphertext":""", Json("onUpdates"));
+        Assert.Contains($$""","KeyId":"01890a5d-ac96-774b-bcce-b302099a8057"}""", Json("onUpdates"));
+        Assert.Contains("\"SubmitUpdate\"", Json("submitUpdate"));
+        Assert.Contains("\"not_found\"", Json("onError"));
+        // The awareness frame passes as one raw byte string, the same in both directions.
+        Assert.Equal(Json("submitAwareness").Replace("SubmitAwareness", "OnAwareness"), Json("onAwareness"));
     }
 
     private static string SourceDirectory([CallerFilePath] string file = "") =>

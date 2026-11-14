@@ -34,9 +34,13 @@ Task SubmitAwareness(string fileId, byte[] awarenessCipher);  // relayed, not pe
 Task LeaveDocument(string fileId);
 
 public record EncryptedUpdate(long Seq, byte[] Ciphertext, Guid KeyId);
+public record PresenceDto(string Kind, string? UserId, string? DisplayName); // Kind "user" or "guest"
 ```
 
 > **Wire encoding [P]:** over the SignalR **MessagePack** protocol, `Seq` is an int64, `Ciphertext` raw bytes, and `KeyId` a **canonical UUID string** (e.g. `018f…`); clients map it to their native `Guid`/`UUID` type. (The on-disk frame's `key_id` is the same value as 16 raw bytes — [07 §7.4](07-encryption.md).)
+> A record travels as a MessagePack map keyed by its PascalCase property names (`Seq`, `Ciphertext`, `KeyId`, `Kind`, `UserId`, `DisplayName`), which is what SignalR's default MessagePack resolver writes.
+> Pinning the names lets every client decode without a shared schema compiler, and an array encoding was rejected, because it would tie the wire to the property order of the C# records.
+> The vector `relay-wire.json` holds one encoded message per hub method and callback, length prefix included, so the four codebases can check their encoders and decoders byte for byte.
 
 > **Delivery [P]:** every stored update reaches the room as `OnUpdates`, the sender included, whether it was submitted over the hub or over REST. A client therefore sees all updates of a document in `seq` order from one source and drops what it has already applied by `seq`. Sending to the others only was rejected, because the sender would then have to merge its own acknowledgements with the room's stream. The return value of `SubmitUpdate` is the acknowledgement that the update is durable. `OnUpdate` stays in the contract for a single relayed update and is not sent by the server today.
 > **Errors [P]:** an expected failure reaches the caller as `OnError(fileId, code, message)` and as the failed call, whose message is the stable problem code of [04 §4.4](04-rest-api.md).
@@ -44,16 +48,25 @@ public record EncryptedUpdate(long Seq, byte[] Ciphertext, Guid KeyId);
 ## 5.4 Join handshake
 
 1. Client opens the socket (authenticated) and calls `JoinDocument(fileId, sinceSeq)`.
-2. Server checks **ACL** (read to receive; **write** to `SubmitUpdate`). Guests' permission comes from the link share.
+2. Server checks **ACL** (read to receive; **write** to `SubmitUpdate`). Guests' permission comes from the link share. Read reach without write reach answers `SubmitUpdate` with `acl_denied`, no reach with `not_found` ([09 §9.5](09-sharing-and-acl.md)).
 3. Server returns, via `OnUpdates`, all encrypted updates with `seq > sinceSeq` (and points the client at the latest encrypted snapshot blob to bootstrap from). The server does **not** compute a state-vector diff — it has no readable document; the **client** reconciles using the Yrs state vector it reconstructs locally.
 4. Client is added to the `file:{fileId}` group; presence roster sent via `OnPresence`.
+
+> ACL re-checks [P]:
+> reach is checked at `JoinDocument` and at every `SubmitUpdate`, and again for every connection in a room every `NYXITE__Relay__AccessRecheckInterval` (default 30 s, [14](14-deployment-and-config.md)).
+> The periodic pass exists because an open connection keeps receiving updates and awareness after its join, so a revoked reader would otherwise listen on until it disconnects.
+> A connection whose account lost reach to the file leaves that room and gets `OnError(fileId, "not_found", ...)`, and the room gets the new roster.
+> The connection itself stays open, because it may be in other rooms the account still reaches.
+> A connection whose session was revoked or expired gets `OnError(fileId, "unauthenticated", ...)` for each of its rooms and is then closed, because no room is open to a dead session.
+> `SubmitAwareness` is not checked against the ACL per message, because awareness flows at caret rate.
+> It requires the connection to be in the room, so its reach is the one of the join, kept current by the periodic pass.
 
 ## 5.5 Update flow
 
 1. Client edits → Yrs update → **encrypts** with the file key → `SubmitUpdate(fileId, EncryptedUpdate)`.
 2. Server: authorize (write) → assign `seq` → **persist** the ciphertext to `crdt_updates` → broadcast `OnUpdate` to the rest of the group. **No decryption, no merge, no validation of contents.**
 3. Peers receive the encrypted update, decrypt locally, and merge into their Yrs doc.
-4. Awareness is relayed **encrypted** and **not persisted**.
+4. Awareness is relayed **encrypted** and **not persisted**. It is an NYXC frame of `object_kind` `awareness = 6` ([07 §7.4](07-encryption.md)) around a y-protocols awareness update, at most `NYXITE__Limits__MaxAwarenessBytes`. The server forwards the bytes unchanged to the others in the room, the sender excluded, because a client already knows its own cursor.
 
 ## 5.6 Snapshotting & compaction (client-driven)
 
@@ -66,6 +79,14 @@ public record EncryptedUpdate(long Seq, byte[] Ciphertext, Guid KeyId);
 
 - **Awareness** (cursors/selection/label) is **encrypted** and ephemeral; relayed via `OnAwareness`, never stored.
 - **Presence roster** (`OnPresence`) reflects group membership by **account identity** (display name from the user's account) or "guest" — no content. On multi-node it is Redis-backed; single-node keeps it in memory.
+- Roster shape [P]:
+  an account appears once as `{ Kind: "user", UserId, DisplayName }`, however many of its devices are in the room, because the roster answers who is editing and not how many sockets are open.
+  A guest appears as `{ Kind: "guest", UserId: null, DisplayName: null }`, once per guest connection, because a guest has no identity to merge by.
+  Accounts come first, ordered by `UserId`, then guests, so every peer renders the same order.
+  The roster is sent to the whole room on every join, leave, disconnect and removal by the ACL re-check (§5.4).
+- Readers may send awareness [P], so a read-only collaborator's caret and selection are visible to the others.
+  Awareness carries no content change, and the read/write split of the ACL concerns content.
+- The awareness vectors `awareness.json` (P2.1-CORE-1) hold real y-protocols 1.0.6 updates with the client id, clock and state JSON each decodes to, sealed as `awareness` frames.
 
 ## 5.8 Guest sessions
 

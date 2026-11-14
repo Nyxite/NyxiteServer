@@ -24,5 +24,6 @@
   </ItemGroup>
   <ItemGroup>
     <None Include="../Nyxite.UnitTests/Resources/vectors/text-path.json" Link="Resources/vectors/text-path.json" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="../Nyxite.UnitTests/Resources/vectors/awareness.json" Link="Resources/vectors/awareness.json" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 </Project>

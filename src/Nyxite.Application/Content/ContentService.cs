@@ -35,7 +35,7 @@ public sealed record BlobRead(Stream Content, VersionDto Version);
 /// </summary>
 public sealed class ContentService(
     NyxiteDbContext db, IBlobStore blobs, DeviceGuard guard, AuditWriter audit, TimeProvider time, IRelayNotifier relay, ChangeFeed feed,
-    IOptions<ContentOptions> options)
+    IFileAccess access, IOptions<ContentOptions> options)
 {
     public const int DefaultPageSize = 50;
     public const int MaxPageSize = 200;
@@ -339,19 +339,34 @@ public sealed class ContentService(
 
     // ---------------------------------------------------------------- reach
 
-    /// <summary>A live file the caller can reach. Until shares exist (Phase 2.2) that is a file in a project they own.</summary>
-    private async Task<FileEntity> FileAsync(Guid userId, Guid id, CancellationToken ct) =>
-        await db.Files.AsNoTracking().SingleOrDefaultAsync(f => f.Id == id && f.DeletedAt == null
-            && db.Projects.Any(p => p.Id == f.ProjectId && p.OwnerId == userId && p.DeletedAt == null), ct)
-        ?? throw AuthException.NotFound();
+    /// <summary>A live file the caller can reach, at least to read (09 §9.5). Without reach it does not exist for them.</summary>
+    private async Task<FileEntity> FileAsync(Guid userId, Guid id, CancellationToken ct)
+    {
+        var file = await db.Files.AsNoTracking().SingleOrDefaultAsync(f => f.Id == id && f.DeletedAt == null, ct);
+        if (file is null || await access.LevelAsync(userId, file, ct) == FileAccessLevel.None) throw AuthException.NotFound();
+        return file;
+    }
 
-    /// <summary>The same file, tracked and locked for the transaction: writes to one file are ordered one after the other.</summary>
+    /// <summary>
+    /// The same file for a write, tracked and locked for the transaction: writes to one file are ordered one after the
+    /// other. Read reach without write reach is <c>403 acl_denied</c>, because the caller already knows the file exists.
+    /// </summary>
     private async Task<FileEntity> LockFileAsync(Guid userId, Guid id, CancellationToken ct)
     {
         var file = (await db.Files.FromSql($"SELECT * FROM files WHERE id = {id} AND deleted_at IS NULL FOR UPDATE").ToListAsync(ct)).SingleOrDefault();
-        if (file is null || !await db.Projects.AnyAsync(p => p.Id == file.ProjectId && p.OwnerId == userId && p.DeletedAt == null, ct))
-            throw AuthException.NotFound();
-        return file;
+        return file is null ? throw AuthException.NotFound() : await access.LevelAsync(userId, file, ct) switch
+        {
+            FileAccessLevel.Write => file,
+            FileAccessLevel.Read => throw AclDenied(),
+            _ => throw AuthException.NotFound(),
+        };
+    }
+
+    /// <summary>The caller's level on a live file, for the relay's periodic re-check; <see cref="FileAccessLevel.None"/> when it is gone.</summary>
+    public async Task<FileAccessLevel> AccessLevelAsync(Guid userId, Guid fileId, CancellationToken ct)
+    {
+        var file = await db.Files.AsNoTracking().SingleOrDefaultAsync(f => f.Id == fileId && f.DeletedAt == null, ct);
+        return file is null ? FileAccessLevel.None : await access.LevelAsync(userId, file, ct);
     }
 
     /// <summary>The caller as someone who may write content: on an active device and not blocked (04 "structure").</summary>
@@ -366,6 +381,8 @@ public sealed class ContentService(
     private static AuthException ExcludedContent() => new(409, "excluded_content", "This file is excluded from sync; the server takes no content for it.");
 
     private static AuthException KeyGenerationStale() => new(412, "key_generation_stale", "The content is sealed with a key that is not the file's current key.");
+
+    private static AuthException AclDenied() => new(403, "acl_denied", "This file can be read but not changed.");
 
     public static AuthException PayloadTooLarge(string title) => new(413, "payload_too_large", title);
 

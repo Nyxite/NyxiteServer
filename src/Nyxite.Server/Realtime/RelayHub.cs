@@ -13,8 +13,19 @@ namespace Nyxite.Server.Realtime;
 /// <summary>An encrypted update on the relay wire (05 §5.3). <c>KeyId</c> is a canonical UUID string, <c>Ciphertext</c> raw bytes.</summary>
 public sealed record EncryptedUpdate(long Seq, byte[] Ciphertext, string KeyId);
 
-/// <summary>Who is in a room: identities only, never content.</summary>
-public sealed record PresenceDto(string UserId, string DisplayName);
+/// <summary>
+/// One entry of a room's roster (05 §5.7): an account by id and display name, or a guest without either. Identities
+/// only, never content. <c>Kind</c> is <c>user</c> or <c>guest</c>.
+/// </summary>
+public sealed record PresenceDto(string Kind, string? UserId, string? DisplayName)
+{
+    public const string User = "user";
+    public const string Guest = "guest";
+
+    public static PresenceDto ForUser(Guid userId, string displayName) => new(User, userId.ToString(), displayName);
+
+    public static PresenceDto ForGuest() => new(Guest, null, null);
+}
 
 /// <summary>Server to client callbacks. Every payload that carries content is ciphertext.</summary>
 public interface IRelayClient
@@ -28,12 +39,26 @@ public interface IRelayClient
     Task OnError(string fileId, string code, string message);
 }
 
+/// <summary>A connection in a room: what the roster shows, and what the periodic re-check needs to judge it again.</summary>
+public sealed record RelayMember(PresenceDto Who, Guid? UserId, Guid? SessionId);
+
 /// <summary>Who is connected to which document room. In memory, because v1 runs one node (05 §5.10).</summary>
 public sealed class RelayPresence
 {
-    private readonly ConcurrentDictionary<Guid, ConcurrentDictionary<string, PresenceDto>> _rooms = new();
+    private readonly ConcurrentDictionary<Guid, ConcurrentDictionary<string, RelayMember>> _rooms = new();
+    private readonly ConcurrentDictionary<string, HubCallerContext> _connections = new();
 
-    public void Join(Guid fileId, string connectionId, PresenceDto who) => _rooms.GetOrAdd(fileId, _ => new())[connectionId] = who;
+    public void Connect(HubCallerContext context) => _connections[context.ConnectionId] = context;
+
+    public void Disconnect(string connectionId) => _connections.TryRemove(connectionId, out _);
+
+    /// <summary>Closes a connection from outside the hub, as when its session ended. Its rooms are left by the caller.</summary>
+    public void Abort(string connectionId)
+    {
+        if (_connections.TryRemove(connectionId, out var context)) context.Abort();
+    }
+
+    public void Join(Guid fileId, string connectionId, RelayMember member) => _rooms.GetOrAdd(fileId, _ => new())[connectionId] = member;
 
     public bool Leave(Guid fileId, string connectionId) => _rooms.TryGetValue(fileId, out var room) && room.TryRemove(connectionId, out _);
 
@@ -41,9 +66,23 @@ public sealed class RelayPresence
 
     public List<Guid> LeaveAll(string connectionId) => _rooms.Where(r => r.Value.TryRemove(connectionId, out _)).Select(r => r.Key).ToList();
 
-    /// <summary>One entry per account, however many devices it has in the room.</summary>
-    public PresenceDto[] Roster(Guid fileId) =>
-        _rooms.TryGetValue(fileId, out var room) ? room.Values.DistinctBy(p => p.UserId).OrderBy(p => p.UserId, StringComparer.Ordinal).ToArray() : [];
+    /// <summary>Every connection of every room at this moment, for the periodic re-check.</summary>
+    public List<(Guid FileId, string ConnectionId, RelayMember Member)> Members() =>
+        _rooms.SelectMany(r => r.Value.Select(m => (r.Key, m.Key, m.Value))).ToList();
+
+    /// <summary>
+    /// One entry per account, however many devices it has in the room, ordered by id; then one entry per guest
+    /// connection, because a guest has no identity to merge by.
+    /// </summary>
+    public PresenceDto[] Roster(Guid fileId)
+    {
+        if (!_rooms.TryGetValue(fileId, out var room)) return [];
+        var members = room.Values.ToList();
+        return members.Where(m => m.Who.Kind == PresenceDto.User).Select(m => m.Who).DistinctBy(p => p.UserId)
+            .OrderBy(p => p.UserId, StringComparer.Ordinal)
+            .Concat(members.Where(m => m.Who.Kind == PresenceDto.Guest).Select(m => m.Who))
+            .ToArray();
+    }
 }
 
 /// <summary>Forwards updates that were stored over REST into the document's room.</summary>
@@ -57,7 +96,8 @@ public sealed class RelayNotifier(IHubContext<RelayHub, IRelayClient> hub) : IRe
 /// The blind relay (05): per document a room that hands out the stored encrypted updates on join and forwards new ones.
 /// The hub persists through <see cref="ContentService"/>, which also checks reach on every call, and never looks into a
 /// payload. An update a client submits here reaches the room through <see cref="RelayNotifier"/>, the sender included,
-/// so every client sees every update in sequence order from one source.
+/// so every client sees every update in sequence order from one source. Several accounts and devices share a room;
+/// the ACL is checked at join and at every submit, and <see cref="RelayAccessCheck"/> checks it again periodically.
 /// </summary>
 [Authorize]
 public sealed class RelayHub(ContentService content, RelayPresence presence, NyxiteDbContext db) : Hub<IRelayClient>
@@ -93,7 +133,7 @@ public sealed class RelayHub(ContentService content, RelayPresence presence, Nyx
 
             var userId = user.UserId();
             var name = await db.Users.Where(u => u.Id == userId).Select(u => u.DisplayName).SingleAsync(Context.ConnectionAborted);
-            presence.Join(id, Context.ConnectionId, new PresenceDto(userId.ToString(), name));
+            presence.Join(id, Context.ConnectionId, new RelayMember(PresenceDto.ForUser(userId, name), userId, user.SessionIdOf()));
             await Clients.Group(Room(id)).OnPresence(fileId, presence.Roster(id));
         });
     }
@@ -110,7 +150,11 @@ public sealed class RelayHub(ContentService content, RelayPresence presence, Nyx
         });
     }
 
-    /// <summary>Forwards encrypted presence data to the others in the room. Nothing is stored.</summary>
+    /// <summary>
+    /// Forwards encrypted awareness (cursors, selections, a label: <c>object_kind</c> 6) to the others in the room. It is
+    /// never stored, in Postgres, the blob store or a log. Only a connection in the room may send, so reach is the one of
+    /// its join, kept current by the periodic re-check instead of a query per message at caret rate.
+    /// </summary>
     public async Task SubmitAwareness(string fileId, byte[] awarenessCipher)
     {
         var id = Parse(fileId);
@@ -129,8 +173,15 @@ public sealed class RelayHub(ContentService content, RelayPresence presence, Nyx
         if (presence.Leave(id, Context.ConnectionId)) await Clients.Group(Room(id)).OnPresence(fileId, presence.Roster(id));
     }
 
+    public override Task OnConnectedAsync()
+    {
+        presence.Connect(Context);
+        return base.OnConnectedAsync();
+    }
+
     public override async Task OnDisconnectedAsync(Exception? exception)
     {
+        presence.Disconnect(Context.ConnectionId);
         foreach (var id in presence.LeaveAll(Context.ConnectionId)) await Clients.Group(Room(id)).OnPresence(id.ToString(), presence.Roster(id));
         await base.OnDisconnectedAsync(exception);
     }
@@ -165,6 +216,8 @@ public static class RelaySetup
         services.AddSignalR(o => o.MaximumReceiveMessageSize = 2 * 1024 * 1024).AddMessagePackProtocol();
         services.AddSingleton<RelayPresence>();
         services.AddSingleton<IRelayNotifier, RelayNotifier>();
+        services.AddScoped<RelayAccessCheck>();
+        services.AddHostedService<RelayAccessWorker>();
         return services;
     }
 }

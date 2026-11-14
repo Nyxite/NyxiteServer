@@ -22,4 +22,10 @@ public sealed class RelayOptions
 
     /// <summary>This many of a document's newest updates are never pruned, also when a snapshot covers them (05 §5.6).</summary>
     public int SafetyTailUpdates { get; set; } = 1000;
+
+    /// <summary>
+    /// How often the relay checks again that every connection in a room still has reach and a live session (05 §5.4,
+    /// 09 §9.6). Join and submit check on every call; this bounds how long a revoked reader keeps receiving.
+    /// </summary>
+    public TimeSpan AccessRecheckInterval { get; set; } = TimeSpan.FromSeconds(30);
 }
