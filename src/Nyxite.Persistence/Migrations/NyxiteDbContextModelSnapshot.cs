@@ -129,6 +129,60 @@ namespace Nyxite.Persistence.Migrations
                     b.ToTable("backup_codes", (string)null);
                 });
 
+            modelBuilder.Entity("Nyxite.Persistence.Entities.ChangeLogEntity", b =>
+                {
+                    b.Property<long>("Seq")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("bigint")
+                        .HasColumnName("seq");
+
+                    NpgsqlPropertyBuilderExtensions.UseIdentityByDefaultColumn(b.Property<long>("Seq"));
+
+                    b.Property<DateTimeOffset>("At")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("at")
+                        .HasDefaultValueSql("now()");
+
+                    b.Property<string>("Entity")
+                        .IsRequired()
+                        .HasColumnType("text")
+                        .HasColumnName("entity");
+
+                    b.Property<Guid>("EntityId")
+                        .HasColumnType("uuid")
+                        .HasColumnName("entity_id");
+
+                    b.Property<string>("Kind")
+                        .IsRequired()
+                        .HasColumnType("text")
+                        .HasColumnName("kind");
+
+                    b.Property<Guid>("ProjectId")
+                        .HasColumnType("uuid")
+                        .HasColumnName("project_id");
+
+                    b.Property<string>("Ref")
+                        .IsRequired()
+                        .HasColumnType("jsonb")
+                        .HasColumnName("ref");
+
+                    b.HasKey("Seq");
+
+                    b.HasIndex("At")
+                        .HasDatabaseName("ix_change_log_at");
+
+                    b.HasIndex("ProjectId", "Seq")
+                        .HasDatabaseName("ix_change_log_project");
+
+                    b.ToTable("change_log", null, t =>
+                        {
+                            t.HasCheckConstraint("ck_change_log_entity", "entity IN ('project','folder','file')");
+
+                            t.HasCheckConstraint("ck_change_log_kind", "kind IN ('structure','blob','crdt','delete','keyrotate')");
+                        });
+                });
+
             modelBuilder.Entity("Nyxite.Persistence.Entities.CrdtUpdateEntity", b =>
                 {
                     b.Property<long>("Id")
@@ -387,6 +441,10 @@ namespace Nyxite.Persistence.Migrations
                         .HasColumnType("uuid")
                         .HasColumnName("deleted_root_id");
 
+                    b.Property<DateTimeOffset?>("ExcludedAt")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("excluded_at");
+
                     b.Property<Guid?>("FolderId")
                         .HasColumnType("uuid")
                         .HasColumnName("folder_id");
@@ -449,6 +507,10 @@ namespace Nyxite.Persistence.Migrations
                     b.HasIndex("DeletedRootId")
                         .HasDatabaseName("ix_files_deleted_root")
                         .HasFilter("deleted_root_id IS NOT NULL");
+
+                    b.HasIndex("ExcludedAt")
+                        .HasDatabaseName("ix_files_excluded")
+                        .HasFilter("excluded_at IS NOT NULL");
 
                     b.HasIndex("FolderId")
                         .HasDatabaseName("ix_files_folder")
@@ -1315,6 +1377,15 @@ namespace Nyxite.Persistence.Migrations
                         .WithMany()
                         .HasForeignKey("UserId")
                         .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+                });
+
+            modelBuilder.Entity("Nyxite.Persistence.Entities.ChangeLogEntity", b =>
+                {
+                    b.HasOne("Nyxite.Persistence.Entities.ProjectEntity", null)
+                        .WithMany()
+                        .HasForeignKey("ProjectId")
+                        .OnDelete(DeleteBehavior.Restrict)
                         .IsRequired();
                 });
 

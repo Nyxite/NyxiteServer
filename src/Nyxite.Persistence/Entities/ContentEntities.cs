@@ -35,3 +35,18 @@ public sealed class CrdtUpdateEntity
     public Guid? ClientUpdateId { get; set; }
     public DateTimeOffset CreatedAt { get; set; }
 }
+
+/// <summary>
+/// <c>change_log</c> (03 §3.3, 06 §6.3.2): the delta-sync feed of one project. Written in the transaction of the change it
+/// describes. <see cref="Ref"/> is the <c>ServerChange</c> ref as JSON, structural and opaque fields only, never content.
+/// </summary>
+public sealed class ChangeLogEntity
+{
+    public long Seq { get; set; }
+    public Guid ProjectId { get; set; }
+    public required string Kind { get; set; }
+    public required string Entity { get; set; }
+    public Guid EntityId { get; set; }
+    public required string Ref { get; set; }
+    public DateTimeOffset At { get; set; }
+}

@@ -4,6 +4,7 @@ using Microsoft.Extensions.Options;
 using Nyxite.Application.Audit;
 using Nyxite.Application.Auth;
 using Nyxite.Application.Keys;
+using Nyxite.Application.Sync;
 using Nyxite.BlobStore;
 using Nyxite.Contracts.Content;
 using Nyxite.Crypto;
@@ -33,7 +34,7 @@ public sealed record BlobRead(Stream Content, VersionDto Version);
 /// key generation, sequence numbers, sizes and reach.
 /// </summary>
 public sealed class ContentService(
-    NyxiteDbContext db, IBlobStore blobs, DeviceGuard guard, AuditWriter audit, TimeProvider time, IRelayNotifier relay,
+    NyxiteDbContext db, IBlobStore blobs, DeviceGuard guard, AuditWriter audit, TimeProvider time, IRelayNotifier relay, ChangeFeed feed,
     IOptions<ContentOptions> options)
 {
     public const int DefaultPageSize = 50;
@@ -66,6 +67,7 @@ public sealed class ContentService(
         var head = await HeadAsync(file, ct);
         var wins = parentSeq == (head?.Seq ?? 0);
         var version = await AddVersionAsync(file, userId, hash, keyId, ciphertext, crdtSeq: null, becomesHead: wins, ct);
+        await feed.VersionAsync(file, version, isHead: wins, ct);
         await db.SaveChangesAsync(ct);
         await tx.CommitAsync(ct);
         return new BlobWriteResult(ToDto(version, file), wins ? null : ToDto(head!, file));
@@ -188,6 +190,8 @@ public sealed class ContentService(
             stored.Add(new CrdtUpdateDto(seq, update.KeyId, update.UpdateEnc!, userId, now));
         }
 
+        // New numbers of one submit are consecutive, because the file row is locked; resends add none.
+        if (stored.Count > 0) await feed.UpdatesAsync(file, stored[0].Seq, stored[^1].Seq, ct);
         await db.SaveChangesAsync(ct);
         await tx.CommitAsync(ct);
         // After the commit: peers are only told about updates that are durable.
@@ -230,6 +234,7 @@ public sealed class ContentService(
         if (head?.CrdtSeq > crdtSeq) throw AuthException.Conflict("A newer snapshot is already stored.");
 
         var version = await AddVersionAsync(file, userId, hash, keyId, ciphertext, crdtSeq, becomesHead: true, ct);
+        await feed.VersionAsync(file, version, isHead: true, ct);
         await db.SaveChangesAsync(ct);
         await tx.CommitAsync(ct);
         return ToDto(version, file);

@@ -78,6 +78,7 @@ api.MapMeEndpoints();
 api.MapKeyEndpoints();
 api.MapStructureEndpoints();
 api.MapContentEndpoints();
+api.MapSyncEndpoints();
 app.MapHub<Nyxite.Server.Realtime.RelayHub>(Nyxite.Server.Realtime.RelayHub.Path).RequireAuthorization();
 
 await app.RunAsync();

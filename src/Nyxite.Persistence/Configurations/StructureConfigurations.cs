@@ -92,6 +92,8 @@ internal sealed class FileConfiguration : IEntityTypeConfiguration<FileEntity>
         b.Property(x => x.DeletedAt).HasColumnName("deleted_at");
         b.Property(x => x.DeletedRootId).HasColumnName("deleted_root_id");
         b.HasIndex(x => x.DeletedRootId).HasFilter("deleted_root_id IS NOT NULL").HasDatabaseName("ix_files_deleted_root");
+        b.Property(x => x.ExcludedAt).HasColumnName("excluded_at");
+        b.HasIndex(x => x.ExcludedAt).HasFilter("excluded_at IS NOT NULL").HasDatabaseName("ix_files_excluded");
         b.HasOne<ProjectEntity>().WithMany().HasForeignKey(x => x.ProjectId).OnDelete(DeleteBehavior.Restrict);
         b.HasOne<FolderEntity>().WithMany().HasForeignKey(x => x.FolderId).OnDelete(DeleteBehavior.Restrict);
         b.HasOne<UserEntity>().WithMany().HasForeignKey(x => x.OwnerId).OnDelete(DeleteBehavior.Restrict);

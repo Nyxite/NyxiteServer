@@ -61,6 +61,12 @@ public sealed class FileEntity
 
     /// <summary>The folder or project whose delete took this row to Trash with it; null when it was deleted itself.</summary>
     public Guid? DeletedRootId { get; set; }
+
+    /// <summary>
+    /// When the file was switched from <c>server-default</c> to <c>excluded</c>; null while it syncs. Its stored content is
+    /// purged once this is older than Trash window plus grace window (06 §6.2), so a mistaken switch can still be undone.
+    /// </summary>
+    public DateTimeOffset? ExcludedAt { get; set; }
 }
 
 /// <summary>

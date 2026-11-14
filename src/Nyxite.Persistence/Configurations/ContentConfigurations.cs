@@ -47,3 +47,27 @@ internal sealed class CrdtUpdateConfiguration : IEntityTypeConfiguration<CrdtUpd
         b.HasIndex(x => new { x.CrdtDocId, x.ClientUpdateId }).IsUnique().HasFilter("client_update_id IS NOT NULL").HasDatabaseName("uq_crdt_updates_client_id");
     }
 }
+
+internal sealed class ChangeLogConfiguration : IEntityTypeConfiguration<ChangeLogEntity>
+{
+    public void Configure(EntityTypeBuilder<ChangeLogEntity> b)
+    {
+        b.ToTable("change_log", t =>
+        {
+            t.HasCheckConstraint("ck_change_log_kind", "kind IN ('structure','blob','crdt','delete','keyrotate')");
+            t.HasCheckConstraint("ck_change_log_entity", "entity IN ('project','folder','file')");
+        });
+        b.HasKey(x => x.Seq);
+        b.Property(x => x.Seq).HasColumnName("seq").UseIdentityByDefaultColumn();
+        b.Property(x => x.ProjectId).HasColumnName("project_id");
+        b.Property(x => x.Kind).HasColumnName("kind");
+        b.Property(x => x.Entity).HasColumnName("entity");
+        b.Property(x => x.EntityId).HasColumnName("entity_id");
+        b.Property(x => x.Ref).HasColumnName("ref").HasColumnType("jsonb");
+        b.Property(x => x.At).HasColumnName("at").HasDefaultValueSql("now()");
+        b.HasOne<ProjectEntity>().WithMany().HasForeignKey(x => x.ProjectId).OnDelete(DeleteBehavior.Restrict);
+        b.HasIndex(x => new { x.ProjectId, x.Seq }).HasDatabaseName("ix_change_log_project");
+        // The pruning deletes by age.
+        b.HasIndex(x => x.At).HasDatabaseName("ix_change_log_at");
+    }
+}

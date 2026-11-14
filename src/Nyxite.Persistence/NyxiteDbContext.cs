@@ -31,6 +31,7 @@ public sealed class NyxiteDbContext(DbContextOptions<NyxiteDbContext> options) :
     public DbSet<StructureKeyEntity> StructureKeys => Set<StructureKeyEntity>();
     public DbSet<FileVersionEntity> FileVersions => Set<FileVersionEntity>();
     public DbSet<CrdtUpdateEntity> CrdtUpdates => Set<CrdtUpdateEntity>();
+    public DbSet<ChangeLogEntity> ChangeLog => Set<ChangeLogEntity>();
 
     protected override void OnModelCreating(ModelBuilder modelBuilder) =>
         modelBuilder.ApplyConfigurationsFromAssembly(typeof(NyxiteDbContext).Assembly);

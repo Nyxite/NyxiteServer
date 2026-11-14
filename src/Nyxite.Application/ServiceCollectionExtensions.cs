@@ -44,6 +44,9 @@ public static class ServiceCollectionExtensions
         services.AddScoped<DeviceService>();
         services.AddScoped<RecoveryService>();
         services.AddOptions<Structure.StructureOptions>().Bind(configuration.GetSection(Structure.StructureOptions.Section));
+        services.AddScoped<Sync.ChangeFeed>();
+        services.AddScoped<Sync.SyncService>();
+        services.AddScoped<Sync.ChangeLogPruner>();
         services.AddScoped<Structure.StructureService>();
         services.AddOptions<Content.ContentOptions>().Bind(configuration.GetSection(Structure.StructureOptions.Section));
         services.AddOptions<Content.RelayOptions>().Bind(configuration.GetSection(Content.RelayOptions.Section));

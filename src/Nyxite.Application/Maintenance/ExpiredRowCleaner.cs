@@ -39,6 +39,12 @@ public sealed class RetentionOptions
     /// alone. A day covers the slowest upload by far.
     /// </summary>
     public int OrphanBlobAgeHours { get; set; } = 24;
+
+    /// <summary>
+    /// How long <c>change_log</c> rows are kept (06 §6.3.2). A sync cursor older than this gets <c>410 cursor_expired</c>
+    /// and the client runs the manifest again. A quarter, so a device that was offline that long still resumes by delta.
+    /// </summary>
+    public int ChangeLogDays { get; set; } = 90;
 }
 
 /// <summary>
@@ -84,6 +90,7 @@ public sealed class MaintenanceWorker(
                 await using var scope = scopes.CreateAsyncScope();
                 var deleted = await scope.ServiceProvider.GetRequiredService<ExpiredRowCleaner>().RunAsync(stoppingToken);
                 deleted += await scope.ServiceProvider.GetRequiredService<Content.CrdtLogPruner>().RunAsync(stoppingToken);
+                deleted += await scope.ServiceProvider.GetRequiredService<Sync.ChangeLogPruner>().RunAsync(stoppingToken);
                 if (deleted > 0) logger.LogInformation("Maintenance deleted {Count} expired rows.", deleted);
             }
             catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
@@ -116,6 +123,7 @@ public sealed class StorageCollectionWorker(
                 await Task.Delay(options.Value.PurgeInterval, time, stoppingToken);
                 await using var scope = scopes.CreateAsyncScope();
                 await scope.ServiceProvider.GetRequiredService<Structure.TrashPurger>().RunAsync(stoppingToken);
+                await scope.ServiceProvider.GetRequiredService<Structure.TrashPurger>().PurgeExcludedContentAsync(stoppingToken);
                 await scope.ServiceProvider.GetRequiredService<Content.BlobCollector>().SweepAsync(stoppingToken);
             }
             catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)

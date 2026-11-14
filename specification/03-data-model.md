@@ -396,6 +396,7 @@ CREATE TABLE files (
   version_seq        bigint NOT NULL DEFAULT 0,  -- last file_versions.seq handed out; a counter, so a purged version never frees its number
   crdt_head_seq      bigint NOT NULL DEFAULT 0,  -- last crdt_updates.seq handed out; a counter, so pruning never moves it back
   pending_restore_seq bigint,                -- set by POST /files/{id}/restore; the next head records it as restored_from_seq
+  excluded_at      timestamptz,              -- set on a switch to excluded, cleared on a switch back; drives the content purge (06 §6.2)
   crdt_doc_id        uuid,                    -- text types only (client-allocated UUIDv7 at creation)
   key_generation     int NOT NULL DEFAULT 1,  -- current file-key rotation generation
   metadata_enc       bytea,                    -- encrypted per-file metadata
@@ -547,6 +548,7 @@ CREATE TABLE change_log (
   at          timestamptz NOT NULL DEFAULT now()
 );
 CREATE INDEX ix_change_log_project ON change_log(project_id, seq);
+CREATE INDEX ix_change_log_at ON change_log(at);   -- the pruning deletes by age
 ```
 > Written in the **same transaction** as the change it describes, so the feed can never miss or invent a write. ACL filtering happens at read time, not here. `ref` holds only what `ServerChange` exposes (ids, sequence numbers, opaque `nameEnc`/hashes), never content. Pruned after `NYXITE__Retention__ChangeLogDays`; an older cursor gets `410 cursor_expired` ([06 §6.3.2](06-sync.md)). `bigserial` may leave gaps after a rollback; cursors only require monotonicity, not gaplessness.
 
