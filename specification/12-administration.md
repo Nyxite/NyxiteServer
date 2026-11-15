@@ -90,7 +90,7 @@ Recorded `action` values (non-exhaustive) **[P]**:
 | Sharing | `share.create`, `share.update`, `share.revoke`, `share.link_access` |
 | Admin | `admin.user_update`, `admin.user_block`, `admin.user_unblock`, `admin.quota_set`, `admin.bulk_update`, `admin.role_change`, `admin.group_change`, `admin.group_max_members_set`, `admin.session_revoke`, `admin.user_import`, `admin.config_view`, `admin.device_revoke` |
 | Groups (file-sharing) | `group.enroll`, `group.enroll_rejected` (over-limit / transparency-unverified), `group.member_remove`, `group.key_rotate` |
-| Content lifecycle (structural) | `file.delete`, `file.restore`, `version.purge`, `blob.gc` |
+| Content lifecycle (structural) | `file.delete`, `file.restore`, `version.restore` (detail `seq`, the restored version), `version.purge`, `blob.gc` |
 
 Each entry: `occurred_at`, `actor_id`/`actor_kind`, `action`, `target_type`/`target_id`, structural `detail`, `ip`, `user_agent`.
 

@@ -51,8 +51,11 @@ public sealed class FileEntity
     /// <summary>The last <c>crdt_updates.seq</c> handed out for this file's document. A counter, so pruning never moves it back.</summary>
     public long CrdtHeadSeq { get; set; }
 
-    /// <summary>Set by a recorded restore: the version the next head is a restore of (10 §10.5).</summary>
+    /// <summary>Set by a recorded restore: the version the restoring account's next version is a restore of (10 §10.5).</summary>
     public long? PendingRestoreSeq { get; set; }
+
+    /// <summary>The account that recorded <see cref="PendingRestoreSeq"/>. Only its own next version takes the link (10 §10.5).</summary>
+    public Guid? PendingRestoreBy { get; set; }
     public int KeyGeneration { get; set; } = 1;
     public byte[]? MetadataEnc { get; set; }
     public DateTimeOffset CreatedAt { get; set; }

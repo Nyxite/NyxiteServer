@@ -7,6 +7,8 @@
 - Every file has an append-only history of immutable **encrypted** versions (`file_versions`, [03](03-data-model.md)): each a content-addressed ciphertext snapshot of the file at a point in time.
 - Head is `files.current_version_id`; history is `file_versions` ordered by `seq DESC`.
 - History is **full**; retention/purge is an explicit admin/GC action ([§10.6](#106-retention--garbage-collection)).
+- Who sees it **[P]**: every account with read reach on the file lists and fetches its versions, a read-only grantee included, because the history is content the grantee can already decrypt. Link guests get the head only, because a guest token is never accepted under `/api/v1` ([04 §4.8](04-rest-api.md)).
+  A version sealed with an older key generation stays listed for a member who never had that generation, who sees the record but cannot open it ([09 §9.6](09-sharing-and-acl.md)).
 
 ## 10.2 How versions are produced
 
@@ -28,6 +30,9 @@ The server records `content_hash` (client-computed), `blob_ref`, `size_cipher`, 
 - **There is no server diff endpoint.** A client fetches two encrypted snapshots, decrypts them locally, and computes the diff ([04](04-rest-api.md)).
 - Text: client-side line/word or CRDT-structural diff. Ink/binary: client-side metadata-level diff. **[P]**
 - This is the only option under E2EE — the server can't read either version.
+- The client checks every fetched version before it diffs **[P]**: it opens the frame with the wrap of the version's `keyId`, recomputes BLAKE3 over the plaintext and rejects the version if it differs from `contentHash`, which `GET …/versions/{seq}/blob` also sends as `ETag`.
+  The server cannot make this check, because it never holds the plaintext ([07 §7.5](07-encryption.md)).
+  P2.4-TC-1 pins it as an integration test that fetches, opens, verifies and diffs two versions as the owner and as a read-only grantee, and finds no diff route in the route table or in `openapi/v1.yaml`.
 
 ## 10.5 Restore
 
@@ -35,6 +40,23 @@ The server records `content_hash` (client-computed), `blob_ref`, `size_cipher`, 
   - Text: the client produces a CRDT update transforming the current doc to the restored content (so collaborators converge), encrypts it, submits **via the relay**, then snapshots.
   - Ink/binary: the client uploads the restored bytes as ciphertext via **`PUT /files/{id}/blob`** = new head version.
 - The restore endpoint **records the restore** (audit), linking the new head to the source `seq`. Prior versions are untouched (non-destructive).
+
+> Restore as built in Phase 2.4 [P]:
+> the call writes the audit event `version.restore` with the source `seq` and marks the file with `pending_restore_seq` and the recording account in `pending_restore_by` ([03](03-data-model.md)).
+> It moves no content and changes no version, so it cannot destroy anything.
+> 1. The restoring account's next version of the file takes the mark as `restored_from_seq` and clears it, whether the version comes from `PUT /files/{id}/snapshot` or `PUT /files/{id}/blob`.
+>    A version another account writes in between neither takes nor clears the mark, because a collaborator's edit is no restore.
+>    Linking the next head of anyone, which Phase 1.1 did, was rejected, because a concurrent collaborator's write would then show up in the history as the restore.
+> 2. A restore upload that loses LWW is kept as a sibling version ([06 §6.5](06-sync.md)) and still takes the mark, because it holds the restored bytes.
+>    A retry on top of the new head is then a plain write, and a client that wants that head marked as well records the restore again.
+> 3. A second restore, by the same or another account, replaces a pending mark, and the audit keeps both events.
+>    One mark per file was chosen over a list of pending restores, because the mark only labels the history and the audit is the record.
+>
+> The call requires `Idempotency-Key`, and a replay of the same request answers `204` again without a second event, because a client retrying after a lost answer must not double the audit.
+> It needs write reach from a session on an active device, so a read-only grantee gets `403 acl_denied`, and a seq the file does not have is `404`.
+> A file excluded from sync answers `409 excluded_content`, because the server takes no content for it and no new head could follow.
+> The restored content is written with the file's current key like every other write, otherwise `412 key_generation_stale`, so a client restoring a version of an older generation opens it with that generation's wrap and seals it again ([09 §9.6](09-sharing-and-acl.md)).
+> P2.4-TC-2 pins both write paths as integration tests: the binary path through `PUT /blob` and the text path through an update on the log followed by a snapshot, each with every earlier version row and its served bytes unchanged afterwards.
 
 ## 10.6 Retention & garbage collection
 

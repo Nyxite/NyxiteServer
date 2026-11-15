@@ -1829,6 +1829,10 @@ paths:
     get:
       tags: [versions]
       summary: List versions, newest first
+      description: >-
+        Every version of the file, kept LWW losers (`isHead: false`) and restores included, for any account with read
+        reach. Records only: the server holds no plaintext size and no diff summary, and link guests have no history
+        (server 10 §10.1).
       parameters: [{ $ref: '#/components/parameters/Cursor' }, { $ref: '#/components/parameters/Limit' }]
       responses:
         '200':
@@ -1859,11 +1863,16 @@ paths:
     get:
       tags: [versions]
       summary: A version's ciphertext (chunk manifest for chunked versions)
+      description: >-
+        The client opens the frame with the wrap of the version's `keyId`, checks that the plaintext hashes to
+        `contentHash` and diffs locally. There is no diff endpoint (server 10 §10.4).
       responses:
         '200':
           description: Ciphertext.
           headers:
             Nyxite-Blob-Layout: { schema: { type: string, enum: [single, chunked] } }
+            ETag: { schema: { type: string }, description: 'The quoted contentHash of the version' }
+            Nyxite-Key-Id: { schema: { type: string, format: uuid }, description: 'The key the frame is sealed with' }
           content:
             application/octet-stream:
               schema: { type: string, contentMediaType: application/octet-stream }
@@ -1873,6 +1882,13 @@ paths:
     post:
       tags: [versions]
       summary: Record a restore; the new head arrives via the normal write path
+      description: >-
+        Takes `seq` only, no content, and changes no version. It records a `version.restore` audit event and marks the
+        caller's next version of the file, head or kept LWW loser, as `restoredFromSeq: seq`; a version another account
+        writes in between is no restore. The client then writes the restored content with the file's current key:
+        a CRDT update on the relay or log followed by `PUT /files/{id}/snapshot` for text, `PUT /files/{id}/blob`
+        otherwise. Needs write reach on an active device; a replay of the same `Idempotency-Key` answers `204` again
+        without a second event (server 10 §10.5).
       parameters: [{ $ref: '#/components/parameters/IdempotencyKey' }]
       requestBody:
         required: true
@@ -1885,7 +1901,9 @@ paths:
                 seq: { type: integer, format: int64 }
       responses:
         '204': { description: 'Recorded.' }
+        '403': { description: 'Read reach only (acl_denied), no active device (device_not_active) or a blocked account (account_blocked).', content: { application/problem+json: { schema: { $ref: '#/components/schemas/Problem' } } } }
         '404': { $ref: '#/components/responses/Problem' }
+        '409': { description: 'The file is excluded from sync, so no new head can follow (excluded_content), or the Idempotency-Key was used with another seq (idempotency_conflict).', content: { application/problem+json: { schema: { $ref: '#/components/schemas/Problem' } } } }
 
   # ---------------------------------------------------------------- shares
   /shares:
@@ -3232,7 +3250,7 @@ components:
         keyId: { $ref: '#/components/schemas/Uuid' }
         isHead: { type: boolean }
         authorId: { $ref: '#/components/schemas/NullableUuid' }
-        restoredFromSeq: { type: [integer, 'null'], format: int64 }
+        restoredFromSeq: { type: [integer, 'null'], format: int64, description: 'Set when this version is a recorded restore of that version (POST /files/{id}/restore)' }
         crdtSeq: { type: [integer, 'null'], format: int64, description: 'Text snapshots only: the last CRDT update the snapshot contains' }
         createdAt: { type: string, format: date-time }
     CrdtUpdate:

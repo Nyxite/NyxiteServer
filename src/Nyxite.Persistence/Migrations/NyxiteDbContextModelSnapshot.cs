@@ -468,6 +468,10 @@ namespace Nyxite.Persistence.Migrations
                         .HasColumnType("uuid")
                         .HasColumnName("owner_id");
 
+                    b.Property<Guid?>("PendingRestoreBy")
+                        .HasColumnType("uuid")
+                        .HasColumnName("pending_restore_by");
+
                     b.Property<long?>("PendingRestoreSeq")
                         .HasColumnType("bigint")
                         .HasColumnName("pending_restore_seq");

@@ -152,10 +152,18 @@ Rules of the wrapped-key endpoints **[P]**:
 ### Versions / history
 | Method | Path | Purpose |
 |--------|------|---------|
-| `GET` | `/files/{id}/versions` | List versions (paginated, newest first) |
+| `GET` | `/files/{id}/versions` | List versions (paginated, newest first, `?cursor=&limit=`), kept LWW losers and restores included |
 | `GET` | `/files/{id}/versions/{seq}` | Version metadata |
-| `GET` | `/files/{id}/versions/{seq}/blob` | Download a version's **ciphertext** |
-| `POST` | `/files/{id}/restore` | Restore: body `{ "seq": n }` **only** (no ciphertext upload). The new head arrives via the normal write path — text → client submits a CRDT update via the relay then snapshots; ink/binary → client uploads restored bytes via `PUT /files/{id}/blob`. This endpoint records the restore (audit) linking the new head to source `seq` |
+| `GET` | `/files/{id}/versions/{seq}/blob` | Download a version's **ciphertext**, with `ETag` (the quoted `contentHash`), `Nyxite-Key-Id` and `Nyxite-Blob-Layout` as on `GET /files/{id}/blob` |
+| `POST` | `/files/{id}/restore` | Restore: body `{ "seq": n }` **only** (no ciphertext upload). The new head arrives via the normal write path — text → client submits a CRDT update via the relay then snapshots; ink/binary → client uploads restored bytes via `PUT /files/{id}/blob`. This endpoint records the restore (audit) linking the new head to source `seq`. `Idempotency-Key` required, `204` |
+
+Rules of the version endpoints, served since Phase 1.1 and completed in Phase 2.4 (P2.4-SRV-1) **[P]**:
+
+- Listing and fetching need read reach, so a read-only grantee browses and diffs the history too. Link guests have none, because a guest token is never accepted under `/api/v1` ([§4.8](#48-public-share-endpoints)).
+- A version is a record: `seq`, `contentHash`, `layout`, `sizeCipher`, `keyId`, `isHead`, `authorId` (null for a guest), `restoredFromSeq`, `crdtSeq` (text snapshots) and `createdAt`. No plaintext size and no diff summary exist.
+- A restore needs write reach on an active device (`403 acl_denied` with read reach only), names a version of the file (`404` otherwise) and is refused for a file excluded from sync (`409 excluded_content`), because no new head could follow.
+- The restored content must be sealed with the file's current key like every write (`412 key_generation_stale`), so a client that restores a version of an older generation opens it with that generation's wrap and seals it again.
+- The details and their reasons are in [10 §10.5](10-version-history.md#105-restore).
 
 > **No `/diff` endpoint** — diffs are computed **client-side** from decrypted snapshots ([10](10-version-history.md)).
 

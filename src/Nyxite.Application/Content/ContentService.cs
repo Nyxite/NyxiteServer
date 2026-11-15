@@ -45,8 +45,9 @@ public sealed record BlobRead(Stream Content, VersionDto Version);
 /// </summary>
 public sealed class ContentService(
     NyxiteDbContext db, IBlobStore blobs, DeviceGuard guard, AuditWriter audit, TimeProvider time, IRelayNotifier relay, ChangeFeed feed,
-    IFileAccess access, IOptions<ContentOptions> options)
+    IFileAccess access, IdempotencyStore idempotency, IOptions<ContentOptions> options)
 {
+    public const string RestoreEndpoint = "POST /files/{id}/restore";
     public const int DefaultPageSize = 50;
     public const int MaxPageSize = 200;
     public const int MaxUpdatesPerSubmit = 100;
@@ -131,17 +132,30 @@ public sealed class ContentService(
     }
 
     /// <summary>
-    /// Records that the next head is a restore of version <paramref name="seq"/> (10 §10.5). No content moves here:
-    /// the restored bytes arrive through the normal write path, and that version then carries the link.
+    /// Records that the caller's next version of the file is a restore of version <c>seq</c> (10 §10.5). No content
+    /// moves here: the restored bytes arrive through the normal write path, and the caller's next version, head or kept
+    /// LWW loser, then carries the link. A version another account writes in between neither takes nor clears it, so a
+    /// collaborator's edit is never labelled a restore. A second restore by anyone replaces the pending one, while the
+    /// audit keeps both. A replay of the same <c>Idempotency-Key</c> answers again without a second audit event.
     /// </summary>
-    public async Task RecordRestoreAsync(ClaimsPrincipal principal, Guid fileId, RestoreRequest body, RequestInfo request, CancellationToken ct)
+    public async Task RecordRestoreAsync(ClaimsPrincipal principal, Guid fileId, RestoreRequest body, string? idempotencyKey, RequestInfo request,
+        CancellationToken ct)
     {
+        var key = IdempotencyStore.ValidKey(idempotencyKey) ?? throw AuthException.Validation("A valid Idempotency-Key header is required.");
         var actor = await WriterAsync(principal, ct);
+        // History is an account feature: a guest token is never accepted under /api/v1 (04 §4.8).
+        var userId = actor.UserId ?? throw AuthException.NotFound();
+        var hash = IdempotencyStore.Hash(body);
         await using var tx = await db.Database.BeginTransactionAsync(ct);
         var file = await LockFileAsync(actor, fileId, ct);
+        // Looked up under the file lock, so a retry that raced its own first attempt sees that attempt's answer.
+        if (await idempotency.FindAsync(userId, RestoreEndpoint, key, hash, ct) is not null) return;
         await VersionAsync(fileId, body.Seq, ct);
+        if (file.SyncPolicy == SyncPolicies.Excluded) throw ExcludedContent();
         file.PendingRestoreSeq = body.Seq;
-        audit.Add("version.restore", actor.UserId, request, kind: actor.UserId is null ? ActorKind.Guest : ActorKind.User, targetType: "file", targetId: fileId, detail: new { seq = body.Seq });
+        file.PendingRestoreBy = userId;
+        audit.Add("version.restore", userId, request, targetType: "file", targetId: fileId, detail: new { seq = body.Seq });
+        idempotency.Add(userId, RestoreEndpoint, key, hash, 204, new { });
         await db.SaveChangesAsync(ct);
         await tx.CommitAsync(ct);
     }
@@ -367,10 +381,17 @@ public sealed class ContentService(
             SizeCipher = reference.Size, KeyId = keyId, Layout = "single", AuthorId = authorId, CrdtSeq = crdtSeq, CreatedAt = now,
         };
         db.FileVersions.Add(version);
+        // A recorded restore links the restoring account's next version, also when that one lost LWW and is kept as a
+        // sibling, because it still holds the restored bytes (10 §10.5).
+        if (file.PendingRestoreSeq is { } restoredFrom && authorId is not null && file.PendingRestoreBy == authorId)
+        {
+            version.RestoredFromSeq = restoredFrom;
+            file.PendingRestoreSeq = null;
+            file.PendingRestoreBy = null;
+        }
+
         if (becomesHead)
         {
-            version.RestoredFromSeq = file.PendingRestoreSeq;
-            file.PendingRestoreSeq = null;
             file.CurrentVersionId = version.Id;
             file.UpdatedAt = now;
         }

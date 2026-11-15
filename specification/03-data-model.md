@@ -396,7 +396,8 @@ CREATE TABLE files (
   current_version_id uuid,                   -- FK added after file_versions; API exposes file_versions.seq as currentVersionSeq
   version_seq        bigint NOT NULL DEFAULT 0,  -- last file_versions.seq handed out; a counter, so a purged version never frees its number
   crdt_head_seq      bigint NOT NULL DEFAULT 0,  -- last crdt_updates.seq handed out; a counter, so pruning never moves it back
-  pending_restore_seq bigint,                -- set by POST /files/{id}/restore; the next head records it as restored_from_seq
+  pending_restore_seq bigint,                -- set by POST /files/{id}/restore; the restorer's next version records it as restored_from_seq
+  pending_restore_by uuid,                   -- the account that recorded pending_restore_seq; only its own next version takes it (10 §10.5)
   excluded_at      timestamptz,              -- set on a switch to excluded, cleared on a switch back; drives the content purge (06 §6.2)
   crdt_doc_id        uuid,                    -- text types only (client-allocated UUIDv7 at creation)
   key_generation     int NOT NULL DEFAULT 1,  -- current file-key rotation generation

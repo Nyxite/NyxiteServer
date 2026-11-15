@@ -59,9 +59,7 @@ public static class ContentEndpoints
 
         files.MapPost("/{id:guid}/restore", async (Guid id, RestoreRequest body, ContentService content, HttpContext http, CancellationToken ct) =>
         {
-            if (IdempotencyStore.ValidKey(http.Request.Headers[KeyEndpoints.IdempotencyHeader]) is null)
-                throw AuthException.Validation("A valid Idempotency-Key header is required.");
-            await content.RecordRestoreAsync(http.User, id, body, http.Info(), ct);
+            await content.RecordRestoreAsync(http.User, id, body, http.Request.Headers[KeyEndpoints.IdempotencyHeader], http.Info(), ct);
             return Results.NoContent();
         });
 

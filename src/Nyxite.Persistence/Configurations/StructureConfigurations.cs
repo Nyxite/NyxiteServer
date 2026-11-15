@@ -82,6 +82,7 @@ internal sealed class FileConfiguration : IEntityTypeConfiguration<FileEntity>
         b.Property(x => x.VersionSeq).HasColumnName("version_seq").HasDefaultValue(0L);
         b.Property(x => x.CrdtHeadSeq).HasColumnName("crdt_head_seq").HasDefaultValue(0L);
         b.Property(x => x.PendingRestoreSeq).HasColumnName("pending_restore_seq");
+        b.Property(x => x.PendingRestoreBy).HasColumnName("pending_restore_by");
         b.HasOne<FileVersionEntity>().WithMany().HasForeignKey(x => x.CurrentVersionId).OnDelete(DeleteBehavior.Restrict)
             .HasConstraintName("fk_files_current_version");
         b.HasIndex(x => x.CrdtDocId).IsUnique().HasFilter("crdt_doc_id IS NOT NULL").HasDatabaseName("uq_files_crdt_doc");
