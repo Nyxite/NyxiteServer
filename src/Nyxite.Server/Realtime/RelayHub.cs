@@ -4,6 +4,7 @@ using Microsoft.AspNetCore.SignalR;
 using Microsoft.EntityFrameworkCore;
 using Nyxite.Application.Auth;
 using Nyxite.Application.Content;
+using Nyxite.Application.Keys;
 using Nyxite.Contracts.Content;
 using Nyxite.Crypto;
 using Nyxite.Persistence;
@@ -42,10 +43,24 @@ public interface IRelayClient
 /// <summary>A connection in a room: what the roster shows, and what the periodic re-check needs to judge it again.</summary>
 public sealed record RelayMember(PresenceDto Who, Guid? UserId, Guid? SessionId);
 
-/// <summary>Who is connected to which document room. In memory, because v1 runs one node (05 §5.10).</summary>
+/// <summary>
+/// Who is connected to which document room. In memory, because v1 runs one node (05 §5.10). A room that becomes empty
+/// is forgotten (05 §5.9), so the map holds only rooms someone is in, and the re-check walks only those.
+/// </summary>
 public sealed class RelayPresence
 {
-    private readonly ConcurrentDictionary<Guid, ConcurrentDictionary<string, RelayMember>> _rooms = new();
+    /// <summary>
+    /// One room's members. <see cref="Closed"/> is set, under the room's lock, when the last member leaves and the room is
+    /// taken out of the map, so a join that still holds this instance retries with a fresh one instead of landing in a
+    /// room nobody can see.
+    /// </summary>
+    private sealed class Room
+    {
+        public readonly ConcurrentDictionary<string, RelayMember> Members = new();
+        public bool Closed;
+    }
+
+    private readonly ConcurrentDictionary<Guid, Room> _rooms = new();
     private readonly ConcurrentDictionary<string, HubCallerContext> _connections = new();
 
     public void Connect(HubCallerContext context) => _connections[context.ConnectionId] = context;
@@ -58,17 +73,44 @@ public sealed class RelayPresence
         if (_connections.TryRemove(connectionId, out var context)) context.Abort();
     }
 
-    public void Join(Guid fileId, string connectionId, RelayMember member) => _rooms.GetOrAdd(fileId, _ => new())[connectionId] = member;
+    public void Join(Guid fileId, string connectionId, RelayMember member)
+    {
+        while (true)
+        {
+            var room = _rooms.GetOrAdd(fileId, _ => new Room());
+            lock (room)
+            {
+                if (room.Closed) continue;
+                room.Members[connectionId] = member;
+                return;
+            }
+        }
+    }
 
-    public bool Leave(Guid fileId, string connectionId) => _rooms.TryGetValue(fileId, out var room) && room.TryRemove(connectionId, out _);
+    public bool Leave(Guid fileId, string connectionId)
+    {
+        if (!_rooms.TryGetValue(fileId, out var room)) return false;
+        lock (room)
+        {
+            if (!room.Members.TryRemove(connectionId, out _)) return false;
+            // Only this exact empty instance is removed, so a room a concurrent join has already replaced stays.
+            if (room.Members.IsEmpty)
+            {
+                room.Closed = true;
+                _rooms.TryRemove(KeyValuePair.Create(fileId, room));
+            }
 
-    public bool IsIn(Guid fileId, string connectionId) => _rooms.TryGetValue(fileId, out var room) && room.ContainsKey(connectionId);
+            return true;
+        }
+    }
 
-    public List<Guid> LeaveAll(string connectionId) => _rooms.Where(r => r.Value.TryRemove(connectionId, out _)).Select(r => r.Key).ToList();
+    public bool IsIn(Guid fileId, string connectionId) => _rooms.TryGetValue(fileId, out var room) && room.Members.ContainsKey(connectionId);
+
+    public List<Guid> LeaveAll(string connectionId) => _rooms.Keys.Where(fileId => Leave(fileId, connectionId)).ToList();
 
     /// <summary>Every connection of every room at this moment, for the periodic re-check.</summary>
     public List<(Guid FileId, string ConnectionId, RelayMember Member)> Members() =>
-        _rooms.SelectMany(r => r.Value.Select(m => (r.Key, m.Key, m.Value))).ToList();
+        _rooms.SelectMany(r => r.Value.Members.Select(m => (r.Key, m.Key, m.Value))).ToList();
 
     /// <summary>
     /// One entry per account, however many devices it has in the room, ordered by id; then one entry per guest
@@ -77,7 +119,7 @@ public sealed class RelayPresence
     public PresenceDto[] Roster(Guid fileId)
     {
         if (!_rooms.TryGetValue(fileId, out var room)) return [];
-        var members = room.Values.ToList();
+        var members = room.Members.Values.ToList();
         return members.Where(m => m.Who.Kind == PresenceDto.User).Select(m => m.Who).DistinctBy(p => p.UserId)
             .OrderBy(p => p.UserId, StringComparer.Ordinal)
             .Concat(members.Where(m => m.Who.Kind == PresenceDto.Guest).Select(m => m.Who))
@@ -100,7 +142,8 @@ public sealed class RelayNotifier(IHubContext<RelayHub, IRelayClient> hub) : IRe
 /// the ACL is checked at join and at every submit, and <see cref="RelayAccessCheck"/> checks it again periodically.
 /// </summary>
 [Authorize]
-public sealed class RelayHub(ContentService content, RelayPresence presence, NyxiteDbContext db) : Hub<IRelayClient>
+public sealed class RelayHub(ContentService content, RelayPresence presence, NyxiteDbContext db, DeviceGuard guard, TimeProvider time)
+    : Hub<IRelayClient>
 {
     public const string Path = "/hubs/relay";
 
@@ -110,30 +153,49 @@ public sealed class RelayHub(ContentService content, RelayPresence presence, Nyx
 
     public static EncryptedUpdate ToWire(CrdtUpdateDto u) => new(u.Seq, Base64UrlCodec.Decode(u.UpdateEnc), u.KeyId.ToString());
 
+    /// <summary>
+    /// Joins a room (05 §5.4). The session must be live and the account must reach the file. The connection enters the
+    /// group and the presence together before the log is read, so no update falls in between and the periodic re-check
+    /// judges it from that moment on; a client drops what it gets twice by its sequence number. When any step after that
+    /// fails, both are rolled back, so no connection receives a room's traffic without being one the re-check sees.
+    /// </summary>
     public async Task JoinDocument(string fileId, long sinceSeq)
     {
         var id = Parse(fileId);
         await GuardAsync(fileId, async () =>
         {
             var user = Context.User!;
-            // Reach is checked by the first read. The room is joined before the log is read, so no update falls in between;
-            // a client drops what it gets twice by its sequence number.
-            var snapshot = await content.SnapshotPointerAsync(user, id, Context.ConnectionAborted);
-            await Groups.AddToGroupAsync(Context.ConnectionId, Room(id), Context.ConnectionAborted);
-            if (snapshot is not null) await Clients.Caller.OnSnapshot(fileId, snapshot.CrdtSeq ?? 0, snapshot.Seq);
+            var ct = Context.ConnectionAborted;
+            var session = await guard.SessionAsync(user, ct);
+            if (session.ExpiresAt <= time.GetUtcNow()) throw AuthException.Unauthenticated();
 
-            var since = Math.Max(0, sinceSeq);
-            while (true)
+            // Reach is checked by the first read.
+            var snapshot = await content.SnapshotPointerAsync(user, id, ct);
+            var userId = user.UserId();
+            var name = await db.Users.Where(u => u.Id == userId).Select(u => u.DisplayName).SingleAsync(ct);
+            try
             {
-                var page = await content.ReadUpdatesAsync(user, id, since, JoinBatch, Context.ConnectionAborted);
-                await Clients.Caller.OnUpdates(fileId, page.Items.Select(ToWire).ToArray());
-                if (!page.HasMore) break;
-                since = page.Items[^1].Seq;
+                await Groups.AddToGroupAsync(Context.ConnectionId, Room(id), ct);
+                presence.Join(id, Context.ConnectionId, new RelayMember(PresenceDto.ForUser(userId, name), userId, session.Id));
+                // A disconnect that ran while the join was under way has already left every room, so the join must not stay.
+                ct.ThrowIfCancellationRequested();
+                if (snapshot is not null) await Clients.Caller.OnSnapshot(fileId, snapshot.CrdtSeq ?? 0, snapshot.Seq);
+
+                var since = Math.Max(0, sinceSeq);
+                while (true)
+                {
+                    var page = await content.ReadUpdatesAsync(user, id, since, JoinBatch, ct);
+                    await Clients.Caller.OnUpdates(fileId, page.Items.Select(ToWire).ToArray());
+                    if (!page.HasMore) break;
+                    since = page.Items[^1].Seq;
+                }
+            }
+            catch
+            {
+                await LeaveRoomAsync(id);
+                throw;
             }
 
-            var userId = user.UserId();
-            var name = await db.Users.Where(u => u.Id == userId).Select(u => u.DisplayName).SingleAsync(Context.ConnectionAborted);
-            presence.Join(id, Context.ConnectionId, new RelayMember(PresenceDto.ForUser(userId, name), userId, user.SessionIdOf()));
             await Clients.Group(Room(id)).OnPresence(fileId, presence.Roster(id));
         });
     }
@@ -153,7 +215,9 @@ public sealed class RelayHub(ContentService content, RelayPresence presence, Nyx
     /// <summary>
     /// Forwards encrypted awareness (cursors, selections, a label: <c>object_kind</c> 6) to the others in the room. It is
     /// never stored, in Postgres, the blob store or a log. Only a connection in the room may send, so reach is the one of
-    /// its join, kept current by the periodic re-check instead of a query per message at caret rate.
+    /// its join, kept current by the periodic re-check instead of a query per message at caret rate. A payload that is
+    /// not an NYXC frame is refused, so an unsealed cursor never passes the relay; the <c>object_kind</c> sits in the AAD
+    /// and cannot be checked here.
     /// </summary>
     public async Task SubmitAwareness(string fileId, byte[] awarenessCipher)
     {
@@ -162,15 +226,27 @@ public sealed class RelayHub(ContentService content, RelayPresence presence, Nyx
         {
             if (!presence.IsIn(id, Context.ConnectionId)) throw AuthException.NotFound();
             if (awarenessCipher.Length > content.MaxAwarenessBytes) throw ContentService.PayloadTooLarge("The awareness message is too large.");
+            if (!NyxcFrame.TryParseHeader(awarenessCipher, out _)) throw AuthException.Validation("The awareness message must be an NYXC frame.");
             await Clients.OthersInGroup(Room(id)).OnAwareness(fileId, awarenessCipher);
         });
     }
 
-    public async Task LeaveDocument(string fileId)
+    public async Task LeaveDocument(string fileId) => await LeaveRoomAsync(Parse(fileId));
+
+    /// <summary>
+    /// Takes the caller out of a room: the group first, so a failure in between never leaves a listener the re-check
+    /// cannot see, then the presence, and the room gets the new roster when the caller was in it.
+    /// </summary>
+    private async Task LeaveRoomAsync(Guid id)
     {
-        var id = Parse(fileId);
-        await Groups.RemoveFromGroupAsync(Context.ConnectionId, Room(id));
-        if (presence.Leave(id, Context.ConnectionId)) await Clients.Group(Room(id)).OnPresence(fileId, presence.Roster(id));
+        try
+        {
+            await Groups.RemoveFromGroupAsync(Context.ConnectionId, Room(id), CancellationToken.None);
+        }
+        finally
+        {
+            if (presence.Leave(id, Context.ConnectionId)) await Clients.Group(Room(id)).OnPresence(id.ToString(), presence.Roster(id));
+        }
     }
 
     public override Task OnConnectedAsync()

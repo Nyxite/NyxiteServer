@@ -101,7 +101,8 @@ public sealed class RelayReviewFindingsTests(PostgresFixture pg)
         Assert.Equal(0, await RecheckAsync(app));
 
         await laptop.Connection.InvokeAsync<long>("SubmitUpdate", fileId, Update(file, "secret"));
-        await laptop.Connection.InvokeAsync("SubmitAwareness", fileId, new byte[] { 1 });
+        await laptop.Connection.InvokeAsync("SubmitAwareness", fileId,
+            NyxcFrame.Seal(file.Key, file.KeyId, file.Id, ObjectKind.Awareness, Encoding.UTF8.GetBytes("caret")));
         await RelayPeer.UntilAsync(() => laptop.Updates.Count == 1);
         await Task.Delay(300);
         Assert.Empty(web.Updates);
@@ -295,8 +296,9 @@ public sealed class RelayReviewFindingsTests(PostgresFixture pg)
         await viewer.Connection.InvokeAsync("JoinDocument", fileId, 0L);
 
         const int burst = 500;
+        var frame = NyxcFrame.Seal(file.Key, file.KeyId, file.Id, ObjectKind.Awareness, new byte[1024 - NyxcFrame.Overhead]);
         var started = DateTime.UtcNow;
-        for (var i = 0; i < burst; i++) await viewer.Connection.InvokeAsync("SubmitAwareness", fileId, new byte[1024]);
+        for (var i = 0; i < burst; i++) await viewer.Connection.InvokeAsync("SubmitAwareness", fileId, frame);
         await RelayPeer.UntilAsync(() => laptop.Awareness.Count == burst);
         Assert.True(DateTime.UtcNow - started < TimeSpan.FromSeconds(10));
         Assert.Empty(viewer.Errors);

@@ -288,7 +288,7 @@ public sealed class ContentTests(PostgresFixture pg)
         await RelayPeer.UntilAsync(() => d2.Updates.Count == 3);
 
         // Awareness goes to the others only and is not stored.
-        await d1.Connection.InvokeAsync("SubmitAwareness", fileId, new byte[] { 1, 2, 3 });
+        await d1.Connection.InvokeAsync("SubmitAwareness", fileId, Seal(file, "caret", ObjectKind.Awareness));
         await RelayPeer.UntilAsync(() => d2.Awareness.Count == 1);
         Assert.Empty(d1.Awareness);
 

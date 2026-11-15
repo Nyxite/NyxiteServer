@@ -128,7 +128,8 @@ public sealed class CollaborationTests(PostgresFixture pg)
         var denied = await Assert.ThrowsAsync<HubException>(() =>
             viewer.Connection.InvokeAsync<long>("SubmitUpdate", fileId, new EncryptedUpdate(0, Seal(file, "r"), file.KeyId.ToString())));
         Assert.Contains("acl_denied", denied.Message);
-        await viewer.Connection.InvokeAsync("SubmitAwareness", fileId, new byte[] { 7 });
+        await viewer.Connection.InvokeAsync("SubmitAwareness", fileId,
+            NyxcFrame.Seal(file.Key, file.KeyId, file.Id, ObjectKind.Awareness, Encoding.UTF8.GetBytes("caret")));
         await RelayPeer.UntilAsync(() => laptop.Awareness.Count == 1 && web.Awareness.Count == 1);
         Assert.Empty(viewer.Awareness);
 

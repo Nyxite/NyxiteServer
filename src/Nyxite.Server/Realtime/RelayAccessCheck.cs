@@ -12,8 +12,15 @@ namespace Nyxite.Server.Realtime;
 /// connection again: one whose session ended is closed, and one whose account lost reach to the file is removed from
 /// that room with <c>OnError(not_found)</c>, and the others get the new roster. It reads only ACL metadata.
 /// </summary>
+/// <remarks>
+/// Every check is isolated: one that throws, such as a timed out query, is logged and costs that connection or account
+/// this pass, while every other membership is still judged. A removal takes the connection out of the group before it
+/// takes it out of the presence, so a failure in between leaves a member the next pass sees again, never a listener
+/// outside the roster.
+/// </remarks>
 public sealed class RelayAccessCheck(
-    RelayPresence presence, IHubContext<RelayHub, IRelayClient> hub, ContentService content, NyxiteDbContext db, TimeProvider time)
+    RelayPresence presence, IHubContext<RelayHub, IRelayClient> hub, ContentService content, NyxiteDbContext db, TimeProvider time,
+    ILogger<RelayAccessCheck> logger)
 {
     /// <summary>Runs one pass and returns how many room memberships it ended.</summary>
     public async Task<int> RunAsync(CancellationToken ct)
@@ -30,33 +37,63 @@ public sealed class RelayAccessCheck(
             .Select(s => s.Id).ToListAsync(ct)).ToHashSet();
         foreach (var connection in members.Where(m => m.Member.SessionId is { } sid && !live.Contains(sid)).GroupBy(m => m.ConnectionId))
         {
-            foreach (var (fileId, _, _) in connection)
-                await hub.Clients.Client(connection.Key).OnError(fileId.ToString(), "unauthenticated", "The session has ended.");
-            foreach (var fileId in presence.LeaveAll(connection.Key))
+            try
             {
-                changed.Add(fileId);
-                removed++;
-            }
+                foreach (var (fileId, _, _) in connection)
+                {
+                    await hub.Clients.Client(connection.Key).OnError(fileId.ToString(), "unauthenticated", "The session has ended.");
+                    await hub.Groups.RemoveFromGroupAsync(connection.Key, RelayHub.Room(fileId), ct);
+                }
 
-            presence.Abort(connection.Key);
+                foreach (var fileId in presence.LeaveAll(connection.Key))
+                {
+                    changed.Add(fileId);
+                    removed++;
+                }
+
+                presence.Abort(connection.Key);
+            }
+            catch (Exception e) when (!ct.IsCancellationRequested)
+            {
+                logger.LogWarning(e, "The relay access re-check could not close a connection of an ended session.");
+            }
         }
 
         // One query per account and document, however many devices of the account are in the room.
         foreach (var pair in members.Where(m => m.Member.UserId is not null && live.Contains(m.Member.SessionId!.Value))
                      .GroupBy(m => (m.FileId, UserId: m.Member.UserId!.Value)))
         {
-            if (await content.AccessLevelAsync(pair.Key.UserId, pair.Key.FileId, ct) != FileAccessLevel.None) continue;
-            foreach (var (fileId, connectionId, _) in pair)
+            try
             {
-                if (!presence.Leave(fileId, connectionId)) continue;
-                await hub.Groups.RemoveFromGroupAsync(connectionId, RelayHub.Room(fileId), ct);
-                await hub.Clients.Client(connectionId).OnError(fileId.ToString(), "not_found", "Not found.");
-                changed.Add(fileId);
-                removed++;
+                if (await content.AccessLevelAsync(pair.Key.UserId, pair.Key.FileId, ct) != FileAccessLevel.None) continue;
+                foreach (var (fileId, connectionId, _) in pair)
+                {
+                    if (!presence.IsIn(fileId, connectionId)) continue;
+                    await hub.Groups.RemoveFromGroupAsync(connectionId, RelayHub.Room(fileId), ct);
+                    if (!presence.Leave(fileId, connectionId)) continue;
+                    changed.Add(fileId);
+                    removed++;
+                    await hub.Clients.Client(connectionId).OnError(fileId.ToString(), "not_found", "Not found.");
+                }
+            }
+            catch (Exception e) when (!ct.IsCancellationRequested)
+            {
+                logger.LogWarning(e, "The relay access re-check of one account in one room failed.");
             }
         }
 
-        foreach (var fileId in changed) await hub.Clients.Group(RelayHub.Room(fileId)).OnPresence(fileId.ToString(), presence.Roster(fileId));
+        foreach (var fileId in changed)
+        {
+            try
+            {
+                await hub.Clients.Group(RelayHub.Room(fileId)).OnPresence(fileId.ToString(), presence.Roster(fileId));
+            }
+            catch (Exception e) when (!ct.IsCancellationRequested)
+            {
+                logger.LogWarning(e, "The relay access re-check could not send a roster.");
+            }
+        }
+
         return removed;
     }
 }
@@ -67,11 +104,20 @@ public sealed class RelayAccessWorker(
 {
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
+        // The options are validated at startup (14 §14.4); this guard keeps a worker built without that validation from
+        // running passes without pause or failing on every turn.
+        var interval = options.Value.AccessRecheckInterval;
+        if (interval <= TimeSpan.Zero)
+        {
+            logger.LogError("Relay:AccessRecheckInterval must be positive; the relay access re-check does not run.");
+            return;
+        }
+
         while (!stoppingToken.IsCancellationRequested)
         {
             try
             {
-                await Task.Delay(options.Value.AccessRecheckInterval, time, stoppingToken);
+                await Task.Delay(interval, time, stoppingToken);
                 await using var scope = scopes.CreateAsyncScope();
                 var removed = await scope.ServiceProvider.GetRequiredService<RelayAccessCheck>().RunAsync(stoppingToken);
                 if (removed > 0) logger.LogInformation("The relay access re-check removed {Count} room memberships.", removed);

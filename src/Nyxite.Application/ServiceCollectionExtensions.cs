@@ -49,7 +49,9 @@ public static class ServiceCollectionExtensions
         services.AddScoped<Sync.ChangeLogPruner>();
         services.AddScoped<Structure.StructureService>();
         services.AddOptions<Content.ContentOptions>().Bind(configuration.GetSection(Structure.StructureOptions.Section));
-        services.AddOptions<Content.RelayOptions>().Bind(configuration.GetSection(Content.RelayOptions.Section));
+        services.AddOptions<Content.RelayOptions>().Bind(configuration.GetSection(Content.RelayOptions.Section))
+            .Validate(o => o.AccessRecheckInterval > TimeSpan.Zero, "Relay:AccessRecheckInterval must be positive.")
+            .ValidateOnStart();
         services.AddScoped<Content.IFileAccess, Content.OwnerFileAccess>();
         services.AddScoped<Content.ContentService>();
         services.AddScoped<Content.CrdtLogPruner>();

@@ -48,9 +48,17 @@ public record PresenceDto(string Kind, string? UserId, string? DisplayName); // 
 ## 5.4 Join handshake
 
 1. Client opens the socket (authenticated) and calls `JoinDocument(fileId, sinceSeq)`.
-2. Server checks **ACL** (read to receive; **write** to `SubmitUpdate`). Guests' permission comes from the link share. Read reach without write reach answers `SubmitUpdate` with `acl_denied`, no reach with `not_found` ([09 §9.5](09-sharing-and-acl.md)).
-3. Server returns, via `OnUpdates`, all encrypted updates with `seq > sinceSeq` (and points the client at the latest encrypted snapshot blob to bootstrap from). The server does **not** compute a state-vector diff — it has no readable document; the **client** reconciles using the Yrs state vector it reconstructs locally.
-4. Client is added to the `file:{fileId}` group; presence roster sent via `OnPresence`.
+2. Server checks that the connection's session is live, and answers `unauthenticated` otherwise, because no room is open to a dead session.
+   An open connection outlives its session until the next re-check, so the join cannot rely on the socket's authentication alone.
+3. Server checks **ACL** (read to receive; **write** to `SubmitUpdate`). Guests' permission comes from the link share. Read reach without write reach answers `SubmitUpdate` with `acl_denied`, no reach with `not_found` ([09 §9.5](09-sharing-and-acl.md)).
+4. Client is added to the `file:{fileId}` group and to the room's presence, before the log is read, so no update falls between the log and the live stream and the periodic re-check judges the connection from that moment on.
+   A client drops what it receives twice by its `seq`.
+5. Server returns, via `OnUpdates`, all encrypted updates with `seq > sinceSeq` (and points the client at the latest encrypted snapshot blob to bootstrap from). The server does **not** compute a state-vector diff — it has no readable document; the **client** reconciles using the Yrs state vector it reconstructs locally.
+6. Presence roster sent to the room via `OnPresence`.
+
+> Failed join [P]:
+> when any step after step 4 fails, a lost reach or a failed database read for example, the connection leaves the group and the presence again before the error is answered.
+> Without the rollback it would receive every update and every awareness message of the room while being in neither the roster nor the re-check, so no later revocation would end it.
 
 > ACL re-checks [P]:
 > reach is checked at `JoinDocument` and at every `SubmitUpdate`, and again for every connection in a room every `NYXITE__Relay__AccessRecheckInterval` (default 30 s, [14](14-deployment-and-config.md)).
@@ -60,13 +68,15 @@ public record PresenceDto(string Kind, string? UserId, string? DisplayName); // 
 > A connection whose session was revoked or expired gets `OnError(fileId, "unauthenticated", ...)` for each of its rooms and is then closed, because no room is open to a dead session.
 > `SubmitAwareness` is not checked against the ACL per message, because awareness flows at caret rate.
 > It requires the connection to be in the room, so its reach is the one of the join, kept current by the periodic pass.
+> Every check of the pass is isolated, so one that fails, a timed out query for example, costs that connection or account one pass and leaves every other membership judged.
+> A removal takes the connection out of the group before it takes it out of the presence, so a failure in between leaves a member the next pass sees again and never a listener outside the roster.
 
 ## 5.5 Update flow
 
 1. Client edits → Yrs update → **encrypts** with the file key → `SubmitUpdate(fileId, EncryptedUpdate)`.
 2. Server: authorize (write) → assign `seq` → **persist** the ciphertext to `crdt_updates` → broadcast `OnUpdate` to the rest of the group. **No decryption, no merge, no validation of contents.**
 3. Peers receive the encrypted update, decrypt locally, and merge into their Yrs doc.
-4. Awareness is relayed **encrypted** and **not persisted**. It is an NYXC frame of `object_kind` `awareness = 6` ([07 §7.4](07-encryption.md)) around a y-protocols awareness update, at most `NYXITE__Limits__MaxAwarenessBytes`. The server forwards the bytes unchanged to the others in the room, the sender excluded, because a client already knows its own cursor.
+4. Awareness is relayed **encrypted** and **not persisted**. It is an NYXC frame of `object_kind` `awareness = 6` ([07 §7.4](07-encryption.md)) around a y-protocols awareness update, at most `NYXITE__Limits__MaxAwarenessBytes`. A payload that does not parse as an NYXC header is refused with `validation_failed`, so an unsealed cursor never passes the relay. The `object_kind` sits in the AAD and cannot be checked by the server, but the header check costs nothing at caret rate. The server forwards the bytes unchanged to the others in the room, the sender excluded, because a client already knows its own cursor.
 
 ## 5.6 Snapshotting & compaction (client-driven)
 
@@ -100,6 +110,7 @@ public record PresenceDto(string Kind, string? UserId, string? DisplayName); // 
 - The server assigns a monotonic `seq` per doc for the encrypted log; CRDT convergence does not depend on order, but `seq` gives the relay a durable cursor and snapshot watermark.
 - A write is acknowledged after it is **persisted** (durable) — even though the server can't read it, it won't lose it.
 - Room lifecycle: a room is purely a relay group; when empty, the server retains the encrypted log/snapshots and forgets in-memory presence.
+  A room is forgotten only as the exact empty instance, and a join that meets a room in the middle of its removal opens a fresh one, so a concurrent join is never lost.
 
 ## 5.10 Scale-out seam
 
