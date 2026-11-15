@@ -28,4 +28,17 @@ public sealed class RelayOptions
     /// 09 §9.6). Join and submit check on every call; this bounds how long a revoked reader keeps receiving.
     /// </summary>
     public TimeSpan AccessRecheckInterval { get; set; } = TimeSpan.FromSeconds(30);
+
+    /// <summary>
+    /// Awareness messages one connection may send per second, over all its rooms, as a token bucket that holds one
+    /// second's worth (05 §5.7, 13 §13.5). Clients coalesce awareness to 20 to 30 Hz per document, so twice that leaves
+    /// room for two active documents and timer jitter. A message beyond it is refused with <c>rate_limited</c>.
+    /// </summary>
+    public int AwarenessPerSecond { get; set; } = 60;
+
+    /// <summary>Connections one room holds at most, accounts and guests together; one more join answers <c>room_full</c>.</summary>
+    public int MaxConnectionsPerRoom { get; set; } = 100;
+
+    /// <summary>Rooms one connection is in at most; one more join answers <c>too_many_rooms</c>.</summary>
+    public int MaxRoomsPerConnection { get; set; } = 50;
 }

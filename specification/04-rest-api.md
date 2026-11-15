@@ -119,7 +119,8 @@ Rules of the content endpoints **[P]**:
 |--------|------|---------|
 | `GET` | `/files/{id}/keys` | Get the caller's **wrapped** file key(s) for this file (to unwrap locally) |
 | `POST` | `/files/{id}/keys` | Upload wrapped file key(s) for members (used when sharing / rotating) |
-| `POST` | `/files/{id}/keys/rotate` | Commit a rotation. Body `{ newKeyId, generation, wrappedKeys[], newHeadRef }`. The server commits **only if** `generation == current + 1`, else `409 conflict` (another rotation won). In-flight CRDT updates tagged with the old `key_id` are accepted until commit, then rejected `412 key_generation_stale` |
+| `PUT` | `/files/{id}/keys/rotate/head` | Stage the head sealed with the key a rotation is about to commit: headers `Nyxite-Key-Id` (the new key), `Nyxite-Content-Hash`, and `Nyxite-Snapshot-Seq` (text file) or `If-Match` (other files). `204`; no version until the commit |
+| `POST` | `/files/{id}/keys/rotate` | Commit a rotation. Body `{ newKeyId, generation, wrappedKeys[], newHeadRef, nameEnc, metadataEnc }`, `Idempotency-Key` required. The server commits **only if** `generation == current + 1`, else `409 conflict` (another rotation won). In-flight CRDT updates tagged with the old `key_id` are accepted until commit, then rejected `412 key_generation_stale` |
 | `POST` | `/files/keys:batch` | Batch wrap (subtree share fan-out). Body `{ grants: [ { fileId \| folderId, keyId, memberId, wrappedKey, algId? } ] }`, at most 500, **idempotent**, with **partial-success** reporting per item ([09 §9.3, §9.4a](09-sharing-and-acl.md)) |
 
 Rules of the wrapped-key endpoints **[P]**:
@@ -127,7 +128,13 @@ Rules of the wrapped-key endpoints **[P]**:
 - Only the project owner hands out keys, from a session on an active device, and only to a member that owns the project or reaches the object through a live share. A wrap must name a key and generation the object has.
 - `POST /files/{id}/keys` is atomic, `{ wrappedKeys: [...] }` answers `204`, and any bad wrap makes it `400`. The batch judges each grant on its own and answers `{ results: [ { fileId, folderId, status, error } ] }` in request order, `status` `applied` or `rejected`.
 - Both are idempotent without an `Idempotency-Key`: a wrap of a key the member already has is left as it is, so a retry cannot store a second copy.
-- `POST /files/{id}/keys/rotate` is Phase 2.3 (P2.3-SRV-1). Its contract is pinned by the P2.2-CORE-1 fixtures, and the server does not serve it before then. The `412 key_generation_stale` it relies on already holds: every update and upload must be sealed with the file's current key.
+- `POST /files/{id}/keys/rotate` and its staged head are served since Phase 2.3 (P2.3-SRV-1), and the P2.2-CORE-1 fixtures `sharing.json` pin both requests.
+  Only the project owner rotates, and the wraps must name exactly the accounts that reach the file, the owner included, so a removed member gets no wrap of the new key.
+  `newHeadRef` is the content hash of the staged head, required when the file has a head, and a head that moved since staging is `409 version_conflict`.
+  `nameEnc` and `metadataEnc` are sealed again with the new key, because listings carry only the wrap of the current generation.
+  The rules and their reasons are in [09 §9.6](09-sharing-and-acl.md).
+- Every update, snapshot, blob and name change must be sealed with the file's current key, otherwise `412 key_generation_stale` or, for a name, `400`.
+  Older wraps and versions stay readable to the members who had them.
 
 ### Keys, devices, recovery (E2EE)
 | Method | Path | Purpose |
@@ -192,12 +199,12 @@ RFC 9457 `application/problem+json`. Selected codes:
 | 401 | `unauthenticated`, `token_expired` | Missing/invalid bearer — uniform across all ids, reveals no specific resource |
 | 403 | `acl_denied`, `2fa_required`, `email_unverified`, `account_blocked`, `pairing_code_invalid`, `device_not_active` | Authz denied **only when the caller already has read reach** to the resource (existence not secret to them) or on capability/collection denials that expose no id; **no** `breakglass`. `2fa_required` also covers a missing or invalid step-up token, `email_unverified` a factor enrollment before email verification, `account_blocked` a web session for a blocked account ([08](08-authentication.md)), `device_not_active` a key-management write (device approval, key rotation, recovery-blob replacement) from a session that is not bound to an active device |
 | 404 | `not_found` | Resource missing **or** the caller has no reach to it — **the two are indistinguishable** (existence-hiding, see below) |
-| 409 | `conflict`, `version_conflict`, `excluded_content`, `address_exists`, `idempotency_conflict`, `group_full`, `key_not_transparent` | LWW conflict / policy / write-once / rotation lost (file or group scope) / same key + different body / group at member limit ([12 §12.7](12-administration.md)) / enrollment key failed the transparency inclusion proof ([09 §9.9](09-sharing-and-acl.md)) |
+| 409 | `conflict`, `version_conflict`, `excluded_content`, `address_exists`, `idempotency_conflict`, `group_full`, `key_not_transparent`, `room_full`, `too_many_rooms` | LWW conflict / policy / write-once / rotation lost (file or group scope) / same key + different body / group at member limit ([12 §12.7](12-administration.md)) / enrollment key failed the transparency inclusion proof ([09 §9.9](09-sharing-and-acl.md)) / relay only: the room or the connection is at its cap ([05 §5.4](05-realtime-collaboration.md)) |
 | 410 | `share_revoked`, `link_expired`, `pairing_expired`, `cursor_expired` | Dead share/link / pairing code expired or attempt cap reached / sync cursor older than the change-log retention ([06 §6.3.2](06-sync.md)) |
 | 412 | `key_generation_stale` | Client used a superseded file-key generation (rotate/refetch) |
 | 413 | `payload_too_large` | Ciphertext exceeds the upload limit **or the per-user storage quota** ([§4.7](#47-limits--validation-p), [12 §12.6](12-administration.md)) |
 | 507 | `insufficient_storage` | Instance-level storage exhausted (per-user quota → `413`) |
-| 429 | `rate_limited` | [13](13-security.md) |
+| 429 | `rate_limited` | [13](13-security.md), on the relay also an awareness message beyond the connection's budget ([05 §5.5](05-realtime-collaboration.md)) |
 | 5xx | `internal`, `unavailable` | Server/dependency failure |
 
 > **Existence-hiding (no resource enumeration) — `404`, not `403`.** For any resource addressed by an id or token (files, projects, folders, users, **admin resources**, share URLs), an authenticated caller who has **no reach** to it gets the **same `404 not_found`** as for a non-existent id — identical `code`, body, and (as far as practical) timing. An attacker must not be able to tell "exists but I'm not authorized" from "nothing is there"; only a **correct token + actual access** yields a `200`. `403` is reserved for the case where the caller **demonstrably already knows the resource exists** (has read reach but lacks the specific action) or for capability/collection denials that reveal no id. `401` (no valid auth) is uniform across all ids and so leaks nothing. See [13 §13.6a](13-security.md). *(For share tokens: a never-issued/unauthorized token → `404`; a genuinely-issued but dead token → `410` `share_revoked`/`link_expired`, since presenting it already proves the holder knew it existed.)*

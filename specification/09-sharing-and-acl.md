@@ -104,9 +104,39 @@ Effective permission for (principal, resource) = **max** over: ownership, direct
 Revocation is **two-layered** ([§9.1](#91-principles)):
 
 1. **Instant ACL cutoff** — `DELETE /shares/{id}` sets `revoked_at`; the removed member can no longer fetch ciphertext or join the relay (enforced at every checkpoint: fetch, join, submit, periodic re-check). This is immediate.
+   An open relay room is left at once as well, because the commit of the revoke, of a share change and of a move to Trash triggers a targeted re-check of the affected connections ([05 §5.4](05-realtime-collaboration.md)).
+   The periodic re-check stays the backstop for a share that expires on its own.
 2. **Cryptographic rotation** — to protect **future** content from a member who already holds the file key, a remaining member's client **rotates the file key** (new generation: new FK, re-encrypt head/snapshot, re-wrap to remaining members) and bumps `files.key_generation` ([03](03-data-model.md)). Done client-side, in the background.
 
-> **Rotation concurrency:** the rotating client (owner or a writer driving revocation) generates a new FK (**new `key_id`, `generation + 1`**), re-encrypts the current head and writes a new snapshot under the new key, wraps the new FK to all remaining members, then `POST /files/{id}/keys/rotate { newKeyId, generation, wrappedKeys[], newHeadRef }`. The server commits **only if** the submitted `generation == current + 1`, else `409 conflict` (another rotation won). In-flight CRDT updates tagged with the **old** `key_id` are accepted **until commit**; after commit they are rejected `412 key_generation_stale`, and the client re-encrypts/re-submits under the new key.
+> **Rotation concurrency:** the rotating client (the project owner, see below) generates a new FK (**new `key_id`, `generation + 1`**), re-encrypts the current head and writes a new snapshot under the new key, wraps the new FK to all remaining members, then `POST /files/{id}/keys/rotate { newKeyId, generation, wrappedKeys[], newHeadRef, nameEnc, metadataEnc }`. The server commits **only if** the submitted `generation == current + 1`, else `409 conflict` (another rotation won). In-flight CRDT updates tagged with the **old** `key_id` are accepted **until commit**; after commit they are rejected `412 key_generation_stale`, and the client re-encrypts/re-submits under the new key.
+
+> Rotation as built in Phase 2.3 [P]:
+> the rotation is write-then-swap, so the new head exists before anything points to it.
+> 1. The client stages the head sealed with the new key through `PUT /files/{id}/keys/rotate/head` (`Nyxite-Key-Id` = the new key, `Nyxite-Content-Hash`, and `Nyxite-Snapshot-Seq` for a text file or `If-Match` with the head seq it re-encrypts for any other file).
+>    The server stores the ciphertext and a `file_rotation_heads` row ([03](03-data-model.md)), and the stage is no version yet, so every client keeps reading the old head.
+> 2. The commit names the stage in `newHeadRef`, the base64url BLAKE3-256 content hash the stage carried, and the server turns it into the head version in the transaction that switches `files.key_generation`.
+>    `newHeadRef` is required when the file has a head and absent when it has none.
+>    Uploading the new-key head through the normal upload paths before the commit was impossible, because they take only the current key, and committing first and uploading afterwards was rejected, because a client that fails in between leaves a head that a member added later with the new key only cannot open.
+> 3. A head that moved after staging, a newer snapshot or a blob written in between, answers `409 version_conflict` and the newer head stays, so a rotation never replaces content it has not seen.
+>    The client stages again and retries.
+>
+> The commit also carries `nameEnc` and `metadataEnc` sealed again with the new key, because listings hand every member only its wrap of the current generation, which would no longer open a name sealed with the old key.
+> `wrappedKeys` must wrap the new key to exactly the accounts that reach the file, the owner included, and the server checks the set against the live shares under the file's row lock.
+> A wrap to anyone else, a removed member above all, is `400`, and so is a commit that leaves out a member, who would otherwise keep its reach without a key for anything new.
+> An account share of a file takes the same row lock to read the generation, so a share created during a rotation either is in the member check or must carry the new generation's wrap.
+> Link guests are no members, because their key rides the URL fragment, so a live link opens nothing written after a rotation until the owner shares a new link ([13 §13.8](13-security.md) "stolen link").
+>
+> Only the project owner rotates, from a session on an active device, and a grantee gets `403 acl_denied`.
+> The owner is the one who revokes other members and the only one who hands out keys ([04](04-rest-api.md)), and only the owner sees the member list, so a writer would need the server to disclose who else has access.
+> Rotation by any remaining writer was rejected for that disclosure, which the privacy focus weighs higher than rotating while the owner is offline.
+> Judgment call, proposed.
+>
+> The commit is idempotent under `Idempotency-Key`, which it requires, and the replay of a committed request answers `204` again.
+> Older wraps and versions stay as they are, so a member who had a generation keeps reading the version history sealed with it, and `GET /files/{id}/keys` returns every generation.
+> The commit records `keyrotate`, the file's `structure` upsert and the new head's `blob` change in the feed ([06](06-sync.md)) and audits `key.rotate` with the generation, the new `key_id` and the member count.
+> Stages that the commit did not take, a losing attempt's for example, are dropped with it, and an abandoned stage expires after `NYXITE__Retention__OrphanBlobAgeHours` and counts against the owner's quota until then.
+> No rate limit is specified for rotation, and it needs none of its own, because only the owner rotates and every commit moves the generation by one.
+> Rotating project and folder keys (ST-1) is not part of Phase 2.3, because no endpoint for it is specified, and stays open.
 
 > **Honest limitation:** content the removed member **already downloaded** can't be un-seen — true of any system. The combination (instant relay cutoff + forward-secrecy rotation) is the strongest practical revocation under E2EE. This differs from the master spec's "clean revocation, no key rotation," which was only possible when the server held keys.
 

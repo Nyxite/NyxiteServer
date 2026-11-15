@@ -71,3 +71,27 @@ internal sealed class ChangeLogConfiguration : IEntityTypeConfiguration<ChangeLo
         b.HasIndex(x => x.At).HasDatabaseName("ix_change_log_at");
     }
 }
+
+internal sealed class FileRotationHeadConfiguration : IEntityTypeConfiguration<FileRotationHeadEntity>
+{
+    public void Configure(EntityTypeBuilder<FileRotationHeadEntity> b)
+    {
+        b.ToTable("file_rotation_heads", t => t.HasCheckConstraint("ck_file_rotation_heads_base", "(crdt_seq IS NULL) <> (parent_seq IS NULL)"));
+        b.HasKey(x => new { x.FileId, x.KeyId });
+        b.Property(x => x.FileId).HasColumnName("file_id");
+        b.Property(x => x.KeyId).HasColumnName("key_id");
+        b.Property(x => x.ContentHash).HasColumnName("content_hash");
+        b.Property(x => x.BlobRef).HasColumnName("blob_ref");
+        b.Property(x => x.SizeCipher).HasColumnName("size_cipher");
+        b.Property(x => x.CrdtSeq).HasColumnName("crdt_seq");
+        b.Property(x => x.ParentSeq).HasColumnName("parent_seq");
+        b.Property(x => x.AuthorId).HasColumnName("author_id");
+        b.Property(x => x.CreatedAt).HasColumnName("created_at").HasDefaultValueSql("now()");
+        // A purge deletes the file row; what it staged goes with it, and its blob is an orphan for the collector.
+        b.HasOne<FileEntity>().WithMany().HasForeignKey(x => x.FileId).OnDelete(DeleteBehavior.Cascade);
+        b.HasOne<UserEntity>().WithMany().HasForeignKey(x => x.AuthorId).OnDelete(DeleteBehavior.Restrict);
+        // The garbage collector asks whether a staged head references a blob; the cleanup deletes by age.
+        b.HasIndex(x => x.BlobRef).HasDatabaseName("ix_file_rotation_heads_blob_ref");
+        b.HasIndex(x => x.CreatedAt).HasDatabaseName("ix_file_rotation_heads_created");
+    }
+}

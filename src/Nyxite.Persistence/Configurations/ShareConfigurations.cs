@@ -42,6 +42,11 @@ internal sealed class ShareConfiguration : IEntityTypeConfiguration<ShareEntity>
         b.HasIndex(x => x.ProjectId).HasFilter("revoked_at IS NULL").HasDatabaseName("ix_shares_target_project");
         b.HasIndex(x => x.GranteeId).HasFilter("revoked_at IS NULL").HasDatabaseName("ix_shares_grantee");
         // Unique, so a token resolves to exactly one share; revoked links keep their hash and answer 410, not 404.
-        b.HasIndex(x => x.LinkTokenHash).IsUnique().HasFilter("link_token_hash IS NOT NULL").HasDatabaseName("uq_shares_link");
+        b.HasIndex(x => x.LinkTokenHash).IsUnique().HasFilter("link_token_hash IS NOT NULL").HasDatabaseName(ShareEntity.LinkIndex);
+        // One unrevoked account share per target and grantee, so two concurrent creates cannot both store one and a
+        // revoke never leaves a twin behind. Nulls are not distinct, because two of the three target columns are always
+        // null. An expired share is revoked by the create that replaces it.
+        b.HasIndex(x => new { x.GranteeId, x.FileId, x.FolderId, x.ProjectId }).IsUnique().AreNullsDistinct(false)
+            .HasFilter("kind = 'user_grant' AND revoked_at IS NULL").HasDatabaseName(ShareEntity.LiveGrantIndex);
     }
 }

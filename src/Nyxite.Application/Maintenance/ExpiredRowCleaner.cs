@@ -49,7 +49,8 @@ public sealed class RetentionOptions
 
 /// <summary>
 /// The cleanup of 03 §3.2: deletes <c>ephemeral_tokens</c> and <c>idempotency_keys</c> past <c>expires_at</c>, and
-/// sessions revoked or expired longer than the retention ago, whose refresh-token chain goes with them by cascade.
+/// sessions revoked or expired longer than the retention ago, whose refresh-token chain goes with them by cascade, and
+/// staged rotation heads older than <see cref="RetentionOptions.OrphanBlobAgeHours"/> that no commit took.
 /// Nothing here is kept for audit, because the events are in <c>audit_log</c>.
 /// </summary>
 public sealed class ExpiredRowCleaner(NyxiteDbContext db, TimeProvider time, IOptions<RetentionOptions> options)
@@ -63,10 +64,14 @@ public sealed class ExpiredRowCleaner(NyxiteDbContext db, TimeProvider time, IOp
         var sessions = await db.Sessions
             .Where(s => s.ExpiresAt <= sessionCutoff || (s.RevokedAt != null && s.RevokedAt <= sessionCutoff))
             .ExecuteDeleteAsync(ct);
+        // A staged rotation head no commit took within the orphan age is abandoned; its blob is then an orphan.
+        var stageCutoff = now - TimeSpan.FromHours(options.Value.OrphanBlobAgeHours);
+        var stages = await db.FileRotationHeads.Where(h => h.CreatedAt <= stageCutoff).ExecuteDeleteAsync(ct);
         Count("ephemeral_tokens", tokens);
         Count("idempotency_keys", keys);
         Count("sessions", sessions);
-        return tokens + keys + sessions;
+        Count("file_rotation_heads", stages);
+        return tokens + keys + sessions + stages;
     }
 
     private static void Count(string table, int rows)

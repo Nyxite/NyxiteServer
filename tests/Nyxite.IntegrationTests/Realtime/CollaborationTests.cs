@@ -245,15 +245,15 @@ public sealed class CollaborationTests(PostgresFixture pg)
         Assert.False(web.Closed);
 
         // A session that ends closes its connection; the account's other device stays.
+        // The logout itself triggers the targeted pass; the periodic one, an hour away here, finds nothing left.
         Assert.Equal(HttpStatusCode.NoContent, (await new AuthDriver(app).Client().WithBearer(second.AccessToken).PostAsync("/api/v1/auth/logout", null)).StatusCode);
-        Assert.Equal(1, await RecheckAsync(app));
         await RelayPeer.UntilAsync(() => tablet.Closed);
+        Assert.Equal(0, await RecheckAsync(app));
         Assert.Contains("unauthenticated", tablet.Errors);
         Assert.False(laptop.Closed);
 
-        // The owner moving the file to Trash cuts off the owner's own devices too.
+        // The owner moving the file to Trash cuts off the owner's own devices too, at once and not at the next pass.
         Assert.Equal(HttpStatusCode.NoContent, (await ada.S.DeleteAsync($"/files/{file.Id}")).StatusCode);
-        Assert.Equal(1, await RecheckAsync(app));
         await RelayPeer.UntilAsync(() => laptop.Errors.Contains("not_found"));
         Assert.Equal(0, await RecheckAsync(app));
     }

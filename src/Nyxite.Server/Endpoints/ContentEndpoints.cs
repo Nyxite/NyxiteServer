@@ -87,6 +87,20 @@ public static class ContentEndpoints
             return Results.Json(version, statusCode: StatusCodes.Status201Created);
         });
 
+        // The head of a key rotation, staged under the new key before the commit names it (09 §9.6).
+        files.MapPut("/{id:guid}/keys/rotate/head", async (Guid id, ContentService content, IBlobStore blobs, HttpContext http, CancellationToken ct) =>
+        {
+            long? crdtSeq = http.Request.Headers.ContainsKey(SnapshotSeqHeader)
+                ? long.TryParse(http.Request.Headers[SnapshotSeqHeader], out var seq) ? seq : throw AuthException.Validation("Nyxite-Snapshot-Seq must be a number.")
+                : null;
+            var ifMatch = http.Request.Headers.IfMatch.ToString().Trim('"');
+            long? parentSeq = ifMatch.Length == 0 ? null
+                : long.TryParse(ifMatch, out var parent) && parent >= 0 ? parent : throw AuthException.Validation("If-Match must be the version seq the head is based on.");
+            using var body = await StageBodyAsync(http, blobs, content.MaxInlineBlobBytes, ct);
+            await content.StageRotationHeadAsync(http.User, id, KeyId(http), http.Request.Headers[ContentHashHeader], crdtSeq, parentSeq, body, ct);
+            return Results.NoContent();
+        });
+
         return api;
     }
 

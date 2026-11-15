@@ -186,6 +186,18 @@
       "body": null
     },
     {
+      "name": "stageRotationHead",
+      "method": "PUT",
+      "path": "/api/v1/files/01890a5d-ac96-774b-bcce-b302099a8058/keys/rotate/head",
+      "headers": {
+        "Nyxite-Key-Id": "01890a5d-ac96-774b-bcce-b302099a805f",
+        "Nyxite-Content-Hash": "HcP8B1gNqZdnAkP9Tmm57JJ1EZHRwkMceVJQ95LBj5Y",
+        "Nyxite-Snapshot-Seq": "7"
+      },
+      "body": null,
+      "bodyHex": "4e5958430101890a5dac96774bbcceb302099a805fb0b1b2b3b4b5b6b7b8b9babb724a497d4f38d0bb547d72343d6acf36bcebcb8aac34a8e4553029436f0820649641a0"
+    },
+    {
       "name": "rotate",
       "method": "POST",
       "path": "/api/v1/files/01890a5d-ac96-774b-bcce-b302099a8058/keys/rotate",
@@ -202,9 +214,18 @@
             "ciphertext": "na89lux_JCQgoLv86KIQRSZtL2UhOSjCpkHOH153iB_2A-wek_DrN3uDwLAUhgme6rA6LRJfHYFcbQSP0JGP1miwTlN3zGCxWAnkKFOGerZ_0DMj57j1irB7Qiqe0Ll4e4tiUR_xBtDPlWnOqWeG_CSgDDb6UBYv-paWsAK8nvST-BigL2i0LqcjGAm2b6f990XQk5SD08w5mLxpaDszJP7UXkEPIoQgOl5K1RZEKAz3M1Y8g2-YUFE_6hNA7qjWupUaze4tw4xQgIvwC4FZ0DvCng1N1KDFDzlshsFa2nZAQojcLws_H-sOhM9d5b3HByxx8hQKnsxGMyk4RQz8-SRb4u7ju9GD5SDF8OFKo45uCkrmGo_zoKgxJoINwcDYLY7wsnYylTzImopYmWweDZ88zrokjMDAYg7HM0F0jRLvMb58wqc9PfNLYcFPMwGsqdztF6HSoCxVNQSUDD7QcPmlLtmJR50abFigtGFKbpqgSA0_rbywMEqD5Lt6kE27UoMGxaIrolDwygHQvbktG1mJ_qfjR7KJoMsDLL9rpPoHT09a_32ccMZnp8njwuXFBje3aA01diM8QfDM878pqWoPU8eLGXA2yrrv6SdVobyHmkRbv6r8rg1hBhqxfhzgmw5iwf8gHSxbAuM64iWfUS9SyoEYFva0UczppWSTX2L6Hwe9GnVg1j_MYpoCJ1Aj-P5wlzFdV0rjLw0zrw_Enchwf21DLevZGE8JFzORoff6AHO0-ODst82rviZTP9wfsOHY13RUUFUv5KmuNjaUC4ZrzNwBYNC2s_6P4abQaet_Ac33T1B-W0e56i_MDYTn17PWiF63NaZYgGewUNe-EHiwwql-A5d0FIj9lp9RHM-sC2MhpRmdUsHqG6WzWjrJv8-V8hEN4v3FXobz0p7bT4FojT41FZzp7LmtKv11-BiS4Dm50Bn54tHRJ0c76tKCsJmRAa2E_ogg0Q6Zj8EXOMW7djzBbIJG45r3LapXpylcKm9IzFKvCphHJj6yZT-OtNSFHjwCYme8AyI2MrVDUj4uboBqUyFSpuBKF32yhw3gVppH8sVdyc8BbyGjoz_HZWASe0avilASgKdC1zW-e3pca-DLCVzVoJRFigSyCvgEtaqBKQWtNCvYlOtBYBULuLzdPEDiG601rAz5sEYbK2CK6vx7sAzqLybYFzEng0V2bi-eTnMykCtnsT-84EqOHN_HbzjMEaEVIeBI9UOWJPiyPRVoaP-XbEZy1oFUFLs6AcvHY4Z7-dF-XOsoJy1uHCDaurJHjxblE1xgPkRuAsi6JZcRyqcCEYLeE8pDnXeGt_ZE5BpNRqdsssO9S-k2zV-b36ae34MZtKtI8SYAU-prAnmZE1H-4XgBLqfGIUYB1EpwMKl6fxVL6AULIPh_wrpAQlEFDFDmJc9RQFoLfQvby_P_cj5_DeAKPvYoYR005C1K9e-UoHo6hCAbiJ1M0adDyyexG2oQQ4qP645YR0Sdb5SMec4Dn1D9DCWFrW5NBBY5i1TwPTsrv8Qbmb5G-4ixdafaqy-1P74wtk2uCg",
             "generation": 2,
             "algId": "X25519MLKEM768"
+          },
+          {
+            "keyId": "01890a5d-ac96-774b-bcce-b302099a805f",
+            "memberId": "01890a5d-ac96-774b-bcce-b302099a805d",
+            "ciphertext": "Qy-wFnblU2gZWGXMDCSK0CVjIHGfnDukONWn9m8mj7gtnGcW9nuf9nvP1zxKKtUFKsjRR0k7l3m8DJqC11UlracHpVWgDipscD4Vf-WcXWKn3FMpiD3gmT6zCYydpr5s2RBCRcSrBH4DWkuSpUMMFBm7AGhhaLRgx2T-EBak3szoHQ3k_KSwn6ZFTThmSW3wxKnCG7HBUAJ41UcIddVrb-UATX9rcNFJk0onu7LG-zTpqz70db4q_QsFACTJuS7lRNS4iJVfKYK36u3z73NkBfujOwd4GnwzmRan496a0sxEQLDCbJEnr5nXD_pNX2LzE9pQvVQUwDmkw6ghPXKUlJ3Xik_k2f787q2ZCYKRVhX185FcM-eyQj-8srUtNYBa0zHO8EXsDUcKPlixH_qBdiIIOaWjmlqk0jUGA46QnmaDbsKYKZFgQDhwPRMtE-hPToYq_47N8I3kTWyuCMWjKGe3XICyt8--_f2rVmdgWi8fF7DBvTC_ZmslGpMn7w27qtUPZDR8N0Ps7a68dUYh5y8C7TZM-NXEgS3SSSgH23n44S0KAp5Gl-DTW__7kC-2ot0C2YNFNprT_VG8E46cje3XRgbsqUxv2KwI_yzm0q32Up0MlBVRJ32eyIIDkGBlZqJ29AjKH07cWeFamhvqPABqHthDsX4uvtZer_-QNmMJ_upgGMGJ8H_Up_1ign502lnA4-mMpNFdWHR7hvHmLl7vea89x00J4FtCqpDUEsXJR88amhf6XFCxv082tRLFAjtVMXtEsjNCJrDGv3QN8HQn0naC_SSQcSRZSzcdQz11S0oDTrko4ws43h9PzRgK76TqWCFWYLEDpSgDWYp1PKu6Ooy_GfkuQU1LyO_Zmi7YS1ZIZ5egTCjlP6tpo_0aV6HKFPKUzqbyJSL-1x5d0LXU2FroGnQgegEAMRaphh-ZsATa4K-ReFYN9edK7AkvrdNzcfeP-zT1nLNSDy8y04kbZYgHrm2t-nNwxxkkawY4Klv6mgHnpD0otSf2-xEBrL4tI8TyQult-fJfB0mIQl-GgXyLv-nEQ1YKR7upwqPnuiei75PIP-6dRT1Cdo9IsMRzhMXPnHgzVrge8Jvvy3SE46zp6gEg6NWpWVZ2lvijyvz94kiQRLQR2MeJBD5M-BSa2_mVeNVjwbQdxDI-3i6FERh4GVpAwJL_qgAtkB_HfY58AAqNeRBw8RYCIpuTD7le1AaZlM3zCALQ2V5EGN2K5yaGxTJ5dMCXFf1qhZjYC2q01mD1rNhOU_TjYDaYHfu5k4mM-tuQcNz26Ml-Aokmi8PXYinmcX-qROym3zJLTFKaLxly_YeT9Mhjsi1DwnKSbgAz0YpassVpvMFqJPp2Oa9FJSKwqhmRqJF_MEhMA3Ee4jQGgI6G92q6y9nRsvdaDWsdLOt4ucIG0xyscwXhXOqxJatT2vz43Bz5GBZ5pjHu3hv5yY8SAyzerdDnoHk5j8eGuIzIRuyJr4WlGt72_aQDURUStOSIQorWWcV2cx7GMfG3xACih_qqBYUWuCn92nnRilKCDYvQeMGU6Q",
+            "generation": 2,
+            "algId": "X25519MLKEM768"
           }
         ],
-        "newHeadRef": "cHFyc3R1dnd4eXp7fH1-f4CBgoOEhYaHiImKi4yNjo8"
+        "newHeadRef": "HcP8B1gNqZdnAkP9Tmm57JJ1EZHRwkMceVJQ95LBj5Y",
+        "nameEnc": "TllYQwEBiQpdrJZ3S7zOswIJmoBfoKGio6Slpqeoqaqr9PAeMo7hiHdZVeVGpmdYyi-MLSXGTuo",
+        "metadataEnc": null
       }
     }
   ],
@@ -291,6 +312,25 @@
       }
     },
     {
+      "name": "rotationHeadStaged",
+      "method": "PUT",
+      "path": "/api/v1/files/01890a5d-ac96-774b-bcce-b302099a8058/keys/rotate/head",
+      "status": 204,
+      "body": null
+    },
+    {
+      "name": "rotationHeadMoved",
+      "method": "POST",
+      "path": "/api/v1/files/01890a5d-ac96-774b-bcce-b302099a8058/keys/rotate",
+      "status": 409,
+      "body": {
+        "type": "urn:nyxite:problem:version_conflict",
+        "title": "The head changed since the rotated head was based on it; stage it again.",
+        "status": 409,
+        "code": "version_conflict"
+      }
+    },
+    {
       "name": "rotationCommitted",
       "method": "POST",
       "path": "/api/v1/files/01890a5d-ac96-774b-bcce-b302099a8058/keys/rotate",
@@ -346,7 +386,18 @@
       "afterCommit": 412,
       "code": "key_generation_stale"
     },
-    "newHeadRef": "Phase 2.3 pins what newHeadRef names; the bytes here only fix its encoding (base64url)."
+    "order": [
+      "stageRotationHead",
+      "rotate"
+    ],
+    "newHeadRef": "The base64url BLAKE3-256 content hash of the plaintext head staged under newKeyId with PUT /files/{id}/keys/rotate/head (its Nyxite-Content-Hash); null only when the file has no head. The commit makes the staged head the head.",
+    "ownerRecipientSeed": "a0a1a2a3a4a5a6a7a8a9aaabacadaeafb0b1b2b3b4b5b6b7b8b9babbbcbdbebf",
+    "rotatedKey": "e0e1e2e3e4e5e6e7e8e9eaebecedeeeff0f1f2f3f4f5f6f7f8f9fafbfcfdfeff",
+    "rotatedHeadPlaintext": "6865616420616674657220726f746174696f6e",
+    "members": [
+      "01890a5d-ac96-774b-bcce-b302099a8059",
+      "01890a5d-ac96-774b-bcce-b302099a805d"
+    ]
   },
   "guestToken": {
     "typ": "nyx-guest\u002Bjwt",

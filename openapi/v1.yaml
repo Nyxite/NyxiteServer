@@ -1421,10 +1421,16 @@ paths:
       tags: [keys]
       summary: Commit a file-key rotation (generation-guarded)
       description: >-
-        Phase 2.3 (P2.3-SRV-1); pinned by the P2.2-CORE-1 fixtures in `sharing.json` and not served before then.
-        Commits only if `generation` is the file's current generation + 1, otherwise `409 conflict` (another rotation
-        won). Updates sealed with the old key are accepted until the commit and answer `412 key_generation_stale`
-        after it.
+        The second layer of revocation (09 §9.6, P2.3-SRV-1), pinned by the P2.2-CORE-1 fixtures in `sharing.json`.
+        The project owner only (a grantee gets `403 acl_denied`), from an active device. Commits only if `generation` is
+        the file's current generation + 1, otherwise `409 conflict` (another rotation won). `wrappedKeys` wraps
+        `newKeyId` to exactly the accounts that reach the file, the owner included, so a removed member gets no wrap
+        and no remaining member is left out (`400` otherwise). `nameEnc` and `metadataEnc` are the file's name and
+        metadata sealed again with the new key. `newHeadRef` is the base64url BLAKE3-256 content hash of the head staged
+        under the new key through `PUT /files/{id}/keys/rotate/head`; it is required when the file has a head and
+        becomes the head in the same transaction that switches the key. A head that moved since it was staged answers
+        `409 version_conflict`. Updates, snapshots and blobs sealed with an older key are accepted until the commit and
+        answer `412 key_generation_stale` after it; wraps and versions of older generations stay readable.
       parameters: [{ $ref: '#/components/parameters/IdempotencyKey' }]
       requestBody:
         required: true
@@ -1432,16 +1438,46 @@ paths:
           application/json:
             schema:
               type: object
-              required: [newKeyId, generation, wrappedKeys, newHeadRef]
+              required: [newKeyId, generation, wrappedKeys, nameEnc]
               properties:
                 newKeyId: { $ref: '#/components/schemas/Uuid' }
                 generation: { type: integer, minimum: 2 }
-                wrappedKeys: { type: array, items: { $ref: '#/components/schemas/WrappedKey' } }
-                newHeadRef: { $ref: '#/components/schemas/Bytes' }
+                wrappedKeys: { type: array, minItems: 1, items: { $ref: '#/components/schemas/WrappedKey' } }
+                newHeadRef: { oneOf: [{ $ref: '#/components/schemas/Bytes' }, { type: 'null' }] }
+                nameEnc: { $ref: '#/components/schemas/Bytes' }
+                metadataEnc: { oneOf: [{ $ref: '#/components/schemas/Bytes' }, { type: 'null' }] }
       responses:
-        '204': { description: 'Rotation committed.' }
+        '204': { description: 'Rotation committed (also the replay of a committed request).' }
         '404': { $ref: '#/components/responses/Problem' }
         '409': { $ref: '#/components/responses/Problem' }
+  /files/{id}/keys/rotate/head:
+    parameters: [{ $ref: '#/components/parameters/Id' }]
+    put:
+      tags: [keys]
+      summary: Stage the file's head sealed with the key a rotation is about to commit
+      description: >-
+        Write-then-swap for rotation (09 §9.6): the head is uploaded before the commit and is no version until
+        `POST /files/{id}/keys/rotate` names it in `newHeadRef`, so every client keeps the old head until its successor
+        exists. The project owner only. `Nyxite-Key-Id` is the new key, which the file must not have yet. A text file
+        stages a snapshot and sends `Nyxite-Snapshot-Seq`; any other file stages its re-encrypted head and sends
+        `If-Match` with the head version seq it is based on (`0` for none). Staging again for the same key replaces the
+        stage. A stage that no commit takes expires after `NYXITE__Retention__OrphanBlobAgeHours` and counts against
+        the owner's quota until then.
+      parameters:
+        - { name: Nyxite-Key-Id, in: header, required: true, schema: { type: string, format: uuid } }
+        - { name: Nyxite-Content-Hash, in: header, required: true, schema: { type: string }, description: 'base64url BLAKE3 content address; the commit names it in newHeadRef' }
+        - { name: Nyxite-Snapshot-Seq, in: header, required: false, schema: { type: integer, format: int64, minimum: 0 } }
+        - { name: If-Match, in: header, required: false, schema: { type: string } }
+      requestBody:
+        required: true
+        content:
+          application/octet-stream:
+            schema: { type: string, contentMediaType: application/octet-stream }
+      responses:
+        '204': { description: 'Staged.' }
+        '404': { $ref: '#/components/responses/Problem' }
+        '409': { $ref: '#/components/responses/Problem' }
+        '413': { $ref: '#/components/responses/Problem' }
   /files/keys:batch:
     post:
       tags: [keys]
@@ -1884,7 +1920,9 @@ paths:
         The project owner only, from an active device; 30 per minute per user. An account share (`user_grant`) names
         a grantee with a live directory key and carries the target's own key wrapped to it, the current generation at
         least (`wrappedKeys`); the keys below a folder or project follow through `POST /files/keys:batch`. A second live
-        account share of one target to one grantee is `409`. A link share targets one file, carries no grantee and no
+        account share of one target to one grantee is `409`, enforced by the database also for concurrent creates; an
+        expired one of the pair is revoked by the create that replaces it. A concurrent request with the same
+        `Idempotency-Key` answers as the replay of the one that committed. A link share targets one file, carries no grantee and no
         wraps, and sends only `linkTokenHash`, the SHA-256 of the ASCII link token; the token is 32 random bytes as 43
         base64url characters, and the file key stays in the URL fragment.
       parameters: [{ $ref: '#/components/parameters/IdempotencyKey' }]

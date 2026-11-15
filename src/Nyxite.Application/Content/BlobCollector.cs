@@ -8,7 +8,8 @@ using Nyxite.Persistence;
 namespace Nyxite.Application.Content;
 
 /// <summary>
-/// Blob garbage collection (10 §10.6, 03 §3.4): deletes stored ciphertext that no <c>file_versions</c> row references.
+/// Blob garbage collection (10 §10.6, 03 §3.4): deletes stored ciphertext that no <c>file_versions</c> row and no staged
+/// rotation head (<c>file_rotation_heads</c>) references.
 /// It works on references only and never reads content. Two sources of such blobs exist: the versions a purge removed,
 /// and uploads whose blob was named while their transaction then failed.
 /// </summary>
@@ -41,7 +42,7 @@ public sealed class BlobCollector(NyxiteDbContext db, IBlobStore blobs, TimeProv
         var locked = await db.Database.SqlQuery<bool>($"SELECT pg_try_advisory_xact_lock({LockClass}, {key}) AS \"Value\"").SingleAsync(ct);
         if (!locked) return false;
         var hex = address.Hex;
-        if (await db.FileVersions.AnyAsync(v => v.BlobRef == hex, ct)) return false;
+        if (await db.FileVersions.AnyAsync(v => v.BlobRef == hex, ct) || await db.FileRotationHeads.AnyAsync(h => h.BlobRef == hex, ct)) return false;
         await blobs.DeleteAsync(address, ct);
         await tx.CommitAsync(ct);
         return true;
@@ -76,7 +77,8 @@ public sealed class BlobCollector(NyxiteDbContext db, IBlobStore blobs, TimeProv
         if (candidates.Count == 0) return 0;
         // One query narrows the batch; each survivor is then checked again under its lock.
         var hexes = candidates.Select(a => a.Hex).ToList();
-        var referenced = (await db.FileVersions.Where(v => hexes.Contains(v.BlobRef)).Select(v => v.BlobRef).Distinct().ToListAsync(ct)).ToHashSet();
+        var referenced = (await db.FileVersions.Where(v => hexes.Contains(v.BlobRef)).Select(v => v.BlobRef)
+            .Union(db.FileRotationHeads.Where(h => hexes.Contains(h.BlobRef)).Select(h => h.BlobRef)).ToListAsync(ct)).ToHashSet();
         var removed = 0;
         foreach (var address in candidates.Where(a => !referenced.Contains(a.Hex)))
         {

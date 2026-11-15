@@ -22,12 +22,16 @@ internal sealed record ShareTarget(string Type, Guid Id, Guid ProjectId, Guid Ow
 /// server cannot open; a link share stores only the SHA-256 of a token the client minted, because the file key rides
 /// the URL fragment and never reaches the server (09 §9.4). Every change is audited without keys or token hashes.
 /// </summary>
-public sealed class ShareService(NyxiteDbContext db, DeviceGuard guard, IdempotencyStore idempotency, AuditWriter audit, TimeProvider time, ShareAccess access)
+public sealed class ShareService(
+    NyxiteDbContext db, DeviceGuard guard, IdempotencyStore idempotency, AuditWriter audit, TimeProvider time, ShareAccess access, IRelayAccessEvents relay)
 {
     public const string CreateShareEndpoint = "POST /shares";
     public const int LinkTokenHashSize = 32;
     public const int DefaultPageSize = 50;
     public const int MaxPageSize = 200;
+
+    private const string LinkTokenInUse = "This link token is already in use.";
+    private const string AlreadyShared = "This target is already shared with the grantee; change the share instead.";
 
     public async Task<IdempotentResponse> CreateAsync(ClaimsPrincipal principal, CreateShareRequest body, string? idempotencyKey, RequestInfo request,
         CancellationToken ct)
@@ -53,7 +57,7 @@ public sealed class ShareService(NyxiteDbContext db, DeviceGuard guard, Idempote
         switch (body.Kind)
         {
             case ShareEntity.UserGrant:
-                await AccountShareAsync(share, target, body, userId, now, ct);
+                await AccountShareAsync(share, target, body, userId, now, request, ct);
                 break;
             case ShareEntity.Link:
                 await LinkShareAsync(share, target, body, ct);
@@ -70,9 +74,9 @@ public sealed class ShareService(NyxiteDbContext db, DeviceGuard guard, Idempote
         {
             await db.SaveChangesAsync(ct);
         }
-        catch (DbUpdateException e) when (e.InnerException is Npgsql.PostgresException { SqlState: Npgsql.PostgresErrorCodes.UniqueViolation })
+        catch (DbUpdateException e) when (e.InnerException is Npgsql.PostgresException { SqlState: Npgsql.PostgresErrorCodes.UniqueViolation } unique)
         {
-            throw AuthException.Conflict("This link token is already in use.");
+            return await AfterUniqueViolationAsync(tx, unique, userId, key, hash, ct);
         }
 
         await tx.CommitAsync(ct);
@@ -80,11 +84,33 @@ public sealed class ShareService(NyxiteDbContext db, DeviceGuard guard, Idempote
     }
 
     /// <summary>
+    /// A unique violation on save means a concurrent create committed first. When it carried the same
+    /// <c>Idempotency-Key</c>, this request is its replay, whichever index collided first, so the replay lookup runs
+    /// again on a clean unit of work. Otherwise the constraint names the conflict: the link token or the one live
+    /// account share per target and grantee (09 §9.4a).
+    /// </summary>
+    private async Task<IdempotentResponse> AfterUniqueViolationAsync(
+        Microsoft.EntityFrameworkCore.Storage.IDbContextTransaction tx, Npgsql.PostgresException unique, Guid userId, string key, byte[] hash, CancellationToken ct)
+    {
+        await tx.RollbackAsync(ct);
+        db.ChangeTracker.Clear();
+        if (await idempotency.FindAsync(userId, CreateShareEndpoint, key, hash, ct) is { } replay) return replay;
+        throw unique.ConstraintName switch
+        {
+            ShareEntity.LinkIndex => (Exception)AuthException.Conflict(LinkTokenInUse),
+            ShareEntity.LiveGrantIndex => AuthException.Conflict(AlreadyShared),
+            IdempotencyKeyEntity.PrimaryKey => AuthException.Conflict("A request with this Idempotency-Key was still in progress; retry it."),
+            _ => new InvalidOperationException($"Unexpected unique violation of {unique.ConstraintName} on share create.", unique),
+        };
+    }
+
+    /// <summary>
     /// The grantee must be another account with a live directory key, and the request must carry the target's own key
     /// wrapped to it: the current generation at least, older ones for version history. Keys of what lies below a folder
     /// or project follow through <c>POST /files/keys:batch</c> (09 §9.3).
     /// </summary>
-    private async Task AccountShareAsync(ShareEntity share, ShareTarget target, CreateShareRequest body, Guid userId, DateTimeOffset now, CancellationToken ct)
+    private async Task AccountShareAsync(ShareEntity share, ShareTarget target, CreateShareRequest body, Guid userId, DateTimeOffset now, RequestInfo request,
+        CancellationToken ct)
     {
         if (body.LinkTokenHash is not null) throw AuthException.Validation("An account share has no linkTokenHash.");
         var grantee = body.GranteeId ?? throw AuthException.Validation("granteeId is required for an account share.");
@@ -92,10 +118,16 @@ public sealed class ShareService(NyxiteDbContext db, DeviceGuard guard, Idempote
         if (!await db.UserKeys.AnyAsync(k => k.UserId == grantee && k.RevokedAt == null, ct)) throw AuthException.NotFound();
         if (await LiveShares().AnyAsync(s => s.Kind == ShareEntity.UserGrant && s.GranteeId == grantee && s.FileId == share.FileId
                                               && s.FolderId == share.FolderId && s.ProjectId == share.ProjectId, ct))
-            throw AuthException.Conflict("This target is already shared with the grantee; change the share instead.");
+            throw AuthException.Conflict(AlreadyShared);
+        await RevokeExpiredAsync(share, grantee, userId, now, request, ct);
         share.GranteeId = grantee;
 
         var wraps = body.WrappedKeys is { Count: > 0 } w ? w : throw AuthException.Validation("wrappedKeys must hold the target's key wrapped to the grantee.");
+        // A file's generation is read under a share lock of its row, which a key rotation's commit holds exclusively: the
+        // share then either lands before the commit, whose member check sees it, or carries the generation it committed.
+        var currentGeneration = target.Type == StructureTypes.File
+            ? await db.Database.SqlQuery<int>($"SELECT key_generation AS \"Value\" FROM files WHERE id = {target.Id} FOR SHARE").SingleAsync(ct)
+            : target.KeyGeneration;
         var generations = await KeyGrantService.GenerationsAsync(db, target.Type, [target.Id], ct);
         var rows = new List<KeyGrantService.Grant>();
         foreach (var wrap in wraps)
@@ -107,8 +139,25 @@ public sealed class ShareService(NyxiteDbContext db, DeviceGuard guard, Idempote
                 KeyGrantService.WrapBytes(wrap.Ciphertext, wrap.AlgId) ?? throw AuthException.Validation("wrappedKeys holds a malformed wrap."), now));
         }
 
-        if (!rows.Any(r => r.Generation == target.KeyGeneration)) throw AuthException.Validation("wrappedKeys must include the target's current key.");
+        if (!rows.Any(r => r.Generation == currentGeneration)) throw AuthException.Validation("wrappedKeys must include the target's current key.");
         foreach (var row in rows) await KeyGrantService.InsertAsync(db, row, ct);
+    }
+
+    /// <summary>
+    /// An expired account share of the same target and grantee still holds the one unrevoked slot of
+    /// <c>uq_shares_live_grant</c>, so the create that replaces it revokes it first, in the same transaction. It grants
+    /// nothing already, so the revoke changes no reach; it is audited like any other.
+    /// </summary>
+    private async Task RevokeExpiredAsync(ShareEntity share, Guid grantee, Guid userId, DateTimeOffset now, RequestInfo request, CancellationToken ct)
+    {
+        var expired = db.Shares.Where(s => s.Kind == ShareEntity.UserGrant && s.GranteeId == grantee && s.FileId == share.FileId
+                                           && s.FolderId == share.FolderId && s.ProjectId == share.ProjectId && s.RevokedAt == null
+                                           && s.ExpiresAt != null && s.ExpiresAt <= now);
+        var ids = await expired.Select(s => s.Id).ToListAsync(ct);
+        if (ids.Count == 0) return;
+        await db.Shares.Where(s => ids.Contains(s.Id) && s.RevokedAt == null).ExecuteUpdateAsync(u => u.SetProperty(s => s.RevokedAt, now), ct);
+        foreach (var id in ids)
+            audit.Add("share.revoke", userId, request, targetType: "share", targetId: id, detail: new { kind = ShareEntity.UserGrant, by = "replaced" });
     }
 
     /// <summary>A link names one file, because its URL fragment carries one file key (09 §9.4).</summary>
@@ -119,7 +168,7 @@ public sealed class ShareService(NyxiteDbContext db, DeviceGuard guard, Idempote
             throw AuthException.Validation("A link share has no grantee and no wrapped keys; its key stays in the URL fragment.");
         if (!Base64UrlCodec.TryDecode(body.LinkTokenHash, out var tokenHash) || tokenHash.Length != LinkTokenHashSize)
             throw AuthException.Validation("linkTokenHash must be the 32-byte SHA-256 of the link token.");
-        if (await db.Shares.AnyAsync(s => s.LinkTokenHash == tokenHash, ct)) throw AuthException.Conflict("This link token is already in use.");
+        if (await db.Shares.AnyAsync(s => s.LinkTokenHash == tokenHash, ct)) throw AuthException.Conflict(LinkTokenInUse);
         share.LinkTokenHash = tokenHash;
     }
 
@@ -176,6 +225,8 @@ public sealed class ShareService(NyxiteDbContext db, DeviceGuard guard, Idempote
         audit.Add("share.update", userId, request, targetType: "share", targetId: share.Id,
             detail: new { permission = share.Permission, expiresAt = share.ExpiresAt });
         await db.SaveChangesAsync(ct);
+        // A downgrade or a new expiry is judged in the open rooms now, not at the next periodic pass.
+        relay.AccessChanged(RelayScope(share));
         return ToDto(share);
     }
 
@@ -196,7 +247,13 @@ public sealed class ShareService(NyxiteDbContext db, DeviceGuard guard, Idempote
         audit.Add("share.revoke", userId, request, targetType: "share", targetId: share.Id,
             detail: new { kind = share.Kind, by = owner == userId ? "owner" : "grantee" });
         await db.SaveChangesAsync(ct);
+        // The instant layer of 09 §9.6 for open rooms: the grantee's or the link's connections are judged right away.
+        relay.AccessChanged(RelayScope(share));
     }
+
+    /// <summary>Who a share reaches in the relay: the grantee's connections, or the guests of the link.</summary>
+    private static RelayAccessScope RelayScope(ShareEntity share) =>
+        share.GranteeId is { } grantee ? RelayAccessScope.ForUser(grantee) : RelayAccessScope.ForShare(share.Id);
 
     // ---------------------------------------------------------------- targets
 

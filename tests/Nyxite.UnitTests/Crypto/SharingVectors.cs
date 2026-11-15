@@ -6,8 +6,10 @@ namespace Nyxite.UnitTests.Crypto;
 /// P2.2-CORE-1: the sharing and rotation protocol fixtures in <c>sharing.json</c>. They pin the share-link URL shape and
 /// the link-token hash, the HPKE binding of an object-key wrap, and one request of every share call a client makes,
 /// with the responses the server gives, so the four codebases build and parse the same bytes. No request carries the
-/// URL fragment or the file key in any form. The rotation part pins the 2.3 contract: commit only at generation + 1,
-/// otherwise <c>409</c>; an update sealed with the old key passes until the commit and is <c>412</c> after it.
+/// URL fragment or the file key in any form. The rotation part pins the 2.3 contract: the new head is staged under the
+/// new key first, the commit names it by content hash in <c>newHeadRef</c>, wraps the new key to every member, the owner
+/// included, and re-seals the name; it commits only at generation + 1, otherwise <c>409</c>; an update sealed with the
+/// old key passes until the commit and is <c>412</c> after it.
 /// </summary>
 internal static class SharingVectors
 {
@@ -32,6 +34,7 @@ internal static class SharingVectors
     public static readonly byte[] FileKey = Bytes(32, 0xc0);
     public static readonly byte[] FolderKey = Bytes(32, 0x60);
     public static readonly byte[] RotatedKey = Bytes(32, 0xe0);
+    public static readonly byte[] RotatedHeadPlaintext = "head after rotation"u8.ToArray();
 
     public static object Build(byte[] granteePublicKey)
     {
@@ -41,8 +44,15 @@ internal static class SharingVectors
         var fileWrap = ObjectKeyWrap.SealDerand(granteePublicKey, Bytes(64, 0x40), FileId, FileKeyId, FileKey);
         var folderWrap = ObjectKeyWrap.SealDerand(granteePublicKey, Bytes(64, 0x80), FolderId, FolderKeyId, FolderKey);
         var rotatedWrap = ObjectKeyWrap.SealDerand(granteePublicKey, Bytes(64, 0x10), FileId, RotatedKeyId, RotatedKey);
-        object Wrap(Guid keyId, byte[] wrapped, int generation) =>
-            new { keyId, memberId = GranteeId, ciphertext = B(wrapped), generation, algId = CryptoSuite.HpkeAlgId };
+        // The owner is a member too and gets its own wrap of the new key; its key comes from a second fixed seed.
+        var ownerPublicKey = XWing.PublicKeyFromSeed(Bytes(32, 0xa0));
+        var ownerRotatedWrap = ObjectKeyWrap.SealDerand(ownerPublicKey, Bytes(64, 0x20), FileId, RotatedKeyId, RotatedKey);
+        var rotatedName = NyxcFrame.Seal(RotatedKey, RotatedKeyId, Bytes(12, 0xa0), NyxcFrame.BuildAad(RotatedKeyId, FileId, ObjectKind.Name), "plan.md"u8);
+        var rotatedHead = NyxcFrame.Seal(RotatedKey, RotatedKeyId, Bytes(12, 0xb0), NyxcFrame.BuildAad(RotatedKeyId, FileId, ObjectKind.Snapshot),
+            RotatedHeadPlaintext);
+        var newHeadRef = B(Blake3.Hash(RotatedHeadPlaintext));
+        object Wrap(Guid keyId, byte[] wrapped, int generation, Guid? memberId = null) =>
+            new { keyId, memberId = memberId ?? GranteeId, ciphertext = B(wrapped), generation, algId = CryptoSuite.HpkeAlgId };
         var idempotency = new Dictionary<string, string> { ["Idempotency-Key"] = "01890a5d-ac96-774b-bcce-b302099a8061" };
         var guestBearer = new Dictionary<string, string> { ["Authorization"] = "Bearer <guestToken>" };
         var shareSession = $"/share/{token}";
@@ -125,11 +135,22 @@ internal static class SharingVectors
                 new { name = "guestRelay", method = "GET", path = shareSession + "/ws?access_token=<ticket>", headers = new Dictionary<string, string>(), body = (object?)null },
                 new
                 {
+                    name = "stageRotationHead", method = "PUT", path = $"/api/v1/files/{FileId}/keys/rotate/head",
+                    headers = new Dictionary<string, string>
+                    {
+                        ["Nyxite-Key-Id"] = RotatedKeyId.ToString(), ["Nyxite-Content-Hash"] = newHeadRef, ["Nyxite-Snapshot-Seq"] = "7",
+                    },
+                    body = (object?)null,
+                    bodyHex = H(rotatedHead),
+                },
+                new
+                {
                     name = "rotate", method = "POST", path = $"/api/v1/files/{FileId}/keys/rotate", headers = idempotency,
                     body = new
                     {
-                        newKeyId = RotatedKeyId, generation = 2, wrappedKeys = new[] { Wrap(RotatedKeyId, rotatedWrap, 2) },
-                        newHeadRef = B(Bytes(32, 0x70)),
+                        newKeyId = RotatedKeyId, generation = 2,
+                        wrappedKeys = new[] { Wrap(RotatedKeyId, rotatedWrap, 2), Wrap(RotatedKeyId, ownerRotatedWrap, 2, OwnerId) },
+                        newHeadRef, nameEnc = B(rotatedName), metadataEnc = (string?)null,
                     },
                 },
             },
@@ -160,6 +181,12 @@ internal static class SharingVectors
                 new { name = "unknownLink", method = "GET", path = $"/share/{Base64UrlCodec.Encode(new byte[32])}", status = 404, body = Problem(404, "not_found", "Not found.") },
                 new { name = "revokedLink", method = "GET", path = shareSession, status = 410, body = Problem(410, "share_revoked", "This link was revoked.") },
                 new { name = "expiredLink", method = "POST", path = shareSession + "/session", status = 410, body = Problem(410, "link_expired", "This link has expired.") },
+                new { name = "rotationHeadStaged", method = "PUT", path = $"/api/v1/files/{FileId}/keys/rotate/head", status = 204, body = (object?)null },
+                new
+                {
+                    name = "rotationHeadMoved", method = "POST", path = $"/api/v1/files/{FileId}/keys/rotate", status = 409,
+                    body = Problem(409, "version_conflict", "The head changed since the rotated head was based on it; stage it again."),
+                },
                 new { name = "rotationCommitted", method = "POST", path = $"/api/v1/files/{FileId}/keys/rotate", status = 204, body = (object?)null },
                 new
                 {
@@ -182,7 +209,13 @@ internal static class SharingVectors
                     new { submittedGeneration = 3, status = 409, code = (string?)"conflict" },
                 },
                 oldKeyUpdate = new { beforeCommit = 200, afterCommit = 412, code = "key_generation_stale" },
-                newHeadRef = "Phase 2.3 pins what newHeadRef names; the bytes here only fix its encoding (base64url).",
+                order = new[] { "stageRotationHead", "rotate" },
+                newHeadRef = "The base64url BLAKE3-256 content hash of the plaintext head staged under newKeyId with PUT /files/{id}/keys/rotate/head "
+                             + "(its Nyxite-Content-Hash); null only when the file has no head. The commit makes the staged head the head.",
+                ownerRecipientSeed = H(Bytes(32, 0xa0)),
+                rotatedKey = H(RotatedKey),
+                rotatedHeadPlaintext = H(RotatedHeadPlaintext),
+                members = new[] { GranteeId, OwnerId },
             },
             guestToken = new
             {

@@ -51,8 +51,8 @@ public sealed class RelayReviewFindingsTests(PostgresFixture pg)
         public Task<FileAccessLevel> GuestLevelAsync(Guid shareId, FileEntity file, CancellationToken ct) => owner.GuestLevelAsync(shareId, file, ct);
     }
 
-    private static NyxiteApp App(string connectionString, ScriptedAccess script) =>
-        new(connectionString, overrides: new Dictionary<string, string?> { ["Relay:AccessRecheckInterval"] = "01:00:00" },
+    private static NyxiteApp App(string connectionString, ScriptedAccess script, IDictionary<string, string?>? overrides = null) =>
+        new(connectionString, overrides: new Dictionary<string, string?>(overrides ?? new Dictionary<string, string?>()) { ["Relay:AccessRecheckInterval"] = "01:00:00" },
             configureServices: services =>
             {
                 services.AddSingleton(script);
@@ -248,7 +248,7 @@ public sealed class RelayReviewFindingsTests(PostgresFixture pg)
         var scopes = new CountingScopes(app.Services.GetRequiredService<IServiceScopeFactory>());
         var logger = new CountingLogger();
         var worker = new RelayAccessWorker(scopes, TimeProvider.System,
-            Options.Create(new RelayOptions { AccessRecheckInterval = TimeSpan.Parse(interval) }), logger);
+            Options.Create(new RelayOptions { AccessRecheckInterval = TimeSpan.Parse(interval) }), new RelayAccessSignal(), logger);
 
         await Task.Run(() => worker.StartAsync(CancellationToken.None)).WaitAsync(TimeSpan.FromSeconds(5));
         await Task.Delay(TimeSpan.FromSeconds(1));
@@ -276,12 +276,14 @@ public sealed class RelayReviewFindingsTests(PostgresFixture pg)
         Assert.Equal([PresenceDto.ForGuest()], presence.Roster(file.Id));
     }
 
-    // D2 -- no limit of the relay: a member, a reader included, may send awareness as fast as the socket carries it,
-    // up to 64 KiB each, and every message is fanned out to everyone else in the room. The clients throttle to 20 to 30
-    // Hz (desktop/android/web 09), the server does not, and the number of rooms per connection and connections per room
-    // is unbounded as well.
+    // D2 -- no limit of the relay: a member, a reader included, could send awareness as fast as the socket carries it,
+    // up to 64 KiB each, and every message was fanned out to everyone else in the room. This test asserted that 500
+    // messages in a burst were all relayed. R2 of REVIEW-server-2026-11-15 added the limits, so it now asserts the new
+    // behaviour: a budget of Relay:AwarenessPerSecond (default 60, twice the 20 to 30 Hz the clients send) per
+    // connection, the excess refused with rate_limited and not forwarded, the connection kept open, and a client that
+    // keeps to the 30 Hz of desktop/android/web 09 never limited.
     [Fact, Trait("review", "decision")]
-    public async Task D2_awareness_is_not_rate_limited()
+    public async Task D2_awareness_beyond_the_connection_budget_is_refused_with_rate_limited()
     {
         var script = new ScriptedAccess();
         await using var app = App(await pg.CreateDatabaseAsync(), script);
@@ -296,13 +298,88 @@ public sealed class RelayReviewFindingsTests(PostgresFixture pg)
         await using var viewer = await RelayPeer.ConnectAsync(app, reader.Token, webSockets: true);
         await laptop.Connection.InvokeAsync("JoinDocument", fileId, 0L);
         await viewer.Connection.InvokeAsync("JoinDocument", fileId, 0L);
-
-        const int burst = 500;
         var frame = NyxcFrame.Seal(file.Key, file.KeyId, file.Id, ObjectKind.Awareness, new byte[1024 - NyxcFrame.Overhead]);
-        var started = DateTime.UtcNow;
-        for (var i = 0; i < burst; i++) await viewer.Connection.InvokeAsync("SubmitAwareness", fileId, frame);
-        await RelayPeer.UntilAsync(() => laptop.Awareness.Count == burst);
-        Assert.True(DateTime.UtcNow - started < TimeSpan.FromSeconds(10));
+
+        // A client at 30 Hz stays within the budget.
+        for (var i = 0; i < 45; i++)
+        {
+            await viewer.Connection.InvokeAsync("SubmitAwareness", fileId, frame);
+            await Task.Delay(TimeSpan.FromSeconds(1.0 / 30));
+        }
+
+        await RelayPeer.UntilAsync(() => laptop.Awareness.Count == 45);
         Assert.Empty(viewer.Errors);
+
+        // A burst of 500 drains the bucket of one second's worth; the rest is refused and never reaches the room.
+        const int burst = 500;
+        var refused = 0;
+        for (var i = 0; i < burst; i++)
+        {
+            try
+            {
+                await viewer.Connection.InvokeAsync("SubmitAwareness", fileId, frame);
+            }
+            catch (HubException e) when (e.Message.Contains("rate_limited"))
+            {
+                refused++;
+            }
+        }
+
+        await Task.Delay(200);
+        int relayed;
+        lock (laptop.Awareness) relayed = laptop.Awareness.Count - 45;
+        Assert.Equal(burst, relayed + refused);
+        Assert.InRange(relayed, 60, burst - 1);
+        lock (viewer.Errors) Assert.Contains("rate_limited", viewer.Errors);
+        Assert.False(viewer.Closed);
+
+        // The bucket refills, and the connection goes on.
+        await Task.Delay(TimeSpan.FromSeconds(1));
+        await viewer.Connection.InvokeAsync("SubmitAwareness", fileId, frame);
+    }
+
+    // R2 of REVIEW-server-2026-11-15: the relay caps connections per room and rooms per connection
+    // (Relay:MaxConnectionsPerRoom, Relay:MaxRoomsPerConnection). A join beyond either is refused with room_full or
+    // too_many_rooms after the reach check, and a leave frees the slot.
+    [Fact, Trait("review", "issue")]
+    public async Task R2_joins_beyond_the_room_and_connection_caps_are_refused()
+    {
+        var script = new ScriptedAccess();
+        await using var app = App(await pg.CreateDatabaseAsync(), script, new Dictionary<string, string?>
+        {
+            ["Relay:MaxConnectionsPerRoom"] = "2",
+            ["Relay:MaxRoomsPerConnection"] = "2",
+        });
+        var ada = await UserAsync(app, "Ada");
+        var project = await ada.S.ProjectAsync("p");
+        var files = new List<StructureDriver.Sealed>();
+        for (var i = 0; i < 3; i++) files.Add(await ada.S.FileAsync(project, $"note{i}.md"));
+        var stranger = await UserAsync(app, "Stranger");
+
+        await using var one = await RelayPeer.ConnectAsync(app, ada.Token);
+        await using var two = await RelayPeer.ConnectAsync(app, ada.Token);
+        await using var three = await RelayPeer.ConnectAsync(app, ada.Token);
+        await using var outsider = await RelayPeer.ConnectAsync(app, stranger.Token);
+        await one.Connection.InvokeAsync("JoinDocument", files[0].Id.ToString(), 0L);
+        await two.Connection.InvokeAsync("JoinDocument", files[0].Id.ToString(), 0L);
+
+        var full = await Assert.ThrowsAsync<HubException>(() => three.Connection.InvokeAsync("JoinDocument", files[0].Id.ToString(), 0L));
+        Assert.Contains("room_full", full.Message);
+        // Without reach the answer stays not_found, so a full room is no news to someone who cannot open it.
+        var hidden = await Assert.ThrowsAsync<HubException>(() => outsider.Connection.InvokeAsync("JoinDocument", files[0].Id.ToString(), 0L));
+        Assert.Contains("not_found", hidden.Message);
+        // A member joining its own room again is not counted twice.
+        await two.Connection.InvokeAsync("JoinDocument", files[0].Id.ToString(), 0L);
+        await two.Connection.InvokeAsync("LeaveDocument", files[0].Id.ToString());
+        await three.Connection.InvokeAsync("JoinDocument", files[0].Id.ToString(), 0L);
+        Assert.Equal(2, app.Services.GetRequiredService<RelayPresence>().ConnectionCount(files[0].Id));
+
+        await one.Connection.InvokeAsync("JoinDocument", files[1].Id.ToString(), 0L);
+        var many = await Assert.ThrowsAsync<HubException>(() => one.Connection.InvokeAsync("JoinDocument", files[2].Id.ToString(), 0L));
+        Assert.Contains("too_many_rooms", many.Message);
+        lock (one.Errors) Assert.Contains("too_many_rooms", one.Errors);
+        await one.Connection.InvokeAsync("LeaveDocument", files[1].Id.ToString());
+        await one.Connection.InvokeAsync("JoinDocument", files[2].Id.ToString(), 0L);
+        Assert.Equal(2, app.Services.GetRequiredService<RelayPresence>().RoomCount(one.Connection.ConnectionId!));
     }
 }

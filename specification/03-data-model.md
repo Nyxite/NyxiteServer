@@ -518,6 +518,30 @@ CREATE INDEX ix_versions_blob_ref ON file_versions(blob_ref);  -- garbage collec
 ALTER TABLE files ADD CONSTRAINT fk_files_current_version
   FOREIGN KEY (current_version_id) REFERENCES file_versions(id);
 ```
+
+### file_rotation_heads  (staged head of a key rotation)
+```sql
+CREATE TABLE file_rotation_heads (
+  file_id      uuid NOT NULL REFERENCES files(id) ON DELETE CASCADE,
+  key_id       uuid NOT NULL,              -- the new key the rotation is about to commit
+  content_hash bytea NOT NULL,             -- what the commit names in newHeadRef
+  blob_ref     text  NOT NULL,             -- ciphertext address, scoped to file and new key
+  size_cipher  bigint NOT NULL,
+  crdt_seq     bigint,                     -- text files: last update the staged snapshot contains
+  parent_seq   bigint,                     -- other files: head version seq it re-encrypts, 0 for none
+  author_id    uuid REFERENCES users(id),
+  created_at   timestamptz NOT NULL DEFAULT now(),
+  PRIMARY KEY (file_id, key_id),
+  CHECK ((crdt_seq IS NULL) <> (parent_seq IS NULL))
+);
+CREATE INDEX ix_file_rotation_heads_blob_ref ON file_rotation_heads(blob_ref);
+CREATE INDEX ix_file_rotation_heads_created  ON file_rotation_heads(created_at);
+```
+> As built (migration `RotationHeads`) [P]:
+> a rotation uploads the new head before its commit, and the commit turns this row into the head version in the transaction that switches `files.key_generation` ([09 §9.6](09-sharing-and-acl.md)).
+> It is a table of its own and not a `file_versions` row, because a version sealed with a key nobody has a wrap for would appear in every member's history if the rotation never committed.
+> The commit deletes every stage of the file, the blob collector treats `blob_ref` as a reference, the cleanup deletes a stage older than `NYXITE__Retention__OrphanBlobAgeHours`, and a purge takes it along by cascade.
+> Staged bytes count against the owner's quota until then.
 > No `size_plain` and no `summary`: the server can't measure plaintext or summarize a diff (diffs are client-side, [10](10-version-history.md)).
 
 ### file_chunks / file_version_chunks  (chunked large files, Phase 5.1)

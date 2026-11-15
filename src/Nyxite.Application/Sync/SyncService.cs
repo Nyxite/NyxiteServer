@@ -26,7 +26,7 @@ namespace Nyxite.Application.Sync;
 /// </summary>
 public sealed class SyncService(
     NyxiteDbContext db, StructureService structure, ChangeFeed feed, IdempotencyStore idempotency, DeviceGuard guard, TimeProvider time,
-    IOptions<RetentionOptions> retention)
+    IOptions<RetentionOptions> retention, Content.IRelayAccessEvents relay)
 {
     public const string ChangesEndpoint = "POST /sync/changes";
 
@@ -209,11 +209,13 @@ public sealed class SyncService(
             if (await idempotency.FindAsync(userId, ChangesEndpoint, key, hash, ct) is { } replay)
                 return JsonSerializer.Deserialize<LocalChangeResultDto>(replay.Json, JsonSerializerOptions.Web)!;
 
-            await DispatchAsync(principal, projectId, change, request, ct);
+            var trashed = await DispatchAsync(principal, projectId, change, request, ct);
             var applied = new LocalChangeResultDto(change.ClientChangeId, "applied", null);
             idempotency.Add(userId, ChangesEndpoint, key, hash, 200, applied);
             await db.SaveChangesAsync(ct);
             await tx.CommitAsync(ct);
+            // The delete joined this transaction, so the relay hears of it only now (05 §5.4).
+            if (trashed.Count > 0) relay.AccessChanged(Content.RelayAccessScope.ForFiles(trashed));
             return applied;
         }
         catch (AuthException e)
@@ -230,7 +232,8 @@ public sealed class SyncService(
         }
     }
 
-    private async Task DispatchAsync(ClaimsPrincipal principal, Guid projectId, LocalChange change, RequestInfo request, CancellationToken ct)
+    /// <summary>Applies one item and returns the files it moved to Trash, which the relay is told about after the commit.</summary>
+    private async Task<IReadOnlyList<Guid>> DispatchAsync(ClaimsPrincipal principal, Guid projectId, LocalChange change, RequestInfo request, CancellationToken ct)
     {
         var r = change.Ref ?? throw AuthException.Validation("ref is required.");
         var entity = r.Entity is StructureService.Project or StructureService.Folder or StructureService.File
@@ -241,10 +244,9 @@ public sealed class SyncService(
         {
             case ("delete", _):
                 await RequireInProjectAsync(entity, r.Id, projectId, ct);
-                if (entity == StructureService.Project) await structure.DeleteProjectAsync(principal, r.Id, request, ct);
-                else if (entity == StructureService.Folder) await structure.DeleteFolderAsync(principal, r.Id, request, ct);
-                else await structure.DeleteFileAsync(principal, r.Id, request, ct);
-                break;
+                if (entity == StructureService.Project) return await structure.DeleteProjectAsync(principal, r.Id, request, ct);
+                if (entity == StructureService.Folder) return await structure.DeleteFolderAsync(principal, r.Id, request, ct);
+                return await structure.DeleteFileAsync(principal, r.Id, request, ct);
 
             case ("structure", "create"):
                 // The batch is scoped to a project that exists, so a new project goes through POST /projects.
@@ -271,6 +273,8 @@ public sealed class SyncService(
             default:
                 throw AuthException.Validation("kind must be structure (op create or update) or delete.");
         }
+
+        return [];
     }
 
     /// <summary>The object must belong to the batch's project; one outside it answers like one that does not exist.</summary>

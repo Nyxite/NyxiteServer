@@ -21,6 +21,9 @@ public sealed class UnitOfWork : IAsyncDisposable
     public static async Task<UnitOfWork> BeginAsync(NyxiteDbContext db, CancellationToken ct) =>
         new(db.Database.CurrentTransaction is null ? await db.Database.BeginTransactionAsync(ct) : null);
 
+    /// <summary>True when this unit started the transaction, so its commit is the one that makes the change visible.</summary>
+    public bool Owned => _owned is not null;
+
     /// <summary>Commits when this unit started the transaction; a joined transaction is committed by whoever started it.</summary>
     public Task CommitAsync(CancellationToken ct) => _owned?.CommitAsync(ct) ?? Task.CompletedTask;
 
@@ -126,6 +129,13 @@ public sealed class ChangeFeed(NyxiteDbContext db, TimeProvider time)
         {
             ["fileId"] = file.Id, ["seq"] = v.Seq, ["contentHash"] = Base64UrlCodec.Encode(v.ContentHash), ["layout"] = v.Layout,
             ["sizeCipher"] = v.SizeCipher, ["keyId"] = v.KeyId, ["isHead"] = isHead, ["url"] = $"/api/v1/files/{file.Id}/versions/{v.Seq}/blob",
+        }, ct);
+
+    /// <summary>A committed key rotation: the file's current key is now <paramref name="keyId"/> of <paramref name="generation"/> (06 §6.3.2).</summary>
+    public Task KeyRotateAsync(FileEntity file, Guid keyId, int generation, CancellationToken ct) =>
+        AddAsync(file.ProjectId, KeyRotate, "file", file.Id, new JsonObject
+        {
+            ["fileId"] = file.Id, ["keyId"] = keyId, ["generation"] = generation,
         }, ct);
 
     /// <summary>Updates <paramref name="fromSeq"/> to <paramref name="toSeq"/> were appended to the file's log.</summary>

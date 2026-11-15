@@ -79,6 +79,9 @@ public sealed class BackupCodeEntity
 /// <summary><c>idempotency_keys</c> — replay store for <c>Idempotency-Key</c> (03 §3.2, 04 §4.1).</summary>
 public sealed class IdempotencyKeyEntity
 {
+    /// <summary>The primary key <c>(user_id, endpoint, key)</c>: a violation means a concurrent request with the same key won.</summary>
+    public const string PrimaryKey = "PK_idempotency_keys";
+
     public Guid UserId { get; set; }
     public required string Endpoint { get; set; }
     public required string Key { get; set; }

@@ -104,6 +104,24 @@ public sealed class ShareAccess(NyxiteDbContext db, TimeProvider time)
         return grants;
     }
 
+    /// <summary>
+    /// Every account that reaches a live <paramref name="file"/>: the project's owner and each grantee of a live account
+    /// share on the project, on the file's folder or a folder above it, or on the file. These are the members a key
+    /// rotation must wrap the new key to (09 §9.6). Link guests are no members, because their key rides the URL fragment.
+    /// </summary>
+    public async Task<HashSet<Guid>> MembersAsync(FileEntity file, CancellationToken ct)
+    {
+        var owner = await LiveProjectOwnerAsync(file.ProjectId, ct);
+        if (owner is null) return [];
+        var folders = file.FolderId is { } folderId ? await AncestorsAsync(db, folderId, ct) : [];
+        var now = time.GetUtcNow();
+        var grantees = await db.Shares.AsNoTracking()
+            .Where(s => s.Kind == ShareEntity.UserGrant && s.GranteeId != null && s.RevokedAt == null && (s.ExpiresAt == null || s.ExpiresAt > now)
+                        && (s.ProjectId == file.ProjectId || (s.FolderId != null && folders.Contains(s.FolderId.Value)) || s.FileId == file.Id))
+            .Select(s => s.GranteeId!.Value).Distinct().ToListAsync(ct);
+        return [owner.Value, .. grantees];
+    }
+
     private IQueryable<ShareEntity> LiveGrants(Guid userId)
     {
         var now = time.GetUtcNow();

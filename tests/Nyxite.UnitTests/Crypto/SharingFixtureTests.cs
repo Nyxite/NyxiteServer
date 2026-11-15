@@ -60,7 +60,7 @@ public sealed class SharingFixtureTests
         var key = Hex(V, "fileKey");
         string[] forbidden = ["#", Base64UrlCodec.Encode(key), Convert.ToHexStringLower(key), Convert.ToBase64String(key), V.GetProperty("fragment").GetString()!];
         var requests = V.GetProperty("requests").EnumerateArray().ToList();
-        Assert.Equal(11, requests.Count);
+        Assert.Equal(12, requests.Count);
         foreach (var request in requests)
         {
             var text = request.GetRawText();
@@ -79,6 +79,45 @@ public sealed class SharingFixtureTests
         var rotate = V.GetProperty("requests").EnumerateArray().Single(r => r.GetProperty("name").GetString() == "rotate").GetProperty("body");
         Assert.Equal(2, rotate.GetProperty("generation").GetInt32());
         Assert.Equal(rotate.GetProperty("newKeyId").GetGuid(), rotate.GetProperty("wrappedKeys")[0].GetProperty("keyId").GetGuid());
+    }
+
+    [Fact]
+    public void Rotation_stages_the_head_under_the_new_key_and_the_commit_names_it()
+    {
+        var r = V.GetProperty("rotation");
+        var requests = V.GetProperty("requests").EnumerateArray().ToDictionary(e => e.GetProperty("name").GetString()!);
+        Assert.Equal(["stageRotationHead", "rotate"], r.GetProperty("order").EnumerateArray().Select(e => e.GetString()));
+        var stage = requests["stageRotationHead"];
+        var rotate = requests["rotate"].GetProperty("body");
+        var newKeyId = rotate.GetProperty("newKeyId").GetGuid();
+        var fileId = V.GetProperty("fileId").GetGuid();
+        var key = Hex(r, "rotatedKey");
+
+        // The staged frame is sealed with the new key, and newHeadRef is the content hash the stage carried.
+        Assert.Equal(newKeyId.ToString(), stage.GetProperty("headers").GetProperty("Nyxite-Key-Id").GetString());
+        var frame = Hex(stage, "bodyHex");
+        Assert.True(NyxcFrame.TryParseHeader(frame, out var header));
+        Assert.Equal(newKeyId, header.KeyId);
+        var plaintext = NyxcFrame.Open(key, frame, NyxcFrame.BuildAad(newKeyId, fileId, ObjectKind.Snapshot));
+        Assert.Equal(Hex(r, "rotatedHeadPlaintext"), plaintext);
+        Assert.Equal(Base64UrlCodec.Encode(Blake3.Hash(plaintext)), rotate.GetProperty("newHeadRef").GetString());
+        Assert.Equal(rotate.GetProperty("newHeadRef").GetString(), stage.GetProperty("headers").GetProperty("Nyxite-Content-Hash").GetString());
+
+        // The name is sealed again with the new key, and every member, the owner included, has a wrap that opens to it.
+        var name = Base64UrlCodec.Decode(rotate.GetProperty("nameEnc").GetString()!);
+        Assert.Equal("plan.md"u8.ToArray(), NyxcFrame.Open(key, name, NyxcFrame.BuildAad(newKeyId, fileId, ObjectKind.Name)));
+        var seeds = new[] { Hex(V.GetProperty("objectKeyWrap"), "recipientSeed"), Hex(r, "ownerRecipientSeed") };
+        var wraps = rotate.GetProperty("wrappedKeys").EnumerateArray().ToList();
+        Assert.Equal(r.GetProperty("members").EnumerateArray().Select(m => m.GetGuid()), wraps.Select(w => w.GetProperty("memberId").GetGuid()));
+        for (var i = 0; i < wraps.Count; i++)
+        {
+            Assert.Equal(2, wraps[i].GetProperty("generation").GetInt32());
+            Assert.Equal(key, ObjectKeyWrap.Open(seeds[i], fileId, newKeyId, Base64UrlCodec.Decode(wraps[i].GetProperty("ciphertext").GetString()!)));
+        }
+
+        // A wrap opens for its own member only.
+        Assert.ThrowsAny<CryptographicException>(() => ObjectKeyWrap.Open(seeds[1], fileId, newKeyId,
+            Base64UrlCodec.Decode(wraps[0].GetProperty("ciphertext").GetString()!)));
     }
 
     [Fact]

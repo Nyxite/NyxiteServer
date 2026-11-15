@@ -32,7 +32,7 @@ namespace Nyxite.Application.Structure;
 /// </summary>
 public sealed class StructureService(
     NyxiteDbContext db, DeviceGuard guard, IdempotencyStore idempotency, AuditWriter audit, TimeProvider time, ChangeFeed feed,
-    ShareAccess access, IOptions<StructureOptions> options, IOptions<RetentionOptions> retention)
+    ShareAccess access, IOptions<StructureOptions> options, IOptions<RetentionOptions> retention, Content.IRelayAccessEvents relay)
 {
     public const string CreateProjectEndpoint = "POST /projects";
     public const string CreateFolderEndpoint = "POST /folders";
@@ -122,23 +122,27 @@ public sealed class StructureService(
     }
 
     /// <summary>Moves the project and everything in it to Trash. What goes along is marked with the project's id, so a restore finds the same set.</summary>
-    public async Task DeleteProjectAsync(ClaimsPrincipal principal, Guid id, RequestInfo request, CancellationToken ct)
+    public async Task<IReadOnlyList<Guid>> DeleteProjectAsync(ClaimsPrincipal principal, Guid id, RequestInfo request, CancellationToken ct)
     {
         var userId = await WriterAsync(principal, ct);
         await using var tx = await UnitOfWork.BeginAsync(db, ct);
         var project = await ProjectAsync(userId, id, tracked: true, ct, write: true);
         var now = time.GetUtcNow();
-        var files = await db.Files.Where(f => f.ProjectId == id && f.DeletedAt == null)
-            .ExecuteUpdateAsync(s => s.SetProperty(f => f.DeletedAt, now).SetProperty(f => f.UpdatedAt, now).SetProperty(f => f.DeletedRootId, id), ct);
+        // The ids, so the relay can close the rooms of what went to Trash.
+        var files = await db.Database.SqlQuery<Guid>($"""
+            UPDATE files SET deleted_at = {now}, updated_at = {now}, deleted_root_id = {id} WHERE project_id = {id} AND deleted_at IS NULL
+            RETURNING id AS "Value"
+            """).ToListAsync(ct);
         var folders = await db.Folders.Where(f => f.ProjectId == id && f.DeletedAt == null)
             .ExecuteUpdateAsync(s => s.SetProperty(f => f.DeletedAt, now).SetProperty(f => f.UpdatedAt, now).SetProperty(f => f.DeletedRootId, id), ct);
         project.DeletedAt = now;
         project.UpdatedAt = now;
         // The project's own feed answers 404 while it is in Trash, so its rows need no entry of their own.
         await feed.DeleteAsync(id, Project, id, now, ChangeFeed.Deleted, ct);
-        audit.Add("project.delete", userId, request, targetType: "project", targetId: id, detail: new { folders, files });
+        audit.Add("project.delete", userId, request, targetType: "project", targetId: id, detail: new { folders, files = files.Count });
         await db.SaveChangesAsync(ct);
         await tx.CommitAsync(ct);
+        return Trashed(tx, files);
     }
 
     public async Task<WrappedKeysDto> ProjectKeysAsync(ClaimsPrincipal principal, Guid id, CancellationToken ct)
@@ -247,7 +251,7 @@ public sealed class StructureService(
     }
 
     /// <summary>Moves the folder and its whole subtree to Trash as one audited event (02 §2.6).</summary>
-    public async Task DeleteFolderAsync(ClaimsPrincipal principal, Guid id, RequestInfo request, CancellationToken ct)
+    public async Task<IReadOnlyList<Guid>> DeleteFolderAsync(ClaimsPrincipal principal, Guid id, RequestInfo request, CancellationToken ct)
     {
         var userId = await WriterAsync(principal, ct);
         await using var tx = await UnitOfWork.BeginAsync(db, ct);
@@ -277,6 +281,7 @@ public sealed class StructureService(
         audit.Add("folder.delete", userId, request, targetType: "folder", targetId: id, detail: new { folders = folders.Count, files = files.Count });
         await db.SaveChangesAsync(ct);
         await tx.CommitAsync(ct);
+        return Trashed(tx, files);
     }
 
     public async Task<WrappedKeysDto> FolderKeysAsync(ClaimsPrincipal principal, Guid id, CancellationToken ct)
@@ -393,7 +398,7 @@ public sealed class StructureService(
         return await ToDtoAsync(file, userId, keys: true, ct);
     }
 
-    public async Task DeleteFileAsync(ClaimsPrincipal principal, Guid id, RequestInfo request, CancellationToken ct)
+    public async Task<IReadOnlyList<Guid>> DeleteFileAsync(ClaimsPrincipal principal, Guid id, RequestInfo request, CancellationToken ct)
     {
         var userId = await WriterAsync(principal, ct);
         await using var tx = await UnitOfWork.BeginAsync(db, ct);
@@ -405,6 +410,18 @@ public sealed class StructureService(
         audit.Add("file.delete", userId, request, targetType: "file", targetId: id);
         await db.SaveChangesAsync(ct);
         await tx.CommitAsync(ct);
+        return Trashed(tx, [id]);
+    }
+
+    /// <summary>
+    /// A file in Trash has no reach for anyone, its owner included (05 §5.4), so the relay judges the rooms of what went
+    /// to Trash right away. That has to wait for the commit: a delete inside a sync batch joins the batch item's
+    /// transaction, and the batch tells the relay once it has committed.
+    /// </summary>
+    private IReadOnlyList<Guid> Trashed(UnitOfWork tx, IReadOnlyList<Guid> files)
+    {
+        if (tx.Owned && files.Count > 0) relay.AccessChanged(Content.RelayAccessScope.ForFiles(files));
+        return files;
     }
 
     public async Task<WrappedKeysDto> FileKeysAsync(ClaimsPrincipal principal, Guid id, CancellationToken ct)

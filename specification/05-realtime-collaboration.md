@@ -71,12 +71,36 @@ public record PresenceDto(string Kind, string? UserId, string? DisplayName); // 
 > Every check of the pass is isolated, so one that fails, a timed out query for example, costs that connection or account one pass and leaves every other membership judged.
 > A removal takes the connection out of the group before it takes it out of the presence, so a failure in between leaves a member the next pass sees again and never a listener outside the roster.
 
+> Event-driven eviction [P]:
+> the changes of access the server makes itself end the affected memberships at once, with the same checks and the same codes as the periodic pass, which stays the backstop.
+> After `DELETE /shares/{id}` or `PATCH /shares/{id}` commits, a targeted pass judges the grantee's connections or the guests of the link, and after a move to Trash it judges every connection in the rooms of the files that went to Trash, the owner's included.
+> A delete inside a `POST /sync/changes` batch is announced after its batch item commits, because the pass reads committed state.
+> The pass runs on the relay's re-check loop, so it never overlaps a periodic pass, and changes that arrive during a pass are merged into the next one.
+> It is race-free against a join, because a join enters the group and the presence before its last reach check (step 4): a revocation that commits after that check finds the member in the presence.
+> A session that ends by request also triggers a targeted pass over the account's connections, which closes those of the ended session with `unauthenticated` (Phase 2.3): a logout, a revoked session or device, a detected refresh-token reuse, a credential change and a blocked account's refresh.
+> A revocation that runs inside a larger transaction is announced before that transaction commits, so its pass may still see the session live, and the periodic pass closes the connection then.
+> A share that expires on its own and a session that reaches its absolute lifetime stay with the periodic pass, because no request marks their moment.
+> Waiting for the timer was rejected, because a revoked reader would keep receiving for up to `NYXITE__Relay__AccessRecheckInterval` against the instant cutoff of [09 §9.6](09-sharing-and-acl.md).
+
+> Relay limits [P]:
+> a connection is in at most `NYXITE__Relay__MaxRoomsPerConnection` rooms (default 50), and a room holds at most `NYXITE__Relay__MaxConnectionsPerRoom` connections (default 100), accounts and guests together ([13 §13.5](13-security.md)).
+> A join beyond either answers `too_many_rooms` or `room_full`, checked only after reach, so a full room is no news to someone who cannot open it.
+> The room count and the entry happen under the room's lock, so concurrent joins cannot overfill it, and a connection that joins a room it is already in is not counted twice.
+> The caps exist because every update and every awareness message is copied to everyone in a room, so the cost of a room grows with the square of its size, and link guests need no account to join.
+
 ## 5.5 Update flow
 
 1. Client edits → Yrs update → **encrypts** with the file key → `SubmitUpdate(fileId, EncryptedUpdate)`.
 2. Server: authorize (write) → assign `seq` → **persist** the ciphertext to `crdt_updates` → broadcast `OnUpdate` to the rest of the group. **No decryption, no merge, no validation of contents.**
 3. Peers receive the encrypted update, decrypt locally, and merge into their Yrs doc.
 4. Awareness is relayed **encrypted** and **not persisted**. It is an NYXC frame of `object_kind` `awareness = 6` ([07 §7.4](07-encryption.md)) around a y-protocols awareness update, at most `NYXITE__Limits__MaxAwarenessBytes`. A payload that does not parse as an NYXC header is refused with `validation_failed`, so an unsealed cursor never passes the relay. The `object_kind` sits in the AAD and cannot be checked by the server, but the header check costs nothing at caret rate. The server forwards the bytes unchanged to the others in the room, the sender excluded, because a client already knows its own cursor.
+   Each connection may send `NYXITE__Relay__AwarenessPerSecond` awareness messages per second over all its rooms (default 60), as a token bucket that holds one second's worth.
+   A message beyond it is refused with `rate_limited` and not forwarded, and the connection stays open, because awareness is a stream of whole states and the next one replaces the dropped one.
+   The default is twice the 20 to 30 Hz the clients coalesce to, so two active documents and timer jitter never meet it, while one connection can no longer flood a room.
+   Closing the connection was rejected, because a reconnect and rejoin cost more than the dropped message.
+5. After a key rotation commits ([09 §9.6](09-sharing-and-acl.md)), `SubmitUpdate` with an older `KeyId` fails with `key_generation_stale` and `OnError(fileId, "key_generation_stale", ...)`, like the REST log, and the client re-seals the update under the new key and resubmits it.
+   The relay sends no rotation event of its own, because a writer meets the `412` on its next submit and a reader meets the new `KeyId` on the next update or on the snapshot a join points to, and both then fetch the new wrap.
+   A dedicated callback was left out of Phase 2.3, because it would change the pinned hub contract of `relay-wire.json` for a hint the existing paths already give.
 
 ## 5.6 Snapshotting & compaction (client-driven)
 
@@ -109,10 +133,11 @@ public record PresenceDto(string Kind, string? UserId, string? DisplayName); // 
 > `/share/{token}/ws` is the same `RelayHub` as `/hubs/relay`, mapped a second time, so accounts and guests share one room and one roster.
 > A separate hub was rejected, because SignalR groups belong to one hub type and the rooms would split in two.
 > The guest path serves WebSockets only, so the per-IP share-access limit counts one negotiate and one upgrade per connection, where long polling would spend a request per poll.
+> The limit runs before authentication, so a handshake with a wrong guest token or ticket counts as well ([13 §13.5](13-security.md)).
 > A browser authenticates the upgrade with a guest socket ticket from `POST /share/{token}/socket-ticket`, a native client may send the guest token as bearer.
 > A guest joins only the file of its link share, and `not_found` answers any other file.
 > Its join checks that the share is still live and answers `share_revoked` or `link_expired` otherwise.
-> The periodic re-check (§5.4) closes a guest connection whose share was revoked or has expired, with `OnError(fileId, "share_revoked" | "link_expired", ...)` for each room, because its only credential is gone.
+> The periodic re-check (§5.4), and right after a revoke of the link the targeted pass, closes a guest connection whose share was revoked or has expired, with `OnError(fileId, "share_revoked" | "link_expired", ...)` for each room, because its only credential is gone.
 > A guest whose file went to Trash leaves the room with `not_found`.
 > A guest connection does not end when its 15-minute guest token expires, because the share row checked on every pass is the stronger and the faster cutoff.
 

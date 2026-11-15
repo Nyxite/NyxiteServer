@@ -37,6 +37,12 @@ public static class ShareEndpoints
             await keys.UploadAsync(http.User, id, body, ct);
             return Results.NoContent();
         });
+        files.MapPost("/{id:guid}/keys/rotate", async (Guid id, RotateFileKeyRequest body, KeyRotationService rotation, HttpContext http, CancellationToken ct) =>
+        {
+            var key = http.Request.Headers.TryGetValue(KeyEndpoints.IdempotencyHeader, out var v) ? v.ToString() : null;
+            await rotation.CommitAsync(http.User, id, body, key, http.Info(), ct);
+            return Results.NoContent();
+        });
         files.MapPost("/keys:batch", async (BatchGrantRequest body, KeyGrantService keys, HttpContext http, CancellationToken ct) =>
             Results.Ok(await keys.BatchAsync(http.User, body, ct)));
 
@@ -47,7 +53,9 @@ public static class ShareEndpoints
 /// <summary>
 /// The public, token-scoped link-share surface outside <c>/api/v1</c> (04 §4.8). The link token in the path is the
 /// credential of the bootstrap and of the guest-token renewal; the ciphertext and the socket ticket need the guest
-/// token, which must belong to the same link. The decryption key is the URL fragment and is never sent here.
+/// token, which must belong to the same link. The decryption key is the URL fragment and is never sent here. Every
+/// request under <see cref="Prefix"/> counts against the per-IP <c>share-access</c> bucket before authentication
+/// (<see cref="RateLimiting.UseNyxitePreAuthenticationRateLimiting"/>), so a rejected guest token counts as well.
 /// </summary>
 public static class PublicShareEndpoints
 {
@@ -56,10 +64,10 @@ public static class PublicShareEndpoints
     public static IEndpointRouteBuilder MapPublicShareEndpoints(this IEndpointRouteBuilder app)
     {
         app.MapGet(Prefix + "/{token}", async (string token, GuestShareService guests, HttpContext http, CancellationToken ct) =>
-            Results.Ok(await guests.BootstrapAsync(token, http.Info(), ct))).RequireRateLimiting(RateLimiting.ShareAccess);
+            Results.Ok(await guests.BootstrapAsync(token, http.Info(), ct)));
 
         app.MapPost(Prefix + "/{token}/session", async (string token, GuestShareService guests, HttpContext http, CancellationToken ct) =>
-            Results.Ok(await guests.SessionAsync(token, http.Info(), ct))).RequireRateLimiting(RateLimiting.ShareAccess);
+            Results.Ok(await guests.SessionAsync(token, http.Info(), ct)));
 
         app.MapGet(Prefix + "/{token}/blob", async (GuestShareService guests, ContentService content, HttpContext http, CancellationToken ct) =>
         {
@@ -71,11 +79,11 @@ public static class PublicShareEndpoints
             if (read.Version.CrdtSeq is { } crdtSeq)
                 http.Response.Headers[ContentEndpoints.SnapshotSeqHeader] = crdtSeq.ToString(System.Globalization.CultureInfo.InvariantCulture);
             return ContentEndpoints.Stream(http, read);
-        }).RequireAuthorization(AuthSetup.Guest).RequireRateLimiting(RateLimiting.ShareAccess);
+        }).RequireAuthorization(AuthSetup.Guest);
 
         app.MapPost(Prefix + "/{token}/socket-ticket", async (GuestShareService guests, HttpContext http, CancellationToken ct) =>
             Results.Ok(await guests.IssueTicketAsync(http.User.GuestShareIdOrThrow(), ct)))
-            .RequireAuthorization(AuthSetup.Guest).RequireRateLimiting(RateLimiting.ShareAccess);
+            .RequireAuthorization(AuthSetup.Guest);
 
         return app;
     }

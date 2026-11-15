@@ -32,6 +32,7 @@ public sealed class NyxiteDbContext(DbContextOptions<NyxiteDbContext> options) :
     public DbSet<FileVersionEntity> FileVersions => Set<FileVersionEntity>();
     public DbSet<CrdtUpdateEntity> CrdtUpdates => Set<CrdtUpdateEntity>();
     public DbSet<ChangeLogEntity> ChangeLog => Set<ChangeLogEntity>();
+    public DbSet<FileRotationHeadEntity> FileRotationHeads => Set<FileRotationHeadEntity>();
     public DbSet<ShareEntity> Shares => Set<ShareEntity>();
 
     protected override void OnModelCreating(ModelBuilder modelBuilder) =>

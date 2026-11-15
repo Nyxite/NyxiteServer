@@ -1,6 +1,7 @@
 using System.Collections.Concurrent;
 using Microsoft.AspNetCore.SignalR;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Options;
 using Nyxite.Application.Auth;
 using Nyxite.Application.Content;
 using Nyxite.Application.Keys;
@@ -76,7 +77,14 @@ public sealed class RelayPresence
         if (_connections.TryRemove(connectionId, out var context)) context.Abort();
     }
 
-    public void Join(Guid fileId, string connectionId, RelayMember member)
+    public void Join(Guid fileId, string connectionId, RelayMember member) => TryJoin(fileId, connectionId, member, int.MaxValue);
+
+    /// <summary>
+    /// Enters a room unless it already holds <paramref name="maxConnections"/> other connections (13 §13.5). The count
+    /// and the entry happen under the room's lock, so concurrent joins cannot overfill it. A connection that is already
+    /// in the room always stays.
+    /// </summary>
+    public bool TryJoin(Guid fileId, string connectionId, RelayMember member, int maxConnections)
     {
         while (true)
         {
@@ -84,11 +92,21 @@ public sealed class RelayPresence
             lock (room)
             {
                 if (room.Closed) continue;
+                if (!room.Members.ContainsKey(connectionId) && room.Members.Count >= maxConnections) return false;
                 room.Members[connectionId] = member;
-                return;
+                return true;
             }
         }
     }
+
+    /// <summary>How many connections a room holds now.</summary>
+    public int ConnectionCount(Guid fileId) => _rooms.TryGetValue(fileId, out var room) ? room.Members.Count : 0;
+
+    /// <summary>
+    /// How many rooms a connection is in now. A connection's hub calls run one at a time, so its own joins cannot race
+    /// this count; a concurrent removal by the re-check only lowers it.
+    /// </summary>
+    public int RoomCount(string connectionId) => _rooms.Values.Count(r => r.Members.ContainsKey(connectionId));
 
     public bool Leave(Guid fileId, string connectionId)
     {
@@ -152,9 +170,12 @@ public sealed class RelayNotifier(IHubContext<RelayHub, IRelayClient> hub) : IRe
 /// </para>
 /// </summary>
 public sealed class RelayHub(
-    ContentService content, RelayPresence presence, NyxiteDbContext db, DeviceGuard guard, GuestShareService guests, TimeProvider time)
+    ContentService content, RelayPresence presence, NyxiteDbContext db, DeviceGuard guard, GuestShareService guests, TimeProvider time,
+    IOptions<RelayOptions> options)
     : Hub<IRelayClient>
 {
+    private readonly RelayOptions _limits = options.Value;
+
     public const string Path = "/hubs/relay";
 
     /// <summary>The guest relay (04 §4.8): WebSockets only, so the per-IP share-access limit counts one handshake per connection.</summary>
@@ -196,12 +217,19 @@ public sealed class RelayHub(
                 member = new RelayMember(PresenceDto.ForUser(userId, name), userId, session.Id);
             }
 
-            // Reach is checked by the first read.
+            // Reach is checked by the first read, and the relay limits only after it, so a full room is never news to
+            // someone who could not open it. The early check spares a full room the log read; the atomic one decides.
             var snapshot = await content.SnapshotPointerAsync(user, id, ct);
+            if (!presence.IsIn(id, Context.ConnectionId))
+            {
+                if (presence.RoomCount(Context.ConnectionId) >= _limits.MaxRoomsPerConnection) throw TooManyRooms();
+                if (presence.ConnectionCount(id) >= _limits.MaxConnectionsPerRoom) throw RoomFull();
+            }
+
             try
             {
                 await Groups.AddToGroupAsync(Context.ConnectionId, Room(id), ct);
-                presence.Join(id, Context.ConnectionId, member);
+                if (!presence.TryJoin(id, Context.ConnectionId, member, _limits.MaxConnectionsPerRoom)) throw RoomFull();
                 // A disconnect that ran while the join was under way has already left every room, so the join must not stay.
                 ct.ThrowIfCancellationRequested();
                 if (snapshot is not null) await Clients.Caller.OnSnapshot(fileId, snapshot.CrdtSeq ?? 0, snapshot.Seq);
@@ -243,6 +271,12 @@ public sealed class RelayHub(
     /// its join, kept current by the periodic re-check instead of a query per message at caret rate. A payload that is
     /// not an NYXC frame is refused, so an unsealed cursor never passes the relay; the <c>object_kind</c> sits in the AAD
     /// and cannot be checked here.
+    /// <para>
+    /// Each connection has a budget of <c>Relay:AwarenessPerSecond</c> messages (13 §13.5), because every message is
+    /// copied to everyone in the room and nothing else brakes a member, a read-only guest included. A message beyond it
+    /// is refused with <c>rate_limited</c> and not forwarded; the connection stays, because awareness is a stream of
+    /// whole states and the next one replaces what was dropped.
+    /// </para>
     /// </summary>
     public async Task SubmitAwareness(string fileId, byte[] awarenessCipher)
     {
@@ -250,6 +284,7 @@ public sealed class RelayHub(
         await GuardAsync(fileId, async () =>
         {
             if (!presence.IsIn(id, Context.ConnectionId)) throw AuthException.NotFound();
+            if (!Budget().TryTake(time)) throw new AuthException(429, "rate_limited", "Too many awareness messages.");
             if (awarenessCipher.Length > content.MaxAwarenessBytes) throw ContentService.PayloadTooLarge("The awareness message is too large.");
             if (!NyxcFrame.TryParseHeader(awarenessCipher, out _)) throw AuthException.Validation("The awareness message must be an NYXC frame.");
             await Clients.OthersInGroup(Room(id)).OnAwareness(fileId, awarenessCipher);
@@ -289,6 +324,23 @@ public sealed class RelayHub(
 
     private static Guid Parse(string fileId) => Guid.TryParse(fileId, out var id) ? id : throw new HubException("validation_failed");
 
+    public const string RoomFullCode = "room_full";
+    public const string TooManyRoomsCode = "too_many_rooms";
+
+    private static AuthException RoomFull() => new(409, RoomFullCode, "This document has as many connections as the relay allows.");
+
+    private static AuthException TooManyRooms() => new(409, TooManyRoomsCode, "This connection is in as many documents as the relay allows.");
+
+    /// <summary>The connection's awareness budget, kept with the connection for its lifetime.</summary>
+    private AwarenessBudget Budget()
+    {
+        const string key = "nyxite.awareness";
+        if (Context.Items.TryGetValue(key, out var existing)) return (AwarenessBudget)existing!;
+        var budget = new AwarenessBudget(_limits.AwarenessPerSecond, time.GetTimestamp());
+        Context.Items[key] = budget;
+        return budget;
+    }
+
     private Task GuardAsync(string fileId, Func<Task> action) => GuardAsync(fileId, async () =>
     {
         await action();
@@ -310,6 +362,30 @@ public sealed class RelayHub(
     }
 }
 
+/// <summary>
+/// A token bucket of awareness messages: it holds at most one second's worth and refills continuously at
+/// <paramref name="perSecond"/>. It counts messages only and never looks at them.
+/// </summary>
+public sealed class AwarenessBudget(int perSecond, long startTimestamp)
+{
+    private double _tokens = perSecond;
+    private long _last = startTimestamp;
+    private readonly Lock _gate = new();
+
+    public bool TryTake(TimeProvider time)
+    {
+        lock (_gate)
+        {
+            var now = time.GetTimestamp();
+            _tokens = Math.Min(perSecond, _tokens + (double)(now - _last) / time.TimestampFrequency * perSecond);
+            _last = now;
+            if (_tokens < 1) return false;
+            _tokens -= 1;
+            return true;
+        }
+    }
+}
+
 public static class RelaySetup
 {
     public static IServiceCollection AddNyxiteRelay(this IServiceCollection services)
@@ -318,6 +394,8 @@ public static class RelaySetup
         services.AddSingleton<RelayPresence>();
         services.AddSingleton<IRelayNotifier, RelayNotifier>();
         services.AddScoped<RelayAccessCheck>();
+        services.AddSingleton<RelayAccessSignal>();
+        services.AddSingleton<IRelayAccessEvents>(sp => sp.GetRequiredService<RelayAccessSignal>());
         services.AddHostedService<RelayAccessWorker>();
         return services;
     }

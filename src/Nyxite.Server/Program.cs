@@ -68,6 +68,8 @@ app.UseStatusCodePages(context =>
     context.HttpContext.Response.StatusCode == 404 && !context.HttpContext.Response.HasStarted
         ? Problems.WriteAsync(context.HttpContext, 404, "not_found", "Not found.")
         : Task.CompletedTask);
+// Per-IP buckets of credentials that cost a lookup run before authentication, so rejected ones count too (13 §13.5).
+app.UseNyxitePreAuthenticationRateLimiting();
 app.UseAuthentication();
 app.UseAuthorization();
 app.UseRateLimiter();
@@ -88,7 +90,7 @@ app.MapPublicShareEndpoints();
 app.MapHub<RelayHub>(RelayHub.Path).RequireAuthorization();
 // One hub type on both paths, so guests and accounts share the rooms (05 §5.8).
 app.MapHub<RelayHub>(RelayHub.GuestPath, o => o.Transports = Microsoft.AspNetCore.Http.Connections.HttpTransportType.WebSockets)
-    .RequireAuthorization(AuthSetup.Guest).RequireRateLimiting(RateLimiting.ShareAccess);
+    .RequireAuthorization(AuthSetup.Guest);
 
 await app.RunAsync();
 return 0;

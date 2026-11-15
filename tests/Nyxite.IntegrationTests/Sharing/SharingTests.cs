@@ -7,6 +7,8 @@ using System.Text.Json;
 using System.Text.Json.Nodes;
 using Microsoft.AspNetCore.SignalR;
 using Microsoft.AspNetCore.SignalR.Client;
+using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Diagnostics;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 using Nyxite.Application.Structure;
@@ -59,17 +61,68 @@ public sealed class SharingTests(PostgresFixture pg)
 {
     private const string Origin = "https://nyxite.test";
 
-    private sealed record Member(StructureDriver S, string Token, Guid Id, byte[] Seed, AuthDriver Auth);
+    internal sealed record Member(StructureDriver S, string Token, Guid Id, byte[] Seed, AuthDriver Auth);
 
-    private static NyxiteApp App(string connectionString, CapturingLoggerProvider? logs = null, IDictionary<string, string?>? overrides = null) =>
+    internal static NyxiteApp App(string connectionString, CapturingLoggerProvider? logs = null, IDictionary<string, string?>? overrides = null,
+        InsertGate? gate = null) =>
         new(connectionString, overrides: overrides ?? new Dictionary<string, string?> { ["Relay:AccessRecheckInterval"] = "01:00:00" },
             configureServices: services =>
             {
                 if (logs is not null) services.AddSingleton<ILoggerProvider>(logs);
+                if (gate is not null) services.ConfigureDbContext<Nyxite.Persistence.NyxiteDbContext>(o => o.AddInterceptors(gate));
             });
 
+    /// <summary>
+    /// Once armed, holds the first commands whose text contains the marker until <paramref name="parties"/> requests have
+    /// reached it, so concurrent creates have all passed their checks before any of them writes. That makes the races of
+    /// R3 and R4 deterministic. The first write of an account share is its <c>file_keys</c> insert, which a second
+    /// request then waits on until the first commits; a link share writes <c>shares</c> first.
+    /// </summary>
+    internal sealed class InsertGate(int parties) : DbCommandInterceptor
+    {
+        private volatile string? _marker;
+        private TaskCompletionSource _open = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        private int _arrived;
+
+        public int Parties => parties;
+
+        public void Arm(string marker)
+        {
+            _open = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            _arrived = 0;
+            _marker = marker;
+        }
+
+        private async Task HoldAsync(System.Data.Common.DbCommand command, CancellationToken ct)
+        {
+            if (_marker is not { } marker || !command.CommandText.Contains(marker, StringComparison.Ordinal)) return;
+            var open = _open;
+            if (Interlocked.Increment(ref _arrived) >= parties)
+            {
+                _marker = null;
+                open.TrySetResult();
+            }
+
+            await open.Task.WaitAsync(TimeSpan.FromSeconds(10), ct);
+        }
+
+        public override async ValueTask<InterceptionResult<System.Data.Common.DbDataReader>> ReaderExecutingAsync(System.Data.Common.DbCommand command,
+            CommandEventData eventData, InterceptionResult<System.Data.Common.DbDataReader> result, CancellationToken ct = default)
+        {
+            await HoldAsync(command, ct);
+            return result;
+        }
+
+        public override async ValueTask<InterceptionResult<int>> NonQueryExecutingAsync(System.Data.Common.DbCommand command, CommandEventData eventData,
+            InterceptionResult<int> result, CancellationToken ct = default)
+        {
+            await HoldAsync(command, ct);
+            return result;
+        }
+    }
+
     /// <summary>A full account on an active device whose directory key is a real X-Wing key, so wraps to it open.</summary>
-    private static async Task<Member> MemberAsync(NyxiteApp app, string displayName)
+    internal static async Task<Member> MemberAsync(NyxiteApp app, string displayName)
     {
         var auth = new AuthDriver(app);
         var keys = new KeyDriver(auth);
@@ -86,7 +139,7 @@ public sealed class SharingTests(PostgresFixture pg)
     }
 
     /// <summary>What the sharer's client does first: fetch the grantee's public key from the directory.</summary>
-    private static async Task<byte[]> DirectoryKeyAsync(Member caller, Guid userId)
+    internal static async Task<byte[]> DirectoryKeyAsync(Member caller, Guid userId)
     {
         var directory = await (await caller.S.GetAsync($"/keys/directory?userId={userId}")).JsonAsync();
         return Base64UrlCodec.Decode(directory.GetProperty("keys")[0].GetProperty("kemPub").GetString()!);
@@ -139,7 +192,7 @@ public sealed class SharingTests(PostgresFixture pg)
         return (await response.JsonAsync()).GetProperty("id").GetGuid();
     }
 
-    private static async Task<int> RecheckAsync(NyxiteApp app)
+    internal static async Task<int> RecheckAsync(NyxiteApp app)
     {
         await using var scope = app.Services.CreateAsyncScope();
         return await scope.ServiceProvider.GetRequiredService<RelayAccessCheck>().RunAsync(CancellationToken.None);
@@ -168,7 +221,7 @@ public sealed class SharingTests(PostgresFixture pg)
     /// The "nothing leaks" inspection (method-api-automated): no row of any table, no file of the blob store and no log
     /// line contains any of <paramref name="secrets"/>, as text or as the hex Postgres renders bytea in.
     /// </summary>
-    private static async Task AssertNothingLeaksAsync(NyxiteApp app, CapturingLoggerProvider logs, params byte[][] secrets)
+    internal static async Task AssertNothingLeaksAsync(NyxiteApp app, CapturingLoggerProvider logs, params byte[][] secrets)
     {
         var needles = secrets.SelectMany(s => new[] { Encoding.UTF8.GetString(s), Convert.ToHexStringLower(s), Base64UrlCodec.Encode(s), Convert.ToBase64String(s) })
             .Where(n => n.Length >= 8).Distinct().ToList();
@@ -301,8 +354,9 @@ public sealed class SharingTests(PostgresFixture pg)
         var submit = await Assert.ThrowsAsync<HubException>(() =>
             peer.Connection.InvokeAsync<long>("SubmitUpdate", alpha.Id.ToString(), new EncryptedUpdate(0, Seal(alpha, "late"), alpha.KeyId.ToString())));
         Assert.Contains("not_found", submit.Message);
-        Assert.Equal(1, await RecheckAsync(app));
+        // The revoke itself ends the open room (R5); the periodic pass, an hour away here, finds nothing left.
         await RelayPeer.UntilAsync(() => peer.Errors.Contains("not_found"));
+        Assert.Equal(0, await RecheckAsync(app));
         Assert.Empty((await (await grantee.S.GetAsync("/shares")).JsonAsync()).GetProperty("items").EnumerateArray());
 
         await AssertNothingLeaksAsync(app, logs, alpha.Key, beta.Key, folder.Key, sub.Key, grantee.Seed,
@@ -553,8 +607,8 @@ public sealed class SharingTests(PostgresFixture pg)
         var ticket = new HttpRequestMessage(HttpMethod.Post, $"/share/{token}/socket-ticket");
         ticket.Headers.Authorization = new("Bearer", guestToken);
         Assert.Equal("share_revoked", await (await guest.SendAsync(ticket)).ProblemCodeAsync());
-        Assert.Equal(1, await RecheckAsync(app));
         await RelayPeer.UntilAsync(() => browser.Errors.Contains("share_revoked") && browser.Closed);
+        Assert.Equal(0, await RecheckAsync(app));
 
         // A shared file in Trash is gone for its guests.
         var trashed = await owner.S.FileAsync(project, "trashed.md");
@@ -621,6 +675,196 @@ public sealed class SharingTests(PostgresFixture pg)
         await AssertLimitedAsync(30, () => guest.GetAsync($"/share/{ShareLink.NewToken()}"));
         Assert.Equal(HttpStatusCode.TooManyRequests, (await guest.PostAsync($"/share/{ShareLink.NewToken()}/session", null)).StatusCode);
         await AssertLimitedAsync(60, () => owner.S.GetAsync($"/keys/directory?userId={owner.Id}"));
+    }
+
+    // ---------------------------------------------------------------- review 2026-11-15 (R1, R3 to R5)
+
+    /// <summary>
+    /// R1: the per-IP buckets of credentials that cost a lookup run before authentication, so a wrong guest token or a
+    /// bad relay socket ticket counts. A relay request with an access token is not counted, so long polling stays free.
+    /// </summary>
+    [Fact]
+    public async Task Rejected_guest_tokens_and_relay_tickets_count_against_the_per_ip_buckets()
+    {
+        await using var app = App(await pg.CreateDatabaseAsync(), overrides: new Dictionary<string, string?>
+        {
+            ["Relay:AccessRecheckInterval"] = "01:00:00",
+            ["RateLimiting:ShareAccess:PermitLimit"] = "30",
+            ["RateLimiting:RelayTicket:PermitLimit"] = "10",
+        });
+        var owner = await MemberAsync(app, "Ada");
+        var project = await owner.S.ProjectAsync("p");
+        var file = await owner.S.FileAsync(project, "note.md");
+        var token = ShareLink.NewToken();
+        await LinkShareAsync(owner, file, token, "read");
+        var guest = Anonymous(app, new ConcurrentQueue<string>());
+
+        HttpRequestMessage Blob() => new(HttpMethod.Get, $"/share/{token}/blob") { Headers = { Authorization = new("Bearer", "not.a.guest-token") } };
+        for (var i = 0; i < 30; i++) Assert.Equal(HttpStatusCode.Unauthorized, (await guest.SendAsync(Blob())).StatusCode);
+        var limited = await guest.SendAsync(Blob());
+        Assert.Equal("rate_limited", await limited.ProblemCodeAsync());
+        Assert.True(int.Parse(limited.Headers.GetValues("Retry-After").Single()) > 0);
+
+        Task<HttpResponseMessage> Negotiate(string credential) =>
+            guest.PostAsync($"/hubs/relay/negotiate?negotiateVersion=1&access_token={Uri.EscapeDataString(credential)}", null);
+        for (var i = 0; i < 10; i++) Assert.Equal(HttpStatusCode.Unauthorized, (await Negotiate("bogus-ticket")).StatusCode);
+        Assert.Equal("rate_limited", await (await Negotiate("bogus-ticket")).ProblemCodeAsync());
+        Assert.Equal(HttpStatusCode.OK, (await Negotiate(owner.Token)).StatusCode);
+    }
+
+    private static object AccountShare(StructureDriver.Sealed file, Guid granteeId, byte[] publicKey, string? expiresAt = null) => new
+    {
+        targetType = "file", targetId = file.Id, kind = "user_grant", granteeId, permission = "read", expiresAt,
+        wrappedKeys = new[] { Wrap(file, granteeId, publicKey) },
+    };
+
+    /// <summary>
+    /// R3, R4: two creates of one target and grantee that both passed the live-share check store one share, and the
+    /// loser hears that the target is already shared, not that a link token is in use.
+    /// </summary>
+    [Fact]
+    public async Task Concurrent_account_shares_of_one_pair_store_one_live_share()
+    {
+        var gate = new InsertGate(2);
+        await using var app = App(await pg.CreateDatabaseAsync(), gate: gate);
+        var owner = await MemberAsync(app, "Ada");
+        var grantee = await MemberAsync(app, "Grace");
+        var project = await owner.S.ProjectAsync("p");
+        var file = await owner.S.FileAsync(project, "note.md");
+        var publicKey = await DirectoryKeyAsync(owner, grantee.Id);
+
+        gate.Arm("INSERT INTO file_keys");
+        var responses = await Task.WhenAll(Enumerable.Range(0, gate.Parties).Select(_ => owner.S.PostAsync("/shares", AccountShare(file, grantee.Id, publicKey))));
+        Assert.Single(responses, r => r.StatusCode == HttpStatusCode.Created);
+        var loser = Assert.Single(responses, r => r.StatusCode == HttpStatusCode.Conflict);
+        var problem = await loser.JsonAsync();
+        Assert.Equal("conflict", problem.GetProperty("code").GetString());
+        Assert.Contains("already shared", problem.GetProperty("title").GetString());
+        Assert.Equal(1L, await Sql.ScalarAsync<long>(app.ConnectionString,
+            "SELECT count(*) FROM shares WHERE grantee_id = @g AND file_id = @f AND revoked_at IS NULL", ("g", grantee.Id), ("f", file.Id)));
+        Assert.Single((await (await grantee.S.GetAsync("/shares")).JsonAsync()).GetProperty("items").EnumerateArray());
+    }
+
+    /// <summary>R3: an expired share still holds the pair's slot of the unique index, so a new share of the pair revokes it.</summary>
+    [Fact]
+    public async Task A_new_account_share_replaces_an_expired_one_of_the_same_pair()
+    {
+        await using var app = App(await pg.CreateDatabaseAsync());
+        var owner = await MemberAsync(app, "Ada");
+        var grantee = await MemberAsync(app, "Grace");
+        var project = await owner.S.ProjectAsync("p");
+        var file = await owner.S.FileAsync(project, "note.md");
+        var publicKey = await DirectoryKeyAsync(owner, grantee.Id);
+
+        var first = await owner.S.PostAsync("/shares", AccountShare(file, grantee.Id, publicKey, app.Clock.Now.AddMinutes(1).ToString("O")));
+        Assert.Equal(HttpStatusCode.Created, first.StatusCode);
+        var expiredId = (await first.JsonAsync()).GetProperty("id").GetGuid();
+        Assert.Equal(HttpStatusCode.Conflict, (await owner.S.PostAsync("/shares", AccountShare(file, grantee.Id, publicKey))).StatusCode);
+
+        app.Clock.Advance(TimeSpan.FromMinutes(2));
+        var second = await owner.S.PostAsync("/shares", AccountShare(file, grantee.Id, publicKey));
+        Assert.Equal(HttpStatusCode.Created, second.StatusCode);
+        Assert.NotEqual(expiredId, (await second.JsonAsync()).GetProperty("id").GetGuid());
+        Assert.True(await Sql.ScalarAsync<bool>(app.ConnectionString, "SELECT revoked_at IS NOT NULL FROM shares WHERE id = @s", ("s", expiredId)));
+        Assert.Equal("replaced", await Sql.ScalarAsync<string>(app.ConnectionString,
+            "SELECT detail->>'by' FROM audit_log WHERE action = 'share.revoke' AND target_id = @s", ("s", expiredId)));
+        Assert.Equal(HttpStatusCode.OK, (await grantee.S.GetAsync($"/files/{file.Id}")).StatusCode);
+
+        // The database itself refuses a second live share of the pair.
+        var twin = await Assert.ThrowsAsync<Npgsql.PostgresException>(() => Sql.ExecAsync(app.ConnectionString,
+            "INSERT INTO shares (id, file_id, kind, grantee_id, permission, created_by) SELECT gen_random_uuid(), file_id, kind, grantee_id, permission, created_by FROM shares WHERE revoked_at IS NULL"));
+        Assert.Equal("uq_shares_live_grant", twin.ConstraintName);
+    }
+
+    /// <summary>
+    /// R4: a unique violation answers by its constraint. Two creates with the same <c>Idempotency-Key</c> are one create,
+    /// so the loser answers as the winner's replay; two links with the same token hash keep the link-token message.
+    /// </summary>
+    [Fact]
+    public async Task Unique_violations_of_a_share_create_answer_by_their_constraint()
+    {
+        var gate = new InsertGate(2);
+        await using var app = App(await pg.CreateDatabaseAsync(), gate: gate);
+        var owner = await MemberAsync(app, "Ada");
+        var grantee = await MemberAsync(app, "Grace");
+        var project = await owner.S.ProjectAsync("p");
+        var file = await owner.S.FileAsync(project, "note.md");
+        var publicKey = await DirectoryKeyAsync(owner, grantee.Id);
+
+        var body = AccountShare(file, grantee.Id, publicKey);
+        var key = Guid.NewGuid().ToString();
+        gate.Arm("INSERT INTO file_keys");
+        var replays = await Task.WhenAll(owner.S.PostAsync("/shares", body, key), owner.S.PostAsync("/shares", body, key));
+        Assert.All(replays, r => Assert.Equal(HttpStatusCode.Created, r.StatusCode));
+        var ids = await Task.WhenAll(replays.Select(async r => (await r.JsonAsync()).GetProperty("id").GetGuid()));
+        Assert.Equal(ids[0], ids[1]);
+        Assert.Equal(1L, await Sql.ScalarAsync<long>(app.ConnectionString, "SELECT count(*) FROM shares"));
+
+        var hash = Base64UrlCodec.Encode(ShareLink.TokenHash(ShareLink.NewToken()));
+        var link = new { targetType = "file", targetId = file.Id, kind = "link", permission = "read", linkTokenHash = hash };
+        gate.Arm("INSERT INTO shares");
+        var links = await Task.WhenAll(owner.S.PostAsync("/shares", link), owner.S.PostAsync("/shares", link));
+        Assert.Single(links, r => r.StatusCode == HttpStatusCode.Created);
+        var loser = Assert.Single(links, r => r.StatusCode == HttpStatusCode.Conflict);
+        Assert.Equal("This link token is already in use.", (await loser.JsonAsync()).GetProperty("title").GetString());
+    }
+
+    /// <summary>
+    /// R5: revoking a share, changing it and moving a file to Trash end the affected relay memberships at once, for
+    /// accounts and guests, also when the delete comes through a sync batch, while the periodic pass is an hour away.
+    /// </summary>
+    [Fact]
+    public async Task Revocation_and_trash_evict_relay_members_without_waiting_for_the_periodic_recheck()
+    {
+        await using var app = App(await pg.CreateDatabaseAsync());
+        var owner = await MemberAsync(app, "Ada");
+        var grantee = await MemberAsync(app, "Grace");
+        var project = await owner.S.ProjectAsync("p");
+        var folder = await owner.S.FolderAsync(project, "shared");
+        var note = await owner.S.FileAsync(project, "note.md", folder);
+        var other = await owner.S.FileAsync(project, "other.md");
+        var synced = await owner.S.FileAsync(project, "synced.md");
+        var publicKey = await DirectoryKeyAsync(owner, grantee.Id);
+        var created = await owner.S.PostAsync("/shares", new
+        {
+            targetType = "project", targetId = project.Id, kind = "user_grant", granteeId = grantee.Id, permission = "write",
+            wrappedKeys = new[] { Wrap(project, grantee.Id, publicKey) },
+        });
+        var shareId = (await created.JsonAsync()).GetProperty("id").GetGuid();
+
+        // A guest of a link to the note, the grantee in the other file, the owner in a third.
+        var guest = Anonymous(app, new ConcurrentQueue<string>());
+        var token = ShareLink.NewToken();
+        await LinkShareAsync(owner, note, token, "read");
+        var guestToken = (await GuestBootstrapAsync(guest, ShareLink.Url(Origin, token, note.Key))).GetProperty("guestToken").GetString()!;
+        await using var browser = await GuestPeerAsync(app, token, await TicketAsync(guest, token, guestToken));
+        await browser.Connection.InvokeAsync("JoinDocument", note.Id.ToString(), 0L);
+        await using var peer = await RelayPeer.ConnectAsync(app, grantee.Token);
+        await peer.Connection.InvokeAsync("JoinDocument", other.Id.ToString(), 0L);
+        await using var laptop = await RelayPeer.ConnectAsync(app, owner.Token);
+        await laptop.Connection.InvokeAsync("JoinDocument", synced.Id.ToString(), 0L);
+
+        // A downgrade leaves a reader in the room, so the pass it triggers removes no one.
+        Assert.Equal(HttpStatusCode.OK, (await owner.S.PatchAsync($"/shares/{shareId}", new { permission = "read" })).StatusCode);
+        await Task.Delay(200);
+        Assert.Empty(peer.Errors);
+
+        // Trash of the folder ends the guest's room; the revoke ends the grantee's.
+        Assert.Equal(HttpStatusCode.NoContent, (await owner.S.DeleteAsync($"/folders/{folder.Id}")).StatusCode);
+        await RelayPeer.UntilAsync(() => browser.Errors.Contains("not_found"));
+        Assert.Equal(HttpStatusCode.NoContent, (await owner.S.DeleteAsync($"/shares/{shareId}")).StatusCode);
+        await RelayPeer.UntilAsync(() => peer.Errors.Contains("not_found"));
+        Assert.False(peer.Closed);
+
+        // A delete through a sync batch is announced after the batch item commits.
+        var sync = await owner.S.Client.PostAsJsonAsync("/api/v1/sync/changes", new
+        {
+            projectId = project.Id, since = (string?)null,
+            localChanges = new[] { new { clientChangeId = Guid.CreateVersion7(), kind = "delete", @ref = new { entity = "file", id = synced.Id } } },
+        });
+        Assert.Equal(HttpStatusCode.OK, sync.StatusCode);
+        await RelayPeer.UntilAsync(() => laptop.Errors.Contains("not_found"));
+        Assert.Equal(0, await RecheckAsync(app));
     }
 
     // ---------------------------------------------------------------- audit and contract

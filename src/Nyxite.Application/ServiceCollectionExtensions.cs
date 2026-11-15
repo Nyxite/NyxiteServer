@@ -52,11 +52,15 @@ public static class ServiceCollectionExtensions
         services.AddOptions<Content.ContentOptions>().Bind(configuration.GetSection(Structure.StructureOptions.Section));
         services.AddOptions<Content.RelayOptions>().Bind(configuration.GetSection(Content.RelayOptions.Section))
             .Validate(o => o.AccessRecheckInterval > TimeSpan.Zero, "Relay:AccessRecheckInterval must be positive.")
+            .Validate(o => o.AwarenessPerSecond > 0, "Relay:AwarenessPerSecond must be positive.")
+            .Validate(o => o.MaxConnectionsPerRoom > 0, "Relay:MaxConnectionsPerRoom must be positive.")
+            .Validate(o => o.MaxRoomsPerConnection > 0, "Relay:MaxRoomsPerConnection must be positive.")
             .ValidateOnStart();
         services.AddScoped<Sharing.ShareAccess>();
         services.AddScoped<Content.IFileAccess, Content.ShareFileAccess>();
         services.AddScoped<Sharing.ShareService>();
         services.AddScoped<Sharing.KeyGrantService>();
+        services.AddScoped<Sharing.KeyRotationService>();
         services.AddScoped<Sharing.GuestShareService>();
         services.AddScoped<Content.ContentService>();
         services.AddScoped<Content.CrdtLogPruner>();

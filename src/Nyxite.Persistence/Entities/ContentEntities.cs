@@ -50,3 +50,28 @@ public sealed class ChangeLogEntity
     public required string Ref { get; set; }
     public DateTimeOffset At { get; set; }
 }
+
+/// <summary>
+/// <c>file_rotation_heads</c> (03 §3.3, 09 §9.6): the head of a file re-encrypted under the key a rotation is about to
+/// commit, uploaded before the commit and not yet a version. The commit turns it into the head version in the same
+/// transaction that switches the key, so the new head is written before anything points to it (write-then-swap). A
+/// staged head that no commit takes expires and its blob becomes an orphan for the garbage collector.
+/// </summary>
+public sealed class FileRotationHeadEntity
+{
+    public Guid FileId { get; set; }
+
+    /// <summary>The proposed new key, which the file does not have yet. One staged head per file and proposed key.</summary>
+    public Guid KeyId { get; set; }
+    public required byte[] ContentHash { get; set; }
+    public required string BlobRef { get; set; }
+    public long SizeCipher { get; set; }
+
+    /// <summary>Text files: the last update the staged snapshot contains.</summary>
+    public long? CrdtSeq { get; set; }
+
+    /// <summary>Blob files: the head version the staged head re-encrypts, 0 when the file had none.</summary>
+    public long? ParentSeq { get; set; }
+    public Guid? AuthorId { get; set; }
+    public DateTimeOffset CreatedAt { get; set; }
+}

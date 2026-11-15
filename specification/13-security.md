@@ -55,13 +55,21 @@ Concrete starting values (tunable):
 | `GET /keys/directory` | **60/min/user** (limits social-graph probing) |
 | `POST /devices` enrollment | **5/hour/user** (each pending device holds a guessable pairing code) |
 | `POST /shares` | **30/min/user** |
-| `/share/{token}*` guest access | **30/min/IP** |
+| `/share/{token}*` guest access | **30/min/IP**, counted before authentication |
+| `/hubs/relay` requests that carry a socket ticket | **120/min/IP**, counted before authentication |
+| Relay awareness | **60 messages/s per connection**, over all its rooms, beyond it `rate_limited` and dropped |
+| Relay rooms | at most **100 connections per room** (`room_full`) and **50 rooms per connection** (`too_many_rooms`) |
 | Blob upload | **60/min/user** |
 | General API | **600/min/user** |
 
 `429 rate_limited` + `Retry-After`.
 
 > Wired buckets [P]: `POST /shares` (`NYXITE__RateLimiting__Shares__*`, per user), every `/share/{token}*` request including the guest relay handshake (`__ShareAccess__*`, per client IP) and `GET /keys/directory` (`__Directory__*`, per user), next to the auth and enrollment buckets.
+> The per-IP buckets of credentials that cost a database lookup, `ShareAccess` and `RelayTicket` (`__RelayTicket__*`), run before authentication, so a request with a missing, wrong or foreign guest token or socket ticket is counted like any other.
+> The authorization middleware answers a failed credential with its challenge and never reaches the endpoint limiter, so these buckets would otherwise count only the requests that pass.
+> A relay request with an access token is not counted, because a JWT costs only a signature check and long polling sends one request per poll.
+> The per-user buckets stay after authentication, because they partition by the authenticated subject.
+> The relay limits are `NYXITE__Relay__AwarenessPerSecond`, `__MaxConnectionsPerRoom` and `__MaxRoomsPerConnection` ([05 §5.4, §5.5](05-realtime-collaboration.md)).
 > The edge adds a looser per-IP flood guard in front of `/share/` ([14](14-deployment-and-config.md)), so the server's limit with its `Retry-After` is the one a client normally meets.
 
 ## 13.6 Input & content safety
@@ -92,6 +100,12 @@ The group-key layer ([07 §7.2a](07-encryption.md), [09 §9.9](09-sharing-and-ac
 ## 13.7 Revocation
 
 Two-layered: **instant server-ACL cutoff** + **client-driven key rotation** for forward secrecy ([09 §9.6](09-sharing-and-acl.md)). Content a removed member already downloaded can't be recalled — inherent to any system.
+
+> As built in Phase 2.3 [P]:
+> the cutoff ends fetch, join and submit at the commit of the revoke, and the open rooms of the grantee or the link at once through the targeted relay pass ([05 §5.4](05-realtime-collaboration.md)).
+> A logout, a revoked session or device, a detected refresh-token reuse and a credential change end the account's relay connections the same way, instead of at the next periodic pass.
+> The rotation commit is generation-guarded, wraps the new key only to the accounts that reach the file, and from then on every write sealed with an older key is `412 key_generation_stale` ([09 §9.6](09-sharing-and-acl.md)).
+> The server checks frame headers, wrap sizes and the member set and opens nothing, and the audit of `key.rotate` names the generation and the member count, never a key.
 
 ## 13.8 Threat notes & boundaries
 

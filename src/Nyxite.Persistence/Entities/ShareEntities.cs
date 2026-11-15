@@ -12,6 +12,12 @@ public sealed class ShareEntity
     public const string Read = "read";
     public const string Write = "write";
 
+    /// <summary>The unique index that makes a link token name exactly one share.</summary>
+    public const string LinkIndex = "uq_shares_link";
+
+    /// <summary>The partial unique index that allows one unrevoked account share per target and grantee.</summary>
+    public const string LiveGrantIndex = "uq_shares_live_grant";
+
     public Guid Id { get; set; }
     public Guid? FileId { get; set; }
     public Guid? FolderId { get; set; }

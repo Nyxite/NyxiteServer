@@ -25,6 +25,14 @@ public sealed record ShareDto(
 public sealed record UploadFileKeysRequest(IReadOnlyList<WrappedKeyRequest>? WrappedKeys);
 
 /// <summary>
+/// <c>POST /files/{id}/keys/rotate</c> (09 §9.6): the new key of the next generation, wrapped to every member who reaches
+/// the file, the name and metadata sealed again with it, and <see cref="NewHeadRef"/>, the content hash of the head
+/// staged under the new key through <c>PUT /files/{id}/keys/rotate/head</c>, absent when the file has no head yet.
+/// </summary>
+public sealed record RotateFileKeyRequest(
+    Guid NewKeyId, int Generation, IReadOnlyList<WrappedKeyRequest>? WrappedKeys, string? NewHeadRef, string? NameEnc, string? MetadataEnc);
+
+/// <summary>
 /// One wrap of <c>POST /files/keys:batch</c>: exactly one of <see cref="FileId"/> and <see cref="FolderId"/>, because a
 /// subtree share must hand out the key of every folder in it as well as of every file (ST-1).
 /// </summary>

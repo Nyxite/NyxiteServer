@@ -17,7 +17,7 @@ public sealed record TokenPair(string AccessToken, string RefreshToken, DateTime
 /// </summary>
 public sealed class SessionService(
     NyxiteDbContext db, AccessTokenService tokens, AuditWriter audit, IEphemeralTokenStore ephemeral, TimeProvider time,
-    IOptions<AuthOptions> options)
+    IOptions<AuthOptions> options, Content.IRelayAccessEvents relay)
 {
     private readonly AuthOptions _options = options.Value;
 
@@ -74,6 +74,7 @@ public sealed class SessionService(
                 session.RevokeReason = RevokeReason.ReuseDetected;
                 audit.Add("auth.refresh_reuse", session.UserId, request, targetType: "session", targetId: session.Id);
                 await db.SaveChangesAsync(ct);
+                relay.AccessChanged(Content.RelayAccessScope.ForUser(session.UserId));
             }
 
             throw AuthException.Unauthenticated();
@@ -86,6 +87,7 @@ public sealed class SessionService(
             session.RevokedAt = now;
             session.RevokeReason = RevokeReason.UserBlocked;
             await db.SaveChangesAsync(ct);
+            relay.AccessChanged(Content.RelayAccessScope.ForUser(session.UserId));
             throw AuthException.AccountBlocked();
         }
 
@@ -152,15 +154,24 @@ public sealed class SessionService(
         session.RevokeReason = reason;
         if (reason == RevokeReason.Logout) audit.Add("auth.logout", userId, request, targetType: "session", targetId: sessionId);
         await db.SaveChangesAsync(ct);
+        SessionsEnded(userId);
     }
 
     /// <summary>Revokes every live session of a user except <paramref name="keep"/> (credential change, 03 §3.2).</summary>
-    public Task RevokeOthersAsync(Guid userId, Guid keep, RevokeReason reason, CancellationToken ct)
+    public async Task RevokeOthersAsync(Guid userId, Guid keep, RevokeReason reason, CancellationToken ct)
     {
         var now = time.GetUtcNow();
-        return db.Sessions.Where(s => s.UserId == userId && s.Id != keep && s.RevokedAt == null)
+        var ended = await db.Sessions.Where(s => s.UserId == userId && s.Id != keep && s.RevokedAt == null)
             .ExecuteUpdateAsync(s => s.SetProperty(x => x.RevokedAt, now).SetProperty(x => x.RevokeReason, reason), ct);
+        if (ended > 0) SessionsEnded(userId);
     }
+
+    /// <summary>
+    /// Ended sessions close their relay connections at once (05 §5.4): a targeted re-check of the account's connections
+    /// closes those whose session is gone. It runs after the revocation is stored, and a revocation inside a larger
+    /// transaction is seen by the pass once that commits, or by the periodic pass at the latest.
+    /// </summary>
+    public void SessionsEnded(Guid userId) => relay.AccessChanged(Content.RelayAccessScope.ForUser(userId));
 
     private static bool IsBlockedFor(UserEntity user, ClientKind clientKind) =>
         user.Status == UserStatus.Blocked && clientKind == ClientKind.Web;

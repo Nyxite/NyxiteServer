@@ -264,21 +264,87 @@ public sealed class ContentService(
         return file.CrdtDocId is null || await HeadAsync(file, ct) is not { } head ? null : ToDto(head, file);
     }
 
+    // ---------------------------------------------------------------- staged head of a key rotation
+
+    /// <summary>
+    /// Stages the head of a file re-encrypted under the key a rotation is about to commit (09 §9.6, 04 "file keys"). It
+    /// is stored as ciphertext and recorded in <c>file_rotation_heads</c>, but it is no version yet: the commit
+    /// <c>POST /files/{id}/keys/rotate</c> names it in <c>newHeadRef</c> and makes it the head in the transaction that
+    /// switches the key. Until then every client keeps reading the old head, so nothing is replaced before its
+    /// successor exists. A text file stages a snapshot (<paramref name="crdtSeq"/>), any other file the re-encrypted
+    /// head version it is based on (<paramref name="parentSeq"/>, 0 when it has none). Staging again for the same key
+    /// replaces the earlier stage. Only the owner rotates, so only the owner stages.
+    /// </summary>
+    public async Task StageRotationHeadAsync(ClaimsPrincipal principal, Guid fileId, Guid newKeyId, string? contentHash, long? crdtSeq, long? parentSeq,
+        StagedBlob ciphertext, CancellationToken ct)
+    {
+        var actor = await WriterAsync(principal, ct);
+        var hash = ContentHash(contentHash);
+        await using var tx = await db.Database.BeginTransactionAsync(ct);
+        var file = await LockFileAsync(actor, fileId, ct);
+        if (actor.UserId is not { } userId || !await db.Projects.AnyAsync(p => p.Id == file.ProjectId && p.OwnerId == userId, ct))
+            throw RotateDenied();
+        await CheckUploadAsync(file, newKeyId, ciphertext, ct, currentKey: false);
+        if (await db.FileKeys.AnyAsync(k => k.FileId == fileId && k.KeyId == newKeyId, ct))
+            throw AuthException.Validation("Nyxite-Key-Id must name the new key of the rotation, not a key the file already has.");
+
+        var head = await HeadAsync(file, ct);
+        if (file.CrdtDocId is not null)
+        {
+            if (crdtSeq is not { } seq || parentSeq is not null)
+                throw AuthException.Validation("A text file stages a snapshot: Nyxite-Snapshot-Seq is required and If-Match is not taken.");
+            if (seq < 0 || seq > file.CrdtHeadSeq) throw AuthException.Validation("The snapshot names an update the log does not have.");
+            if (head?.CrdtSeq > seq) throw AuthException.Conflict("A newer snapshot is already stored.");
+        }
+        else
+        {
+            if (parentSeq is not { } parent || crdtSeq is not null)
+                throw AuthException.Validation("A blob file stages its re-encrypted head: If-Match is required and Nyxite-Snapshot-Seq is not taken.");
+            if (parent != (head?.Seq ?? 0)) throw HeadMoved();
+        }
+
+        var address = StorageAddress(file.Id, newKeyId, hash);
+        await BlobCollector.LockAddressAsync(db, address, ct);
+        var reference = await blobs.CommitAsync(ciphertext, address, ct);
+        await db.FileRotationHeads.Where(h => h.FileId == fileId && h.KeyId == newKeyId).ExecuteDeleteAsync(ct);
+        db.FileRotationHeads.Add(new FileRotationHeadEntity
+        {
+            FileId = fileId, KeyId = newKeyId, ContentHash = hash, BlobRef = reference.Address.Hex, SizeCipher = reference.Size,
+            CrdtSeq = file.CrdtDocId is null ? null : crdtSeq, ParentSeq = file.CrdtDocId is null ? parentSeq : null, AuthorId = userId,
+            CreatedAt = time.GetUtcNow(),
+        });
+        await db.SaveChangesAsync(ct);
+        await tx.CommitAsync(ct);
+    }
+
+    /// <summary>The head moved since the staged head was based on it; the rotating client stages the new head again.</summary>
+    public static AuthException HeadMoved() => new(409, "version_conflict", "The head changed since the rotated head was based on it; stage it again.");
+
+    public static AuthException RotateDenied() => new(403, "acl_denied", "Only the owner rotates the key of a file.");
+
     // ---------------------------------------------------------------- usage
 
     /// <summary>The ciphertext bytes that count against a user's quota: every version of every file they own, Trash included.</summary>
+    /// <remarks>Staged rotation heads count as well, until their commit turns them into versions or they expire, so staging cannot pile up beyond the quota.</remarks>
     public async Task<long> UsageBytesAsync(Guid userId, CancellationToken ct) =>
-        await db.FileVersions.Where(v => db.Files.Any(f => f.Id == v.FileId && f.OwnerId == userId)).SumAsync(v => (long?)v.SizeCipher, ct) ?? 0;
+        (await db.FileVersions.Where(v => db.Files.Any(f => f.Id == v.FileId && f.OwnerId == userId)).SumAsync(v => (long?)v.SizeCipher, ct) ?? 0)
+        + (await db.FileRotationHeads.Where(h => db.Files.Any(f => f.Id == h.FileId && f.OwnerId == userId)).SumAsync(h => (long?)h.SizeCipher, ct) ?? 0);
 
     // ---------------------------------------------------------------- shared steps
 
-    private async Task CheckUploadAsync(FileEntity file, Guid keyId, StagedBlob ciphertext, CancellationToken ct)
+    /// <summary>
+    /// The checks every upload passes: content is taken for the file, the body is an NYXC frame of the named key within
+    /// the inline limit, and the owner's quota has room. <paramref name="currentKey"/> false is the staged head of a key
+    /// rotation, which is sealed with the key the rotation is about to commit; every other upload must use the current
+    /// key and is <c>412 key_generation_stale</c> otherwise.
+    /// </summary>
+    private async Task CheckUploadAsync(FileEntity file, Guid keyId, StagedBlob ciphertext, CancellationToken ct, bool currentKey = true)
     {
         if (file.SyncPolicy == SyncPolicies.Excluded) throw ExcludedContent();
         if (ciphertext.Length > _options.MaxInlineBlobBytes) throw PayloadTooLarge("The upload is larger than the inline limit.");
         if (ciphertext.Length < NyxcFrame.Overhead || !NyxcFrame.TryParseHeader(ciphertext.Head.Span, out var header) || header.KeyId != keyId)
             throw AuthException.Validation("The body must be an NYXC frame sealed with the key named in Nyxite-Key-Id.");
-        if (keyId != await CurrentKeyIdAsync(file, ct)) throw KeyGenerationStale();
+        if (currentKey && keyId != await CurrentKeyIdAsync(file, ct)) throw KeyGenerationStale();
 
         var quota = await db.Users.Where(u => u.Id == file.OwnerId).Select(u => u.StorageQuotaBytes).SingleAsync(ct);
         if (quota is { } limit && await UsageBytesAsync(file.OwnerId, ct) + ciphertext.Length > limit)

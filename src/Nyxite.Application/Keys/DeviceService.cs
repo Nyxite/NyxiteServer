@@ -20,7 +20,7 @@ namespace Nyxite.Application.Keys;
 /// </summary>
 public sealed class DeviceService(
     NyxiteDbContext db, DeviceGuard guard, IdempotencyStore idempotency, AuditWriter audit,
-    TimeProvider time, IOptions<AuthOptions> options)
+    TimeProvider time, IOptions<AuthOptions> options, Content.IRelayAccessEvents relay)
 {
     public const string RegisterEndpoint = "POST /devices";
 
@@ -195,6 +195,8 @@ public sealed class DeviceService(
         await db.Sessions.Where(s => s.DeviceId == id && s.RevokedAt == null)
             .ExecuteUpdateAsync(s => s.SetProperty(x => x.RevokedAt, now).SetProperty(x => x.RevokeReason, RevokeReason.DeviceRevoked), ct);
         await tx.CommitAsync(ct);
+        // The device's relay connections close now, not at the next periodic re-check (05 §5.4).
+        relay.AccessChanged(Content.RelayAccessScope.ForUser(userId));
     }
 
     private static void ClearPairing(DeviceEntity device)

@@ -18,15 +18,24 @@ namespace Nyxite.Server.Realtime;
 /// this pass, while every other membership is still judged. A removal takes the connection out of the group before it
 /// takes it out of the presence, so a failure in between leaves a member the next pass sees again, never a listener
 /// outside the roster.
+/// <para>
+/// A targeted pass judges only the members a <see cref="RelayAccessScope"/> names. It runs as soon as a share is revoked
+/// or changed or a file goes to Trash (<see cref="RelayAccessSignal"/>), with the same checks and the same order of
+/// removal as the periodic pass, which stays the backstop for what no event covers.
+/// </para>
 /// </remarks>
 public sealed class RelayAccessCheck(
     RelayPresence presence, IHubContext<RelayHub, IRelayClient> hub, ContentService content, NyxiteDbContext db, GuestShareService guests,
     TimeProvider time, ILogger<RelayAccessCheck> logger)
 {
-    /// <summary>Runs one pass and returns how many room memberships it ended.</summary>
-    public async Task<int> RunAsync(CancellationToken ct)
+    /// <summary>Runs one pass over every member and returns how many room memberships it ended.</summary>
+    public Task<int> RunAsync(CancellationToken ct) => RunAsync(null, ct);
+
+    /// <summary>Runs one pass over the members <paramref name="scope"/> names, every member when it is null.</summary>
+    public async Task<int> RunAsync(RelayAccessScope? scope, CancellationToken ct)
     {
         var members = presence.Members();
+        if (scope is not null) members = members.Where(m => scope.Matches(m.FileId, m.Member.UserId, m.Member.ShareId)).ToList();
         if (members.Count == 0) return 0;
         var changed = new HashSet<Guid>();
         var removed = 0;
@@ -169,9 +178,32 @@ public sealed class RelayAccessCheck(
     }
 }
 
-/// <summary>Runs <see cref="RelayAccessCheck"/> every <c>Relay:AccessRecheckInterval</c>.</summary>
+/// <summary>
+/// The queue of access changes (<see cref="IRelayAccessEvents"/>): the services that commit a revocation, a share change
+/// or a move to Trash post a scope here, and <see cref="RelayAccessWorker"/> runs a targeted pass for it at once.
+/// Posting never blocks or fails, so a request never waits on the relay.
+/// </summary>
+public sealed class RelayAccessSignal : IRelayAccessEvents
+{
+    private readonly System.Threading.Channels.Channel<RelayAccessScope> _queue =
+        System.Threading.Channels.Channel.CreateUnbounded<RelayAccessScope>(new() { SingleReader = true });
+
+    public System.Threading.Channels.ChannelReader<RelayAccessScope> Reader => _queue.Reader;
+
+    public void AccessChanged(RelayAccessScope scope)
+    {
+        if (!scope.IsEmpty) _queue.Writer.TryWrite(scope);
+    }
+}
+
+/// <summary>
+/// Runs <see cref="RelayAccessCheck"/> every <c>Relay:AccessRecheckInterval</c> over every member, and a targeted pass
+/// whenever <see cref="RelayAccessSignal"/> reports an access change. Both run on this one loop, so passes never overlap,
+/// and the changes that queued up during a pass are merged into the next targeted one.
+/// </summary>
 public sealed class RelayAccessWorker(
-    IServiceScopeFactory scopes, TimeProvider time, IOptions<RelayOptions> options, ILogger<RelayAccessWorker> logger) : BackgroundService
+    IServiceScopeFactory scopes, TimeProvider time, IOptions<RelayOptions> options, RelayAccessSignal signal, ILogger<RelayAccessWorker> logger)
+    : BackgroundService
 {
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
@@ -184,13 +216,34 @@ public sealed class RelayAccessWorker(
             return;
         }
 
+        var timer = Task.Delay(interval, time, stoppingToken);
+        Task<bool>? changed = null;
         while (!stoppingToken.IsCancellationRequested)
         {
             try
             {
-                await Task.Delay(interval, time, stoppingToken);
+                // One wait on the queue at a time: it is kept across turns until it completes.
+                changed ??= signal.Reader.WaitToReadAsync(stoppingToken).AsTask();
+                var woke = await Task.WhenAny(timer, changed);
+                RelayAccessScope? target = null;
+                if (woke == changed)
+                {
+                    var open = await changed;
+                    changed = null;
+                    if (!open) return;
+                    var pending = new List<RelayAccessScope>();
+                    while (signal.Reader.TryRead(out var next)) pending.Add(next);
+                    if (pending.Count == 0) continue;
+                    target = RelayAccessScope.Merge(pending);
+                }
+                else
+                {
+                    await timer;
+                    timer = Task.Delay(interval, time, stoppingToken);
+                }
+
                 await using var scope = scopes.CreateAsyncScope();
-                var removed = await scope.ServiceProvider.GetRequiredService<RelayAccessCheck>().RunAsync(stoppingToken);
+                var removed = await scope.ServiceProvider.GetRequiredService<RelayAccessCheck>().RunAsync(target, stoppingToken);
                 if (removed > 0) logger.LogInformation("The relay access re-check removed {Count} room memberships.", removed);
             }
             catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)

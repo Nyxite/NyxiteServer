@@ -72,6 +72,75 @@ public sealed class RelayPresenceTests
         Assert.Equal(0, RoomCount(presence));
     }
 
+    /// <summary>R2: a full room refuses a new connection, also when joins race for the last slot, but keeps one already in it.</summary>
+    [Fact]
+    public async Task A_room_never_holds_more_connections_than_its_cap()
+    {
+        var presence = new RelayPresence();
+        var fileId = Guid.NewGuid();
+        var userId = Guid.NewGuid();
+        var joined = await Task.WhenAll(Enumerable.Range(0, 64).Select(i =>
+            Task.Run(() => presence.TryJoin(fileId, $"c{i}", Member(userId), 10), TestContext.Current.CancellationToken)));
+
+        Assert.Equal(10, joined.Count(j => j));
+        Assert.Equal(10, presence.ConnectionCount(fileId));
+        var member = presence.Members().First().ConnectionId;
+        Assert.True(presence.TryJoin(fileId, member, Member(userId), 10));
+        Assert.False(presence.TryJoin(fileId, "late", Member(userId), 10));
+        Assert.Equal(1, presence.RoomCount(member));
+    }
+
+    /// <summary>R2: the awareness budget holds one second's worth and refills with time, never above that.</summary>
+    [Fact]
+    public void The_awareness_budget_holds_one_second_and_refills()
+    {
+        var time = new SteppedTime();
+        var budget = new AwarenessBudget(60, time.GetTimestamp());
+        Assert.Equal(60, Enumerable.Range(0, 100).Count(_ => budget.TryTake(time)));
+        time.Step(TimeSpan.FromMilliseconds(500));
+        Assert.Equal(30, Enumerable.Range(0, 100).Count(_ => budget.TryTake(time)));
+        time.Step(TimeSpan.FromMinutes(5));
+        Assert.Equal(60, Enumerable.Range(0, 100).Count(_ => budget.TryTake(time)));
+    }
+
+    private sealed class SteppedTime : TimeProvider
+    {
+        private long _ticks;
+        public override long TimestampFrequency => TimeSpan.TicksPerSecond;
+        public override long GetTimestamp() => _ticks;
+        public void Step(TimeSpan by) => _ticks += by.Ticks;
+    }
+
+    /// <summary>R2, 14 §14.4: a relay limit that is zero or negative fails the options at startup.</summary>
+    [Theory]
+    [InlineData("Relay:AwarenessPerSecond")]
+    [InlineData("Relay:MaxConnectionsPerRoom")]
+    [InlineData("Relay:MaxRoomsPerConnection")]
+    public void A_non_positive_relay_limit_is_refused(string setting)
+    {
+        var configuration = new ConfigurationBuilder().AddInMemoryCollection(new Dictionary<string, string?> { [setting] = "0" }).Build();
+        using var services = new ServiceCollection().AddNyxiteAuth(configuration).BuildServiceProvider();
+
+        var refused = Assert.Throws<OptionsValidationException>(() => services.GetRequiredService<IOptions<RelayOptions>>().Value);
+        Assert.Contains($"{setting} must be positive.", refused.Failures);
+    }
+
+    /// <summary>R5: a targeted re-check matches a member by its account, its link share or the file of its room.</summary>
+    [Fact]
+    public void An_access_scope_matches_members_by_account_share_or_file()
+    {
+        var user = Guid.NewGuid();
+        var share = Guid.NewGuid();
+        var file = Guid.NewGuid();
+        var merged = RelayAccessScope.Merge([RelayAccessScope.ForUser(user), RelayAccessScope.ForShare(share), RelayAccessScope.ForFiles([file])]);
+
+        Assert.True(merged.Matches(Guid.NewGuid(), user, null));
+        Assert.True(merged.Matches(Guid.NewGuid(), null, share));
+        Assert.True(merged.Matches(file, Guid.NewGuid(), null));
+        Assert.False(merged.Matches(Guid.NewGuid(), Guid.NewGuid(), Guid.NewGuid()));
+        Assert.True(RelayAccessScope.ForFiles([]).IsEmpty);
+    }
+
     /// <summary>F6, 14 §14.4: a re-check interval that is zero or negative fails the options instead of spinning the worker.</summary>
     [Theory]
     [InlineData("00:00:00")]
