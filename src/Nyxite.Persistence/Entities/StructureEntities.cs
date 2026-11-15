@@ -70,8 +70,8 @@ public sealed class FileEntity
 }
 
 /// <summary>
-/// <c>file_keys</c> (03 §3.3): a file key wrapped to one member. <c>share_id</c> gets its FK with <c>shares</c>
-/// (Phase 2.2); until then every row is a member grant.
+/// <c>file_keys</c> (03 §3.3): a file key wrapped to one member. Link shares add no row here, because their key rides
+/// the URL fragment (09 §9.4); <c>share_id</c> stays for a link key relayed wrapped to an ephemeral share keypair.
 /// </summary>
 public sealed class FileKeyEntity
 {

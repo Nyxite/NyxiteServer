@@ -108,6 +108,7 @@ public sealed class ConformanceVectorTests
                 intervalSeconds = (int)Nyxite.Contracts.Content.SnapshotTriggers.Interval.TotalSeconds,
                 onLastParticipantLeaving = Nyxite.Contracts.Content.SnapshotTriggers.OnLastParticipantLeaving,
             },
+            ["sharing.json"] = SharingVectors.Build(kemPublic),
             ["license-token.json"] = new
             {
                 ed25519Seed = H(Bytes(32, 0x50)), mlDsa65Seed = H(Bytes(32, 0x70)), publicKey = H(VendorKey.PublicKey),

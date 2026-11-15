@@ -1,0 +1,371 @@
+{
+  "origin": "https://nyxite.example.org",
+  "linkToken": {
+    "bytes": "202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f",
+    "token": "ICEiIyQlJicoKSorLC0uLzAxMjM0NTY3ODk6Ozw9Pj8",
+    "sha256": "cf0931e168b49e987503caf18af6fe253b6b3d82a81008c3e8e1ee67c7c8dc55",
+    "linkTokenHash": "zwkx4Wi0nph1A8rxivb-JTtrPYKoEAjD6OHuZ8fI3FU"
+  },
+  "fileId": "01890a5d-ac96-774b-bcce-b302099a8058",
+  "fileKeyId": "01890a5d-ac96-774b-bcce-b302099a8057",
+  "fileKey": "c0c1c2c3c4c5c6c7c8c9cacbcccdcecfd0d1d2d3d4d5d6d7d8d9dadbdcdddedf",
+  "fragment": "k=wMHCw8TFxsfIycrLzM3Oz9DR0tPU1dbX2Nna29zd3t8",
+  "shareUrl": "https://nyxite.example.org/share/ICEiIyQlJicoKSorLC0uLzAxMjM0NTY3ODk6Ozw9Pj8#k=wMHCw8TFxsfIycrLzM3Oz9DR0tPU1dbX2Nna29zd3t8",
+  "requestPath": "/share/ICEiIyQlJicoKSorLC0uLzAxMjM0NTY3ODk6Ozw9Pj8",
+  "objectKeyWrap": {
+    "info": "nyxite object key v1",
+    "aadLayout": "object_id(16) || key_id(16)",
+    "recipientSeed": "909192939495969798999a9b9c9d9e9fa0a1a2a3a4a5a6a7a8a9aaabacadaeaf",
+    "recipientPublicKey": "dc6198804bbdf0998331fb260e781aeb56a39780861122508dd99f2ff90baf7c00057019df978bcdbbb8d6759966c5a64de76e3b527d795150b1ca3511f226486ab8e1567f988a33c47a7d50f9143a5863b57081a2132e4a4cab472bca9007a3bd94b1e1055230472162d88bd77a4820a41cb323122b07cbdc414a1705696c939d6b8bafffab5a81b246ed70033123cc25b2162deb9fcdb50eb67a76f0829f3fd9862db15cada08887f7ac32b8a92cf3c4e6e6c9cdfc4d4f30b6681250c2218da1468cfa199bd07199bfc06593b33c4f5664b0490679504c8e2b2643b4895a5ccd96e88af7b557b49685daf00646c90cb45834f3034da69a57dab3792e7287702982b0085756e954c7582de72115e3611f6686a16c637985b91e810bae11eaaca5989eddd74392a882d169a95d83964605ccc1cc3734e72fa7ba3833596ef6f31e45ca0022b07af79236a3ea5958b57625269937416258432a5d6a3073609445700da9a65a9f1908d611761be1c92cf8486958a319f487dea18165e89d5b4b61e1041bdc28c587b71bac3cca24260692e5b8b1b579b0c4559e114f610806935aa18e156e6df0bce9a203d0d1768bbb70ab8cb0b63320fb7933f354bfa05a77ead014ecf6087a524a9ee37350617f4dd0bbf36b0f5ae61a584c5cafe9ae2d89684d7a780974048930a871b94a18a30a08e65fe377ada0fb6f08966408415b5e26889f79356ceb06028b4b80cc1169751eb8171377947811a82e3c61be11cb18549395ec5b3c46b27a7abc848fd084e1707b5e16310f037f563c1d6ca749277c621731377ae40df79cb1a6ab8fa06c9b99f6630738352a2bbd5e693f7ae52d3de54407fb1df9364bf33256000c325254bee657b2cd7a6aca020e7419425b2c6153188765e0446c4b12a545622e67b74391065cc7b21bc8ba6f463f5ca490211388fe7c2f73cc329551c489c1ab15c6b9bf44cec00c89a5c89be1926e12287e9db80f1289047ad98b0c2097d59565abc969dcec150c45cc6a89c154015cb03a80980133799861ad2a0056b06abb453a4c1281229862f5ab585b747e7570a546f90ffe82a06ad3c7a8259a2ffaafd06508d3b5574201032086ade956643448444e263e5c6592b4b90ab58428ed0496a78a1a85301ee542abf33b1312687ba9664941c5354e8a762518bca9d056b86c69efd1bf0816402528c25af63a8b405850123ea7e38d3d295c7035653cd95fc5b3864b02a4b15a3c3c5210fcc6a04ff619580927561005810a6ccf939d0f2006e876cee0210d69647e1f87a95ba58d60f7b202886289e5bd64c77f154873cd1433900489b14450eb80134cf82f6634bf5b89567c7628bd2780ae9b60634023d435b9743a69534063e7ec5c723b24a6fc683dec63d1523f7fb54b41037b454ca202a6c0f7e116cdd922b486cbb06454de6395399539ad96261f6aad3d87a64f677754ac6212c933cf766d58d1b3d2634382a5a357a3282843ba72bca76bb849fc6336ec3c54e257ab5136af6c4a5be4b060a778317dd39e5f4957cff9998fa090591976418c79fe7cb8b61841c69b68b1b56935b2a8308b2c4f793bc77676dc3483984488883a5e89a120480088112085e60a69da6bb45ea08be3eaf379467c3aebc7c3d4f76ceb81fa29d2009b6dab6efc198f627221bf3e6359999ba6b0110a8810004ee259f8b3d82fe20ea5d761efe94944",
+    "encapsulationSeed": "404142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5f606162636465666768696a6b6c6d6e6f707172737475767778797a7b7c7d7e7f",
+    "objectId": "01890a5d-ac96-774b-bcce-b302099a8058",
+    "keyId": "01890a5d-ac96-774b-bcce-b302099a8057",
+    "aad": "01890a5dac96774bbcceb302099a805801890a5dac96774bbcceb302099a8057",
+    "objectKey": "c0c1c2c3c4c5c6c7c8c9cacbcccdcecfd0d1d2d3d4d5d6d7d8d9dadbdcdddedf",
+    "wrapped": "fee5ccaf8fea9a5c583996d1a4fb9c28aa9f50f0690bbe104ac20276a9578c5e3d650ea3d3001883a0518e651edd1d6d3526d2fb4498a63f5d0ca55834e183987d04d00de52941062a1e8c165f0a65132e10e071e43449184f8ffbdec9641b436d7f990e7580b97bad09320e0dcaadd1528c75b10d0b0e0912c0d1c0271f4d54d1034e0bc0a3f7cc5b9912a2e91e94751d5ed810d207c1ef1ca45d94f14122d9cbbeebb8b0ef51300debb45c58efe45b08d1804982c70a3e7d9763b6ff476f2c2b0b00a8061cafd445f433e23e9b1269673a61f323d5ca4876a2f8d970f9f4129e83f0b2cdcf4dce332844527837a8bed12d521980d8c9cb2b7de84ef7bfa27242d272afa889c67a14274f68c82fc4fb1db43e5988af2fa5201a51f4836cc29b8fe698f12656dc233dc14c432f53f577d6e6223d6f25072bfa95dd1e6d1abdd774915b2f2dec5e40ff2c4b5b6f7f61c5504d507da1fbea8ff560e969bad5bffa25208ea09dbf339efc1e2e64558640ce977c5599d38a12b75f058a0361d451739968c16e7aa11131966d07d100b6ad5fb0fa34d01c45d3dba6f9121cccba525f5a0fdbaf51303c74eb0f5346bbe1e053f28f458fc41518de09dc1ba60b0f4966d1ff3f821981e77036cc0e8d852a6d3065c0eaeefd9691a92d66cc65cfae0b5a6e3bf2e9ed08d2c7d98e610225fbd30a007595b1cec8cf17117f725be1d3214c878c38be27ebd2740690228a72b96a4425c9402198e342e4053d9110c9f65eeb807c49c00476e4354c97a2b0d519aee23f8948ad0559020ba32ca7419560378b4b3f7b75c1dcb3772f0a650176a275e4f991e3ac581e0dbe6951e2288f0afb34a0c28683456b23750253ab03a5ec501791e05056f84b94310836555cadbc756f10841f4f4f726eb852eeaf4ce0ac0ec937b5d3c35ea05acfd9afef24b0f4668737842a8e3abf30f732585c722d511776466bfb47bcd852211a1794f733457b8e66cff84d2c19df60442d535d0daa46556a03fa848ddf5f85a17369edfd95641de8e6375894d93b4e7e691f94a384072d1fda83c0c566a7aac8c9bae2cdcf389084b12100956a7604725d4b43a76257f3739eae3da274af9ccbc7272b254b019e36614f8dab512f078a26a767e06a5bc998c3e22f37bf52c82883dfbbccf7da8f77888a6427c3cdbe576b41276e8cc8f7328300033dd729ca7f14797c1bc574876fe206a76f6a90f59d51f64b5baf2e145b42b7aa1405d7aaef9d4ad95d93cd495b8b505698ace65b010b7200493c528f5cb71c1dda9e2d2d0dec3d550ee3a9f99d7159c3359f869de368ad35a4dfcd7097b3ac68c0ec8bc33da86560cefcc3767bf2722b5d0b3593edc3575cc088a105763cb7e0cd1e399cc2bd8275108d7bd9828165eabd6a178322af158aa42689c6655aa6997fd04850c6fdb410e25c6d50fdf7df6541cfc5f9bb0311c5353e9f8cabb53af603cdb4bb51b1f7abfe19ab693163cde07b632494b7969a759088e5885838bdeb5f0f0c35643b301487be9fa6675dd574ed7789310b3d2e7681f3790b466c773b1521fecf36577958371ea52f1b23aa05e46af2c4cec25717358d84e9eb0534c2791fa23c3581b829cbd7a0c0948104b3f1e0e0eb77462682a7f41f3e"
+  },
+  "requests": [
+    {
+      "name": "createAccountShare",
+      "method": "POST",
+      "path": "/api/v1/shares",
+      "headers": {
+        "Idempotency-Key": "01890a5d-ac96-774b-bcce-b302099a8061"
+      },
+      "body": {
+        "targetType": "file",
+        "targetId": "01890a5d-ac96-774b-bcce-b302099a8058",
+        "kind": "user_grant",
+        "granteeId": "01890a5d-ac96-774b-bcce-b302099a8059",
+        "permission": "write",
+        "wrappedKeys": [
+          {
+            "keyId": "01890a5d-ac96-774b-bcce-b302099a8057",
+            "memberId": "01890a5d-ac96-774b-bcce-b302099a8059",
+            "ciphertext": "_uXMr4_qmlxYOZbRpPucKKqfUPBpC74QSsICdqlXjF49ZQ6j0wAYg6BRjmUe3R1tNSbS-0SYpj9dDKVYNOGDmH0E0A3lKUEGKh6MFl8KZRMuEOBx5DRJGE-P-97JZBtDbX-ZDnWAuXutCTIODcqt0VKMdbENCw4JEsDRwCcfTVTRA04LwKP3zFuZEqLpHpR1HV7YENIHwe8cpF2U8UEi2cu-67iw71EwDeu0XFjv5FsI0YBJgscKPn2XY7b_R28sKwsAqAYcr9RF9DPiPpsSaWc6YfMj1cpIdqL42XD59BKeg_Cyzc9NzjMoRFJ4N6i-0S1SGYDYycsrfehO97-ickLScq-oicZ6FCdPaMgvxPsdtD5ZiK8vpSAaUfSDbMKbj-aY8SZW3CM9wUxDL1P1d9bmIj1vJQcr-pXdHm0avdd0kVsvLexeQP8sS1tvf2HFUE1QfaH76o_1YOlputW_-iUgjqCdvzOe_B4uZFWGQM6XfFWZ04oSt18FigNh1FFzmWjBbnqhETGWbQfRALatX7D6NNAcRdPbpvkSHMy6Ul9aD9uvUTA8dOsPU0a74eBT8o9Fj8QVGN4J3BumCw9JZtH_P4IZgedwNswOjYUqbTBlwOru_ZaRqS1mzGXPrgtabjvy6e0I0sfZjmECJfvTCgB1lbHOyM8XEX9yW-HTIUyHjDi-J-vSdAaQIopyuWpEJclAIZjjQuQFPZEQyfZe64B8ScAEduQ1TJeisNUZruI_iUitBVkCC6Msp0GVYDeLSz97dcHcs3cvCmUBdqJ15PmR46xYHg2-aVHiKI8K-zSgwoaDRWsjdQJTqwOl7FAXkeBQVvhLlDEINlVcrbx1bxCEH09Pcm64Uu6vTOCsDsk3tdPDXqBaz9mv7ySw9GaHN4Qqjjq_MPcyWFxyLVEXdkZr-0e82FIhGheU9zNFe45mz_hNLBnfYEQtU10NqkZVagP6hI3fX4Whc2nt_ZVkHejmN1iU2TtOfmkflKOEBy0f2oPAxWanqsjJuuLNzziQhLEhAJVqdgRyXUtDp2JX83Oerj2idK-cy8cnKyVLAZ42YU-Nq1EvB4omp2fgalvJmMPiLze_Usgog9-7zPfaj3eIimQnw82-V2tBJ26MyPcygwADPdcpyn8UeXwbxXSHb-IGp29qkPWdUfZLW68uFFtCt6oUBdeq751K2V2TzUlbi1BWmKzmWwELcgBJPFKPXLccHdqeLS0N7D1VDuOp-Z1xWcM1n4ad42itNaTfzXCXs6xowOyLwz2oZWDO_MN2e_JyK10LNZPtw1dcwIihBXY8t-DNHjmcwr2CdRCNe9mCgWXqvWoXgyKvFYqkJonGZVqmmX_QSFDG_bQQ4lxtUP3332VBz8X5uwMRxTU-n4yrtTr2A820u1Gx96v-GatpMWPN4HtjJJS3lpp1kIjliFg4vetfDww1ZDswFIe-n6ZnXdV07XeJMQs9LnaB83kLRmx3OxUh_s82V3lYNx6lLxsjqgXkavLEzsJXFzWNhOnrBTTCeR-iPDWBuCnL16DAlIEEs_Hg4Ot3RiaCp_QfPg",
+            "generation": 1,
+            "algId": "X25519MLKEM768"
+          }
+        ],
+        "linkTokenHash": null,
+        "expiresAt": null
+      }
+    },
+    {
+      "name": "createFolderShare",
+      "method": "POST",
+      "path": "/api/v1/shares",
+      "headers": {
+        "Idempotency-Key": "01890a5d-ac96-774b-bcce-b302099a8061"
+      },
+      "body": {
+        "targetType": "folder",
+        "targetId": "01890a5d-ac96-774b-bcce-b302099a805c",
+        "kind": "user_grant",
+        "granteeId": "01890a5d-ac96-774b-bcce-b302099a8059",
+        "permission": "read",
+        "wrappedKeys": [
+          {
+            "keyId": "01890a5d-ac96-774b-bcce-b302099a8060",
+            "memberId": "01890a5d-ac96-774b-bcce-b302099a8059",
+            "ciphertext": "pgvCbAVQAmqxyp56ycJTaVmTH4l9oFO4QyeRQTfU9kGL_GzvBACYVdmVz-0sAmtJn9ljfyXD-COZchzdXVJmJcBUxxk1bub_nVJWCaF4KcQsAE1fNxkZdanr1OZQs9C5uLmmny6c4sMcTEbQPnnL5OdBJYhSi2NbjlkPHn6jwpXr2AfCi1EnUIkgfJmZ7k2L6RzbkwhYt3N3rKfirzUbhAFDkuokX_vjzuFU1Ct6B-KLJt2VgnMijxk6G5GY9FN4L5ag8-gvZWb5tay3-e2u5WyRyjhlO7rxJDlaV_BXnceI2HIzUalQlyGo-GIo0RjjngBq47X3ZuMHCw8yIyNZTmjXBUbnVAfbxWOKqRCi9pouXphj4UQ8vxxWFF503WqFo6D5EpBetaIOFBETw4hDTVIy3FtQkzTFSSNkwmmBO2Pttf5SWSGgGT9rUtz-P8A_5rcxPZF6TpQHXHb1xx-3n9FdSxQ_mMm73D5Zyshu0o2RV3ipBk423zpQO0rEcL90jaxb1OyRl_Jq4NHzdXA5akb_TIZMi0LNGXyGdZFaRcKPEy7AeyHCFo41tcDjLixH4lRFgB3VGnkaxv7qSrlvNGwjMKyoGm-5eR10nnI4PL4K6XnAIrlVzIi7t6rA-WO76ggRVFTWM0vZf2oYJOufFsN1t2W2h4nAyfYmFiEavKdyS0wcNnCGSGUxHks4aT8rHdXR9tN4UwwQ3qhHSVMFYjUUdXIHay-lG-ZufcFCRgIdxHIsNoi6jJFzS9k5Vz0gxvXILgmMi6mBvag67eRKSnmgFcUIAOm5l8R3zLzG5JUVfA7NYYTqu_VJFheRrt2R_arBhp7xCkZzGL5ClJGuhVjwc9KWAQwf_MVVAx-lKrPcdxdmk4anIPKpPBUKEDjdEAmEy2E7sup_FIJ3rmkQ1jr-rN309yswLd8b_qqv7NRcvacsP5b3z-sFh2f2QNRjXbA0N6Y73N_T75OslNBwOt_d6klzJ2OgP-BXUxwcNS1tkZEgFmJaGPN95huszFk1S6NmkIbYOr90XfTctZ0dIr0VNUXwmEuTuxEPG3sNDpYxd11kum4ZSIJo3rtPmiyO8tgbubvO0FmIn-H7A_ag6gtyWkIOV0Kf3C3FjKsJhM8iGTHorl89wQq270OR3YgAIDws0wCMALJ-aAaeebmPumaXN0RLGTXd6SlS9K46ZYcABkNf4As0UtWdZPRN5ikZEhuVJE-gK4xAAkd-dvifpQzb926z18SbJ3NBcnOLXY555rQ-pHyDZdyEGIGk8Aa8_X1-9O_LD8Cn_-PRmfVJbjEHzZ_0B44IStfq3Sgg_Hnh9-4jdYDkl81Vaa-eJGb5IyDKAkndKCHaPqA7uA20dQ0iCaPoj5e6p_aNPKT2oQhh_STsz-HsPYG-C9kHb6Yes7DF7xBIWX16P3nat8CCyUk0eLxr4a1YTdJn-kMoFVNgWnJdKkrf7rGinhft1iHBt1k-6M28RKxsSrbi-AXSPFbp_K8KRama-uGu4feu5CmxZcSzJEiQSXJDTsxNLbYumXMRoxNl8YOleAyTw4da6w",
+            "generation": 1,
+            "algId": "X25519MLKEM768"
+          }
+        ],
+        "linkTokenHash": null,
+        "expiresAt": null
+      }
+    },
+    {
+      "name": "subtreeBatch",
+      "method": "POST",
+      "path": "/api/v1/files/keys:batch",
+      "headers": {},
+      "body": {
+        "grants": [
+          {
+            "fileId": "01890a5d-ac96-774b-bcce-b302099a8058",
+            "folderId": null,
+            "keyId": "01890a5d-ac96-774b-bcce-b302099a8057",
+            "memberId": "01890a5d-ac96-774b-bcce-b302099a8059",
+            "wrappedKey": "_uXMr4_qmlxYOZbRpPucKKqfUPBpC74QSsICdqlXjF49ZQ6j0wAYg6BRjmUe3R1tNSbS-0SYpj9dDKVYNOGDmH0E0A3lKUEGKh6MFl8KZRMuEOBx5DRJGE-P-97JZBtDbX-ZDnWAuXutCTIODcqt0VKMdbENCw4JEsDRwCcfTVTRA04LwKP3zFuZEqLpHpR1HV7YENIHwe8cpF2U8UEi2cu-67iw71EwDeu0XFjv5FsI0YBJgscKPn2XY7b_R28sKwsAqAYcr9RF9DPiPpsSaWc6YfMj1cpIdqL42XD59BKeg_Cyzc9NzjMoRFJ4N6i-0S1SGYDYycsrfehO97-ickLScq-oicZ6FCdPaMgvxPsdtD5ZiK8vpSAaUfSDbMKbj-aY8SZW3CM9wUxDL1P1d9bmIj1vJQcr-pXdHm0avdd0kVsvLexeQP8sS1tvf2HFUE1QfaH76o_1YOlputW_-iUgjqCdvzOe_B4uZFWGQM6XfFWZ04oSt18FigNh1FFzmWjBbnqhETGWbQfRALatX7D6NNAcRdPbpvkSHMy6Ul9aD9uvUTA8dOsPU0a74eBT8o9Fj8QVGN4J3BumCw9JZtH_P4IZgedwNswOjYUqbTBlwOru_ZaRqS1mzGXPrgtabjvy6e0I0sfZjmECJfvTCgB1lbHOyM8XEX9yW-HTIUyHjDi-J-vSdAaQIopyuWpEJclAIZjjQuQFPZEQyfZe64B8ScAEduQ1TJeisNUZruI_iUitBVkCC6Msp0GVYDeLSz97dcHcs3cvCmUBdqJ15PmR46xYHg2-aVHiKI8K-zSgwoaDRWsjdQJTqwOl7FAXkeBQVvhLlDEINlVcrbx1bxCEH09Pcm64Uu6vTOCsDsk3tdPDXqBaz9mv7ySw9GaHN4Qqjjq_MPcyWFxyLVEXdkZr-0e82FIhGheU9zNFe45mz_hNLBnfYEQtU10NqkZVagP6hI3fX4Whc2nt_ZVkHejmN1iU2TtOfmkflKOEBy0f2oPAxWanqsjJuuLNzziQhLEhAJVqdgRyXUtDp2JX83Oerj2idK-cy8cnKyVLAZ42YU-Nq1EvB4omp2fgalvJmMPiLze_Usgog9-7zPfaj3eIimQnw82-V2tBJ26MyPcygwADPdcpyn8UeXwbxXSHb-IGp29qkPWdUfZLW68uFFtCt6oUBdeq751K2V2TzUlbi1BWmKzmWwELcgBJPFKPXLccHdqeLS0N7D1VDuOp-Z1xWcM1n4ad42itNaTfzXCXs6xowOyLwz2oZWDO_MN2e_JyK10LNZPtw1dcwIihBXY8t-DNHjmcwr2CdRCNe9mCgWXqvWoXgyKvFYqkJonGZVqmmX_QSFDG_bQQ4lxtUP3332VBz8X5uwMRxTU-n4yrtTr2A820u1Gx96v-GatpMWPN4HtjJJS3lpp1kIjliFg4vetfDww1ZDswFIe-n6ZnXdV07XeJMQs9LnaB83kLRmx3OxUh_s82V3lYNx6lLxsjqgXkavLEzsJXFzWNhOnrBTTCeR-iPDWBuCnL16DAlIEEs_Hg4Ot3RiaCp_QfPg",
+            "algId": "X25519MLKEM768"
+          },
+          {
+            "fileId": null,
+            "folderId": "01890a5d-ac96-774b-bcce-b302099a805c",
+            "keyId": "01890a5d-ac96-774b-bcce-b302099a8060",
+            "memberId": "01890a5d-ac96-774b-bcce-b302099a8059",
+            "wrappedKey": "pgvCbAVQAmqxyp56ycJTaVmTH4l9oFO4QyeRQTfU9kGL_GzvBACYVdmVz-0sAmtJn9ljfyXD-COZchzdXVJmJcBUxxk1bub_nVJWCaF4KcQsAE1fNxkZdanr1OZQs9C5uLmmny6c4sMcTEbQPnnL5OdBJYhSi2NbjlkPHn6jwpXr2AfCi1EnUIkgfJmZ7k2L6RzbkwhYt3N3rKfirzUbhAFDkuokX_vjzuFU1Ct6B-KLJt2VgnMijxk6G5GY9FN4L5ag8-gvZWb5tay3-e2u5WyRyjhlO7rxJDlaV_BXnceI2HIzUalQlyGo-GIo0RjjngBq47X3ZuMHCw8yIyNZTmjXBUbnVAfbxWOKqRCi9pouXphj4UQ8vxxWFF503WqFo6D5EpBetaIOFBETw4hDTVIy3FtQkzTFSSNkwmmBO2Pttf5SWSGgGT9rUtz-P8A_5rcxPZF6TpQHXHb1xx-3n9FdSxQ_mMm73D5Zyshu0o2RV3ipBk423zpQO0rEcL90jaxb1OyRl_Jq4NHzdXA5akb_TIZMi0LNGXyGdZFaRcKPEy7AeyHCFo41tcDjLixH4lRFgB3VGnkaxv7qSrlvNGwjMKyoGm-5eR10nnI4PL4K6XnAIrlVzIi7t6rA-WO76ggRVFTWM0vZf2oYJOufFsN1t2W2h4nAyfYmFiEavKdyS0wcNnCGSGUxHks4aT8rHdXR9tN4UwwQ3qhHSVMFYjUUdXIHay-lG-ZufcFCRgIdxHIsNoi6jJFzS9k5Vz0gxvXILgmMi6mBvag67eRKSnmgFcUIAOm5l8R3zLzG5JUVfA7NYYTqu_VJFheRrt2R_arBhp7xCkZzGL5ClJGuhVjwc9KWAQwf_MVVAx-lKrPcdxdmk4anIPKpPBUKEDjdEAmEy2E7sup_FIJ3rmkQ1jr-rN309yswLd8b_qqv7NRcvacsP5b3z-sFh2f2QNRjXbA0N6Y73N_T75OslNBwOt_d6klzJ2OgP-BXUxwcNS1tkZEgFmJaGPN95huszFk1S6NmkIbYOr90XfTctZ0dIr0VNUXwmEuTuxEPG3sNDpYxd11kum4ZSIJo3rtPmiyO8tgbubvO0FmIn-H7A_ag6gtyWkIOV0Kf3C3FjKsJhM8iGTHorl89wQq270OR3YgAIDws0wCMALJ-aAaeebmPumaXN0RLGTXd6SlS9K46ZYcABkNf4As0UtWdZPRN5ikZEhuVJE-gK4xAAkd-dvifpQzb926z18SbJ3NBcnOLXY555rQ-pHyDZdyEGIGk8Aa8_X1-9O_LD8Cn_-PRmfVJbjEHzZ_0B44IStfq3Sgg_Hnh9-4jdYDkl81Vaa-eJGb5IyDKAkndKCHaPqA7uA20dQ0iCaPoj5e6p_aNPKT2oQhh_STsz-HsPYG-C9kHb6Yes7DF7xBIWX16P3nat8CCyUk0eLxr4a1YTdJn-kMoFVNgWnJdKkrf7rGinhft1iHBt1k-6M28RKxsSrbi-AXSPFbp_K8KRama-uGu4feu5CmxZcSzJEiQSXJDTsxNLbYumXMRoxNl8YOleAyTw4da6w",
+            "algId": "X25519MLKEM768"
+          },
+          {
+            "fileId": "01890a5d-ac96-774b-bcce-b302099a8058",
+            "folderId": "01890a5d-ac96-774b-bcce-b302099a805c",
+            "keyId": "01890a5d-ac96-774b-bcce-b302099a8057",
+            "memberId": "01890a5d-ac96-774b-bcce-b302099a8059",
+            "wrappedKey": "_uXMr4_qmlxYOZbRpPucKKqfUPBpC74QSsICdqlXjF49ZQ6j0wAYg6BRjmUe3R1tNSbS-0SYpj9dDKVYNOGDmH0E0A3lKUEGKh6MFl8KZRMuEOBx5DRJGE-P-97JZBtDbX-ZDnWAuXutCTIODcqt0VKMdbENCw4JEsDRwCcfTVTRA04LwKP3zFuZEqLpHpR1HV7YENIHwe8cpF2U8UEi2cu-67iw71EwDeu0XFjv5FsI0YBJgscKPn2XY7b_R28sKwsAqAYcr9RF9DPiPpsSaWc6YfMj1cpIdqL42XD59BKeg_Cyzc9NzjMoRFJ4N6i-0S1SGYDYycsrfehO97-ickLScq-oicZ6FCdPaMgvxPsdtD5ZiK8vpSAaUfSDbMKbj-aY8SZW3CM9wUxDL1P1d9bmIj1vJQcr-pXdHm0avdd0kVsvLexeQP8sS1tvf2HFUE1QfaH76o_1YOlputW_-iUgjqCdvzOe_B4uZFWGQM6XfFWZ04oSt18FigNh1FFzmWjBbnqhETGWbQfRALatX7D6NNAcRdPbpvkSHMy6Ul9aD9uvUTA8dOsPU0a74eBT8o9Fj8QVGN4J3BumCw9JZtH_P4IZgedwNswOjYUqbTBlwOru_ZaRqS1mzGXPrgtabjvy6e0I0sfZjmECJfvTCgB1lbHOyM8XEX9yW-HTIUyHjDi-J-vSdAaQIopyuWpEJclAIZjjQuQFPZEQyfZe64B8ScAEduQ1TJeisNUZruI_iUitBVkCC6Msp0GVYDeLSz97dcHcs3cvCmUBdqJ15PmR46xYHg2-aVHiKI8K-zSgwoaDRWsjdQJTqwOl7FAXkeBQVvhLlDEINlVcrbx1bxCEH09Pcm64Uu6vTOCsDsk3tdPDXqBaz9mv7ySw9GaHN4Qqjjq_MPcyWFxyLVEXdkZr-0e82FIhGheU9zNFe45mz_hNLBnfYEQtU10NqkZVagP6hI3fX4Whc2nt_ZVkHejmN1iU2TtOfmkflKOEBy0f2oPAxWanqsjJuuLNzziQhLEhAJVqdgRyXUtDp2JX83Oerj2idK-cy8cnKyVLAZ42YU-Nq1EvB4omp2fgalvJmMPiLze_Usgog9-7zPfaj3eIimQnw82-V2tBJ26MyPcygwADPdcpyn8UeXwbxXSHb-IGp29qkPWdUfZLW68uFFtCt6oUBdeq751K2V2TzUlbi1BWmKzmWwELcgBJPFKPXLccHdqeLS0N7D1VDuOp-Z1xWcM1n4ad42itNaTfzXCXs6xowOyLwz2oZWDO_MN2e_JyK10LNZPtw1dcwIihBXY8t-DNHjmcwr2CdRCNe9mCgWXqvWoXgyKvFYqkJonGZVqmmX_QSFDG_bQQ4lxtUP3332VBz8X5uwMRxTU-n4yrtTr2A820u1Gx96v-GatpMWPN4HtjJJS3lpp1kIjliFg4vetfDww1ZDswFIe-n6ZnXdV07XeJMQs9LnaB83kLRmx3OxUh_s82V3lYNx6lLxsjqgXkavLEzsJXFzWNhOnrBTTCeR-iPDWBuCnL16DAlIEEs_Hg4Ot3RiaCp_QfPg",
+            "algId": "X25519MLKEM768"
+          }
+        ]
+      }
+    },
+    {
+      "name": "uploadFileKeys",
+      "method": "POST",
+      "path": "/api/v1/files/01890a5d-ac96-774b-bcce-b302099a8058/keys",
+      "headers": {},
+      "body": {
+        "wrappedKeys": [
+          {
+            "keyId": "01890a5d-ac96-774b-bcce-b302099a8057",
+            "memberId": "01890a5d-ac96-774b-bcce-b302099a8059",
+            "ciphertext": "_uXMr4_qmlxYOZbRpPucKKqfUPBpC74QSsICdqlXjF49ZQ6j0wAYg6BRjmUe3R1tNSbS-0SYpj9dDKVYNOGDmH0E0A3lKUEGKh6MFl8KZRMuEOBx5DRJGE-P-97JZBtDbX-ZDnWAuXutCTIODcqt0VKMdbENCw4JEsDRwCcfTVTRA04LwKP3zFuZEqLpHpR1HV7YENIHwe8cpF2U8UEi2cu-67iw71EwDeu0XFjv5FsI0YBJgscKPn2XY7b_R28sKwsAqAYcr9RF9DPiPpsSaWc6YfMj1cpIdqL42XD59BKeg_Cyzc9NzjMoRFJ4N6i-0S1SGYDYycsrfehO97-ickLScq-oicZ6FCdPaMgvxPsdtD5ZiK8vpSAaUfSDbMKbj-aY8SZW3CM9wUxDL1P1d9bmIj1vJQcr-pXdHm0avdd0kVsvLexeQP8sS1tvf2HFUE1QfaH76o_1YOlputW_-iUgjqCdvzOe_B4uZFWGQM6XfFWZ04oSt18FigNh1FFzmWjBbnqhETGWbQfRALatX7D6NNAcRdPbpvkSHMy6Ul9aD9uvUTA8dOsPU0a74eBT8o9Fj8QVGN4J3BumCw9JZtH_P4IZgedwNswOjYUqbTBlwOru_ZaRqS1mzGXPrgtabjvy6e0I0sfZjmECJfvTCgB1lbHOyM8XEX9yW-HTIUyHjDi-J-vSdAaQIopyuWpEJclAIZjjQuQFPZEQyfZe64B8ScAEduQ1TJeisNUZruI_iUitBVkCC6Msp0GVYDeLSz97dcHcs3cvCmUBdqJ15PmR46xYHg2-aVHiKI8K-zSgwoaDRWsjdQJTqwOl7FAXkeBQVvhLlDEINlVcrbx1bxCEH09Pcm64Uu6vTOCsDsk3tdPDXqBaz9mv7ySw9GaHN4Qqjjq_MPcyWFxyLVEXdkZr-0e82FIhGheU9zNFe45mz_hNLBnfYEQtU10NqkZVagP6hI3fX4Whc2nt_ZVkHejmN1iU2TtOfmkflKOEBy0f2oPAxWanqsjJuuLNzziQhLEhAJVqdgRyXUtDp2JX83Oerj2idK-cy8cnKyVLAZ42YU-Nq1EvB4omp2fgalvJmMPiLze_Usgog9-7zPfaj3eIimQnw82-V2tBJ26MyPcygwADPdcpyn8UeXwbxXSHb-IGp29qkPWdUfZLW68uFFtCt6oUBdeq751K2V2TzUlbi1BWmKzmWwELcgBJPFKPXLccHdqeLS0N7D1VDuOp-Z1xWcM1n4ad42itNaTfzXCXs6xowOyLwz2oZWDO_MN2e_JyK10LNZPtw1dcwIihBXY8t-DNHjmcwr2CdRCNe9mCgWXqvWoXgyKvFYqkJonGZVqmmX_QSFDG_bQQ4lxtUP3332VBz8X5uwMRxTU-n4yrtTr2A820u1Gx96v-GatpMWPN4HtjJJS3lpp1kIjliFg4vetfDww1ZDswFIe-n6ZnXdV07XeJMQs9LnaB83kLRmx3OxUh_s82V3lYNx6lLxsjqgXkavLEzsJXFzWNhOnrBTTCeR-iPDWBuCnL16DAlIEEs_Hg4Ot3RiaCp_QfPg",
+            "generation": 1,
+            "algId": "X25519MLKEM768"
+          }
+        ]
+      }
+    },
+    {
+      "name": "createLinkShare",
+      "method": "POST",
+      "path": "/api/v1/shares",
+      "headers": {
+        "Idempotency-Key": "01890a5d-ac96-774b-bcce-b302099a8061"
+      },
+      "body": {
+        "targetType": "file",
+        "targetId": "01890a5d-ac96-774b-bcce-b302099a8058",
+        "kind": "link",
+        "granteeId": null,
+        "permission": "write",
+        "wrappedKeys": null,
+        "linkTokenHash": "zwkx4Wi0nph1A8rxivb-JTtrPYKoEAjD6OHuZ8fI3FU",
+        "expiresAt": "2026-12-01T00:00:00\u002B00:00"
+      }
+    },
+    {
+      "name": "guestBootstrap",
+      "method": "GET",
+      "path": "/share/ICEiIyQlJicoKSorLC0uLzAxMjM0NTY3ODk6Ozw9Pj8",
+      "headers": {},
+      "body": null
+    },
+    {
+      "name": "guestSession",
+      "method": "POST",
+      "path": "/share/ICEiIyQlJicoKSorLC0uLzAxMjM0NTY3ODk6Ozw9Pj8/session",
+      "headers": {},
+      "body": null
+    },
+    {
+      "name": "guestBlob",
+      "method": "GET",
+      "path": "/share/ICEiIyQlJicoKSorLC0uLzAxMjM0NTY3ODk6Ozw9Pj8/blob",
+      "headers": {
+        "Authorization": "Bearer \u003CguestToken\u003E"
+      },
+      "body": null
+    },
+    {
+      "name": "guestSocketTicket",
+      "method": "POST",
+      "path": "/share/ICEiIyQlJicoKSorLC0uLzAxMjM0NTY3ODk6Ozw9Pj8/socket-ticket",
+      "headers": {
+        "Authorization": "Bearer \u003CguestToken\u003E"
+      },
+      "body": null
+    },
+    {
+      "name": "guestRelay",
+      "method": "GET",
+      "path": "/share/ICEiIyQlJicoKSorLC0uLzAxMjM0NTY3ODk6Ozw9Pj8/ws?access_token=\u003Cticket\u003E",
+      "headers": {},
+      "body": null
+    },
+    {
+      "name": "rotate",
+      "method": "POST",
+      "path": "/api/v1/files/01890a5d-ac96-774b-bcce-b302099a8058/keys/rotate",
+      "headers": {
+        "Idempotency-Key": "01890a5d-ac96-774b-bcce-b302099a8061"
+      },
+      "body": {
+        "newKeyId": "01890a5d-ac96-774b-bcce-b302099a805f",
+        "generation": 2,
+        "wrappedKeys": [
+          {
+            "keyId": "01890a5d-ac96-774b-bcce-b302099a805f",
+            "memberId": "01890a5d-ac96-774b-bcce-b302099a8059",
+            "ciphertext": "na89lux_JCQgoLv86KIQRSZtL2UhOSjCpkHOH153iB_2A-wek_DrN3uDwLAUhgme6rA6LRJfHYFcbQSP0JGP1miwTlN3zGCxWAnkKFOGerZ_0DMj57j1irB7Qiqe0Ll4e4tiUR_xBtDPlWnOqWeG_CSgDDb6UBYv-paWsAK8nvST-BigL2i0LqcjGAm2b6f990XQk5SD08w5mLxpaDszJP7UXkEPIoQgOl5K1RZEKAz3M1Y8g2-YUFE_6hNA7qjWupUaze4tw4xQgIvwC4FZ0DvCng1N1KDFDzlshsFa2nZAQojcLws_H-sOhM9d5b3HByxx8hQKnsxGMyk4RQz8-SRb4u7ju9GD5SDF8OFKo45uCkrmGo_zoKgxJoINwcDYLY7wsnYylTzImopYmWweDZ88zrokjMDAYg7HM0F0jRLvMb58wqc9PfNLYcFPMwGsqdztF6HSoCxVNQSUDD7QcPmlLtmJR50abFigtGFKbpqgSA0_rbywMEqD5Lt6kE27UoMGxaIrolDwygHQvbktG1mJ_qfjR7KJoMsDLL9rpPoHT09a_32ccMZnp8njwuXFBje3aA01diM8QfDM878pqWoPU8eLGXA2yrrv6SdVobyHmkRbv6r8rg1hBhqxfhzgmw5iwf8gHSxbAuM64iWfUS9SyoEYFva0UczppWSTX2L6Hwe9GnVg1j_MYpoCJ1Aj-P5wlzFdV0rjLw0zrw_Enchwf21DLevZGE8JFzORoff6AHO0-ODst82rviZTP9wfsOHY13RUUFUv5KmuNjaUC4ZrzNwBYNC2s_6P4abQaet_Ac33T1B-W0e56i_MDYTn17PWiF63NaZYgGewUNe-EHiwwql-A5d0FIj9lp9RHM-sC2MhpRmdUsHqG6WzWjrJv8-V8hEN4v3FXobz0p7bT4FojT41FZzp7LmtKv11-BiS4Dm50Bn54tHRJ0c76tKCsJmRAa2E_ogg0Q6Zj8EXOMW7djzBbIJG45r3LapXpylcKm9IzFKvCphHJj6yZT-OtNSFHjwCYme8AyI2MrVDUj4uboBqUyFSpuBKF32yhw3gVppH8sVdyc8BbyGjoz_HZWASe0avilASgKdC1zW-e3pca-DLCVzVoJRFigSyCvgEtaqBKQWtNCvYlOtBYBULuLzdPEDiG601rAz5sEYbK2CK6vx7sAzqLybYFzEng0V2bi-eTnMykCtnsT-84EqOHN_HbzjMEaEVIeBI9UOWJPiyPRVoaP-XbEZy1oFUFLs6AcvHY4Z7-dF-XOsoJy1uHCDaurJHjxblE1xgPkRuAsi6JZcRyqcCEYLeE8pDnXeGt_ZE5BpNRqdsssO9S-k2zV-b36ae34MZtKtI8SYAU-prAnmZE1H-4XgBLqfGIUYB1EpwMKl6fxVL6AULIPh_wrpAQlEFDFDmJc9RQFoLfQvby_P_cj5_DeAKPvYoYR005C1K9e-UoHo6hCAbiJ1M0adDyyexG2oQQ4qP645YR0Sdb5SMec4Dn1D9DCWFrW5NBBY5i1TwPTsrv8Qbmb5G-4ixdafaqy-1P74wtk2uCg",
+            "generation": 2,
+            "algId": "X25519MLKEM768"
+          }
+        ],
+        "newHeadRef": "cHFyc3R1dnd4eXp7fH1-f4CBgoOEhYaHiImKi4yNjo8"
+      }
+    }
+  ],
+  "responses": [
+    {
+      "name": "linkShareCreated",
+      "method": "POST",
+      "path": "/api/v1/shares",
+      "status": 201,
+      "body": {
+        "id": "01890a5d-ac96-774b-bcce-b302099a805e",
+        "targetType": "file",
+        "targetId": "01890a5d-ac96-774b-bcce-b302099a8058",
+        "kind": "link",
+        "granteeId": null,
+        "permission": "write",
+        "createdBy": "01890a5d-ac96-774b-bcce-b302099a805d",
+        "expiresAt": "2026-12-01T00:00:00\u002B00:00",
+        "createdAt": "2026-11-15T12:00:00\u002B00:00"
+      }
+    },
+    {
+      "name": "subtreeBatchResults",
+      "method": "POST",
+      "path": "/api/v1/files/keys:batch",
+      "status": 200,
+      "body": {
+        "results": [
+          {
+            "fileId": "01890a5d-ac96-774b-bcce-b302099a8058",
+            "folderId": null,
+            "status": "applied",
+            "error": null
+          },
+          {
+            "fileId": null,
+            "folderId": "01890a5d-ac96-774b-bcce-b302099a805c",
+            "status": "applied",
+            "error": null
+          },
+          {
+            "fileId": "01890a5d-ac96-774b-bcce-b302099a8058",
+            "folderId": "01890a5d-ac96-774b-bcce-b302099a805c",
+            "status": "rejected",
+            "error": "validation_failed"
+          }
+        ]
+      }
+    },
+    {
+      "name": "unknownLink",
+      "method": "GET",
+      "path": "/share/AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+      "status": 404,
+      "body": {
+        "type": "urn:nyxite:problem:not_found",
+        "title": "Not found.",
+        "status": 404,
+        "code": "not_found"
+      }
+    },
+    {
+      "name": "revokedLink",
+      "method": "GET",
+      "path": "/share/ICEiIyQlJicoKSorLC0uLzAxMjM0NTY3ODk6Ozw9Pj8",
+      "status": 410,
+      "body": {
+        "type": "urn:nyxite:problem:share_revoked",
+        "title": "This link was revoked.",
+        "status": 410,
+        "code": "share_revoked"
+      }
+    },
+    {
+      "name": "expiredLink",
+      "method": "POST",
+      "path": "/share/ICEiIyQlJicoKSorLC0uLzAxMjM0NTY3ODk6Ozw9Pj8/session",
+      "status": 410,
+      "body": {
+        "type": "urn:nyxite:problem:link_expired",
+        "title": "This link has expired.",
+        "status": 410,
+        "code": "link_expired"
+      }
+    },
+    {
+      "name": "rotationCommitted",
+      "method": "POST",
+      "path": "/api/v1/files/01890a5d-ac96-774b-bcce-b302099a8058/keys/rotate",
+      "status": 204,
+      "body": null
+    },
+    {
+      "name": "rotationLost",
+      "method": "POST",
+      "path": "/api/v1/files/01890a5d-ac96-774b-bcce-b302099a8058/keys/rotate",
+      "status": 409,
+      "body": {
+        "type": "urn:nyxite:problem:conflict",
+        "title": "Another rotation committed first.",
+        "status": 409,
+        "code": "conflict"
+      }
+    },
+    {
+      "name": "staleUpdateAfterCommit",
+      "method": "POST",
+      "path": "/api/v1/files/01890a5d-ac96-774b-bcce-b302099a8058/crdt/log",
+      "status": 412,
+      "body": {
+        "type": "urn:nyxite:problem:key_generation_stale",
+        "title": "The content is sealed with a key that is not the file\u0027s current key.",
+        "status": 412,
+        "code": "key_generation_stale"
+      }
+    }
+  ],
+  "rotation": {
+    "currentGeneration": 1,
+    "cases": [
+      {
+        "submittedGeneration": 2,
+        "status": 204,
+        "code": null
+      },
+      {
+        "submittedGeneration": 1,
+        "status": 409,
+        "code": "conflict"
+      },
+      {
+        "submittedGeneration": 3,
+        "status": 409,
+        "code": "conflict"
+      }
+    ],
+    "oldKeyUpdate": {
+      "beforeCommit": 200,
+      "afterCommit": 412,
+      "code": "key_generation_stale"
+    },
+    "newHeadRef": "Phase 2.3 pins what newHeadRef names; the bytes here only fix its encoding (base64url)."
+  },
+  "guestToken": {
+    "typ": "nyx-guest\u002Bjwt",
+    "alg": "HS256",
+    "claims": [
+      "iss",
+      "aud",
+      "sub",
+      "share_id",
+      "perm",
+      "iat",
+      "exp",
+      "jti"
+    ],
+    "subject": "share:{shareId}",
+    "lifetimeSeconds": 900,
+    "socketTicketLifetimeSeconds": 60,
+    "relayTransports": [
+      "WebSockets"
+    ]
+  }
+}

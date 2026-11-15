@@ -19,6 +19,13 @@ public static class AuthClaims
 
     public const string AccessTokenType = "at+jwt";
 
+    /// <summary>The guest share-session token (08 §8.2). Its own <c>typ</c>, so it is never taken for an access token.</summary>
+    public const string GuestTokenType = "nyx-guest+jwt";
+
+    /// <summary>Claims of the guest token: the link share it came through and that share's permission when it was issued.</summary>
+    public const string ShareId = "share_id";
+    public const string Permission = "perm";
+
     public static string[] AmrFor(AuthMethod method, bool mfaVerified) => (method, mfaVerified) switch
     {
         (_, false) => ["pwd"],
@@ -35,4 +42,8 @@ public static class AuthClaims
         Guid.TryParse(principal.FindFirstValue(SessionId), out var id) ? id : throw AuthException.Unauthenticated();
 
     public static bool HasSecondFactor(this ClaimsPrincipal principal) => principal.HasClaim(Amr, Mfa);
+
+    /// <summary>The link share of a guest principal, or null for an account.</summary>
+    public static Guid? GuestShareId(this ClaimsPrincipal principal) =>
+        Guid.TryParse(principal.FindFirstValue(ShareId), out var id) ? id : null;
 }

@@ -60,7 +60,7 @@
 | `NYXITE__Network__CorsOrigins__<n>` | Browser origins allowed to call the API ([13 §13.9](13-security.md)). Unset = same-origin only, which fits the default deployment where nginx serves the web client and the API under one host |
 | `NYXITE__Metrics__Port` | Port of the separate `/metrics` listener ([§14.5](#145-health--observability)). Unset = metrics are off |
 | `NYXITE__Network__KnownProxies__<n>` / `__KnownNetworks__<n>` | IP addresses / CIDR ranges of the nginx and Cloudflare hops whose `X-Forwarded-For` / `-Proto` are trusted ([§14.6](#146-networking--tls)). Unset = the headers are ignored and the socket peer is the client IP, and the server logs a warning at startup, because behind a proxy all clients then share one rate-limit bucket |
-| `NYXITE__Auth__Lifetimes__PasswordReset` / `__Invite` / `__OidcState` / `__OidcHandoff` / `__SocketTicket` | Lifetimes of the single-use `ephemeral_tokens` kinds ([03 §3.2](03-data-model.md)). Defaults **30 min** / **7 days** / **10 min** / **60 s** / **60 s** **[P]** |
+| `NYXITE__Auth__Lifetimes__PasswordReset` / `__Invite` / `__OidcState` / `__OidcHandoff` / `__SocketTicket` | Lifetimes of the single-use `ephemeral_tokens` kinds ([03 §3.2](03-data-model.md)). Defaults **30 min** / **7 days** / **10 min** / **60 s** / **60 s** **[P]**. `__SocketTicket` also sets the guest socket ticket |
 | `NYXITE__Auth__Enterprise__RedirectUris` | Allowlist of client redirect URIs for the OIDC flow, e.g. `nyxite://oidc`, the web origin ([08 §8.1](08-authentication.md)); anything else → `400` (**enterprise profile only**) |
 | `NYXITE__Scim__Token` (secret) | Bearer token the enterprise IdP uses for `/scim/v2/**` ([12 §12.2](12-administration.md)); SCIM is disabled when unset (**enterprise profile only**) |
 | `NYXITE__Auth__RefreshTokenIdleLifetime` | Idle lifetime of a refresh token — a session unused for longer must sign in again ([03 §3.2](03-data-model.md) `refresh_tokens`). Default **14 days** **[P]** |
@@ -71,6 +71,9 @@
 | `NYXITE__Auth__PairingCodeDigits` | Length of a pending device's `pairingCode`, 6 to 8. Default **8** **[P]**, the longest value the spec allows, because the code is typed only in the QR fallback and every digit multiplies the guessing work under the attempt cap |
 | `NYXITE__RateLimiting__DeviceEnrollment__PermitLimit` / `__Window` | Per-user bucket of `POST /devices` ([13 §13.5](13-security.md)). Default **5 per hour** **[P]**, because a person enrolls a device rarely and every pending device holds a guessable pairing code |
 | `NYXITE__RateLimiting__Directory__PermitLimit` / `__Window` | Per-user bucket of `GET /keys/directory`. Default **60 per minute** **[P]** ([13 §13.5](13-security.md)) |
+| `NYXITE__RateLimiting__Shares__PermitLimit` / `__Window` | Per-user bucket of `POST /shares`. Default **30 per minute** **[P]** ([13 §13.5](13-security.md)) |
+| `NYXITE__RateLimiting__ShareAccess__PermitLimit` / `__Window` | Per-IP bucket of every public `/share/{token}*` request, the guest relay handshake included. Default **30 per minute** **[P]** ([13 §13.5](13-security.md)) |
+| `NYXITE__Auth__Lifetimes__GuestSession` | Lifetime of the guest share-session token ([08 §8.2](08-authentication.md)). Default **15 min** **[P]** |
 | `NYXITE__Auth__PairingCodeMaxAttempts` | Wrong pairing-code entries allowed before the code is void; the low-entropy code is protected by this cap and its lifetime. Default **5** **[P]** |
 | `NYXITE__Auth__Enterprise__Enabled` | `true` to enable the enterprise OIDC IdP (default `false` = native only) |
 | `NYXITE__Auth__Enterprise__Authority` | Keycloak issuer URL (**enterprise profile only**) |
@@ -122,6 +125,7 @@
 - Server listens plain HTTP **inside** the Compose network; **nginx terminates TLS** (Cloudflare Origin CA); Cloudflare fronts public traffic (INFRASTRUCTURE.md, [13](13-security.md)).
 - Admin/origin-direct access over **WireGuard**; internal DNS via **bind9** over the VPN.
 - Trust forwarded-proto/for headers only from known nginx/Cloudflare hops (correct client IP for rate limiting/audit), configured by `NYXITE__Network__KnownProxies` / `__KnownNetworks` (§14.3). **[P]**
+- Public share routes **[P]**: nginx sends `/share/{token}`, `/share/{token}/session`, `/blob`, `/socket-ticket` and the WebSocket `/share/{token}/ws` to the server, without an access log line, because the path holds the link token. A browser navigation (`Accept: text/html`) to `/share/{token}` is the web client's guest shell, not the server's JSON bootstrap. nginx takes the client IP from `CF-Connecting-IP` only when the peer is a Cloudflare range and forwards it as the only `X-Forwarded-For` entry, so the server's per-IP limits see the visitor and not Cloudflare (NyxiteDeploy).
 
 ## 14.7 Backups & DR
 

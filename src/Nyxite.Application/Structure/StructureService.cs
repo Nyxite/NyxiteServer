@@ -3,8 +3,10 @@ using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Options;
 using Nyxite.Application.Audit;
 using Nyxite.Application.Auth;
+using Nyxite.Application.Content;
 using Nyxite.Application.Keys;
 using Nyxite.Application.Maintenance;
+using Nyxite.Application.Sharing;
 using Nyxite.Application.Sync;
 using Nyxite.Contracts.Structure;
 using Nyxite.Crypto;
@@ -21,13 +23,16 @@ namespace Nyxite.Application.Structure;
 /// which it stores only wrapped to each member. Ids are allocated by the client, because a name frame is bound to the
 /// id of its object and a client must be able to build a subtree while offline.
 /// <para>
-/// Reach is ownership of the project until shares exist (Phase 2.2). An object the caller cannot reach answers
-/// <c>404</c>, like one that does not exist (04 §4.4). Deleting is always a soft delete (03 §3.3, DL-1).
+/// Reach is ownership of the project or a live account share on the project, a folder above the object or the object
+/// (09 §9.5, <see cref="ShareAccess"/>). An object the caller cannot reach answers <c>404</c>, like one that does not
+/// exist (04 §4.4). Changing the structure stays with the project owner: a grantee reads names and keys, and a write
+/// share covers content, so a grantee's structure write answers <c>403 acl_denied</c>. Deleting is always a soft
+/// delete (03 §3.3, DL-1).
 /// </para>
 /// </summary>
 public sealed class StructureService(
     NyxiteDbContext db, DeviceGuard guard, IdempotencyStore idempotency, AuditWriter audit, TimeProvider time, ChangeFeed feed,
-    IOptions<StructureOptions> options, IOptions<RetentionOptions> retention)
+    ShareAccess access, IOptions<StructureOptions> options, IOptions<RetentionOptions> retention)
 {
     public const string CreateProjectEndpoint = "POST /projects";
     public const string CreateFolderEndpoint = "POST /folders";
@@ -103,7 +108,7 @@ public sealed class StructureService(
     {
         var userId = await WriterAsync(principal, ct);
         await using var tx = await UnitOfWork.BeginAsync(db, ct);
-        var project = await ProjectAsync(userId, id, tracked: true, ct);
+        var project = await ProjectAsync(userId, id, tracked: true, ct, write: true);
         var keyId = await db.StructureKeys.Where(k => k.ProjectId == id && k.Generation == project.KeyGeneration).Select(k => k.KeyId).FirstAsync(ct);
 
         if (Name(body.NameEnc, required: false, keyId) is { Bytes: { } name }) project.NameEnc = name;
@@ -121,7 +126,7 @@ public sealed class StructureService(
     {
         var userId = await WriterAsync(principal, ct);
         await using var tx = await UnitOfWork.BeginAsync(db, ct);
-        var project = await ProjectAsync(userId, id, tracked: true, ct);
+        var project = await ProjectAsync(userId, id, tracked: true, ct, write: true);
         var now = time.GetUtcNow();
         var files = await db.Files.Where(f => f.ProjectId == id && f.DeletedAt == null)
             .ExecuteUpdateAsync(s => s.SetProperty(f => f.DeletedAt, now).SetProperty(f => f.UpdatedAt, now).SetProperty(f => f.DeletedRootId, id), ct);
@@ -148,10 +153,10 @@ public sealed class StructureService(
     public async Task<PageDto<FolderDto>> ListFoldersAsync(ClaimsPrincipal principal, Guid projectId, string? cursor, int? limit, bool keys, CancellationToken ct)
     {
         var userId = principal.UserId();
-        await ProjectAsync(userId, projectId, tracked: false, ct);
         var (after, take) = Page(cursor, limit);
+        var reach = await ProjectReachAsync(userId, projectId, ct);
         var rows = await db.Folders.AsNoTracking()
-            .Where(f => f.ProjectId == projectId && f.DeletedAt == null && f.Id > after)
+            .Where(f => f.ProjectId == projectId && f.DeletedAt == null && f.Id > after && (reach.Whole || reach.Folders.Contains(f.Id)))
             .OrderBy(f => f.Id).Take(take + 1).ToListAsync(ct);
         return ToPage(rows, take, r => r.Id, await FolderMapAsync(rows.Take(take), userId, keys, ct));
     }
@@ -189,7 +194,7 @@ public sealed class StructureService(
         var policy = Policy(body.SyncPolicy);
         var wrap = OwnerWrap(body.OwnerWrappedKey, userId, nameKeyId, metadata);
         NewId(body.Id);
-        await ProjectAsync(userId, body.ProjectId, tracked: false, ct);
+        await ProjectAsync(userId, body.ProjectId, tracked: false, ct, write: true);
         if (body.ParentFolderId is { } parentId) await ParentAsync(body.ProjectId, parentId, ct);
         if (await db.Folders.AnyAsync(f => f.Id == body.Id, ct)) throw AuthException.Conflict("id is already in use.");
 
@@ -213,7 +218,7 @@ public sealed class StructureService(
     {
         var userId = await WriterAsync(principal, ct);
         await using var tx = await UnitOfWork.BeginAsync(db, ct);
-        var folder = await FolderAsync(userId, id, tracked: true, ct);
+        var folder = await FolderAsync(userId, id, tracked: true, ct, write: true);
         var keyId = await db.StructureKeys.Where(k => k.FolderId == id && k.Generation == folder.KeyGeneration).Select(k => k.KeyId).FirstAsync(ct);
 
         if (Name(body.NameEnc, required: false, keyId) is { Bytes: { } name }) folder.NameEnc = name;
@@ -246,7 +251,7 @@ public sealed class StructureService(
     {
         var userId = await WriterAsync(principal, ct);
         await using var tx = await UnitOfWork.BeginAsync(db, ct);
-        var projectId = (await FolderAsync(userId, id, tracked: false, ct)).ProjectId;
+        var projectId = (await FolderAsync(userId, id, tracked: false, ct, write: true)).ProjectId;
         var now = time.GetUtcNow();
         // Files first: the subtree is found through live folders, which the second statement then marks.
         var files = await db.Database.SqlQuery<Guid>($"""
@@ -287,12 +292,15 @@ public sealed class StructureService(
     public async Task<PageDto<FileDto>> ListFilesAsync(ClaimsPrincipal principal, Guid? projectId, Guid? folderId, string? cursor, int? limit, bool keys, CancellationToken ct)
     {
         var userId = principal.UserId();
+        // Reach of a folder covers every file directly in it; a project listing shows what the caller's shares reach.
+        var reach = ProjectReach.All;
         if (folderId is { } fid) projectId = (await FolderAsync(userId, fid, tracked: false, ct)).ProjectId;
-        else await ProjectAsync(userId, projectId!.Value, tracked: false, ct);
+        else reach = await ProjectReachAsync(userId, projectId!.Value, ct);
 
         var (after, take) = Page(cursor, limit);
         var rows = await db.Files.AsNoTracking()
-            .Where(f => f.ProjectId == projectId && (folderId == null || f.FolderId == folderId) && f.DeletedAt == null && f.Id > after)
+            .Where(f => f.ProjectId == projectId && (folderId == null || f.FolderId == folderId) && f.DeletedAt == null && f.Id > after
+                        && (reach.Whole || reach.Files.Contains(f.Id) || (f.FolderId != null && reach.Folders.Contains(f.FolderId.Value))))
             .OrderBy(f => f.Id).Take(take + 1).ToListAsync(ct);
         return ToPage(rows, take, r => r.Id, await FileMapAsync(rows.Take(take), userId, keys, ct));
     }
@@ -335,7 +343,7 @@ public sealed class StructureService(
         if (body.CrdtDocId is { Version: not 7 }) throw AuthException.Validation("crdtDocId must be a UUIDv7.");
         var wrap = OwnerWrap(body.OwnerWrappedKey, userId, nameKeyId, metadata);
         NewId(body.Id);
-        await ProjectAsync(userId, body.ProjectId, tracked: false, ct);
+        await ProjectAsync(userId, body.ProjectId, tracked: false, ct, write: true);
         if (body.FolderId is { } folderId) await ParentAsync(body.ProjectId, folderId, ct);
         if (await db.Files.AnyAsync(f => f.Id == body.Id, ct)) throw AuthException.Conflict("id is already in use.");
 
@@ -359,7 +367,7 @@ public sealed class StructureService(
     {
         var userId = await WriterAsync(principal, ct);
         await using var tx = await UnitOfWork.BeginAsync(db, ct);
-        var file = await FileAsync(userId, id, tracked: true, ct);
+        var file = await FileAsync(userId, id, tracked: true, ct, write: true);
         var keyId = await db.FileKeys.Where(k => k.FileId == id && k.Generation == file.KeyGeneration).Select(k => k.KeyId).FirstAsync(ct);
 
         if (Name(body.NameEnc, required: false, keyId) is { Bytes: { } name }) file.NameEnc = name;
@@ -389,7 +397,7 @@ public sealed class StructureService(
     {
         var userId = await WriterAsync(principal, ct);
         await using var tx = await UnitOfWork.BeginAsync(db, ct);
-        var file = await FileAsync(userId, id, tracked: true, ct);
+        var file = await FileAsync(userId, id, tracked: true, ct, write: true);
         var now = time.GetUtcNow();
         file.DeletedAt = now;
         file.UpdatedAt = now;
@@ -410,26 +418,59 @@ public sealed class StructureService(
 
     // ---------------------------------------------------------------- reach
 
-    private async Task<ProjectEntity> ProjectAsync(Guid userId, Guid id, bool tracked, CancellationToken ct)
+    /// <summary>
+    /// A live project the caller reaches. <paramref name="write"/> asks for a structure change, which only the owner
+    /// makes: a grantee, who already knows the project, gets <c>403 acl_denied</c>.
+    /// </summary>
+    private async Task<ProjectEntity> ProjectAsync(Guid userId, Guid id, bool tracked, CancellationToken ct, bool write = false)
     {
         var query = tracked ? db.Projects : db.Projects.AsNoTracking();
-        return await query.SingleOrDefaultAsync(p => p.Id == id && p.OwnerId == userId && p.DeletedAt == null, ct) ?? throw AuthException.NotFound();
+        var project = await query.SingleOrDefaultAsync(p => p.Id == id && p.DeletedAt == null, ct) ?? throw AuthException.NotFound();
+        if (project.OwnerId == userId) return project;
+        if (await access.ProjectLevelAsync(userId, id, ct) == FileAccessLevel.None) throw AuthException.NotFound();
+        return write ? throw OwnerOnly() : project;
     }
 
-    private async Task<FolderEntity> FolderAsync(Guid userId, Guid id, bool tracked, CancellationToken ct)
+    private async Task<FolderEntity> FolderAsync(Guid userId, Guid id, bool tracked, CancellationToken ct, bool write = false)
     {
         var query = tracked ? db.Folders : db.Folders.AsNoTracking();
-        return await query.SingleOrDefaultAsync(f => f.Id == id && f.DeletedAt == null
-                   && db.Projects.Any(p => p.Id == f.ProjectId && p.OwnerId == userId && p.DeletedAt == null), ct)
-               ?? throw AuthException.NotFound();
+        var folder = await query.SingleOrDefaultAsync(f => f.Id == id && f.DeletedAt == null, ct) ?? throw AuthException.NotFound();
+        if (await db.Projects.AnyAsync(p => p.Id == folder.ProjectId && p.OwnerId == userId && p.DeletedAt == null, ct)) return folder;
+        if (await access.FolderLevelAsync(userId, folder, ct) == FileAccessLevel.None) throw AuthException.NotFound();
+        return write ? throw OwnerOnly() : folder;
     }
 
-    private async Task<FileEntity> FileAsync(Guid userId, Guid id, bool tracked, CancellationToken ct)
+    private async Task<FileEntity> FileAsync(Guid userId, Guid id, bool tracked, CancellationToken ct, bool write = false)
     {
         var query = tracked ? db.Files : db.Files.AsNoTracking();
-        return await query.SingleOrDefaultAsync(f => f.Id == id && f.DeletedAt == null
-                   && db.Projects.Any(p => p.Id == f.ProjectId && p.OwnerId == userId && p.DeletedAt == null), ct)
-               ?? throw AuthException.NotFound();
+        var file = await query.SingleOrDefaultAsync(f => f.Id == id && f.DeletedAt == null, ct) ?? throw AuthException.NotFound();
+        if (await db.Projects.AnyAsync(p => p.Id == file.ProjectId && p.OwnerId == userId && p.DeletedAt == null, ct)) return file;
+        if (await access.FileLevelAsync(userId, file, ct) == FileAccessLevel.None) throw AuthException.NotFound();
+        return write ? throw OwnerOnly() : file;
+    }
+
+    private static AuthException OwnerOnly() =>
+        new(403, "acl_denied", "Only the owner changes the structure of a shared project; a write share covers content.");
+
+    /// <summary>What of a project the caller's listing shows: all of it, or only what its shares reach.</summary>
+    private sealed record ProjectReach(bool Whole, List<Guid> Folders, List<Guid> Files)
+    {
+        public static readonly ProjectReach All = new(true, [], []);
+    }
+
+    /// <summary>The owner and a grantee of the whole project see everything; a folder or file grantee only its share.</summary>
+    private async Task<ProjectReach> ProjectReachAsync(Guid userId, Guid projectId, CancellationToken ct)
+    {
+        var project = await db.Projects.AsNoTracking().SingleOrDefaultAsync(p => p.Id == projectId && p.DeletedAt == null, ct)
+                      ?? throw AuthException.NotFound();
+        if (project.OwnerId == userId) return ProjectReach.All;
+        var grants = await access.GrantsAsync(userId, ct);
+        if (grants.ReachesProject(projectId)) return ProjectReach.All;
+        var sharedFolders = grants.Folders.Keys.ToList();
+        var sharedFiles = grants.Files.Keys.ToList();
+        var folders = await db.Folders.AsNoTracking().Where(f => f.ProjectId == projectId && sharedFolders.Contains(f.Id)).Select(f => f.Id).ToListAsync(ct);
+        var files = await db.Files.AsNoTracking().Where(f => f.ProjectId == projectId && sharedFiles.Contains(f.Id)).Select(f => f.Id).ToListAsync(ct);
+        return folders.Count == 0 && files.Count == 0 ? throw AuthException.NotFound() : new ProjectReach(false, folders, files);
     }
 
     /// <summary>A folder something is put into: it must be live and in the same project (02 §2.2.4).</summary>
@@ -605,10 +646,19 @@ public sealed class StructureService(
         var files = (body.FileIds ?? []).Distinct().ToList();
         if (projects.Count + folders.Count + files.Count > MaxKeyLookup) throw AuthException.Validation($"At most {MaxKeyLookup} ids per lookup.");
 
+        // Owned objects in Trash count, so the Trash view shows names; shared ones only while live (09 §9.5).
         var owned = db.Projects.Where(p => p.OwnerId == userId);
-        projects = await owned.Where(p => projects.Contains(p.Id)).Select(p => p.Id).ToListAsync(ct);
-        folders = await db.Folders.Where(f => folders.Contains(f.Id) && owned.Any(p => p.Id == f.ProjectId)).Select(f => f.Id).ToListAsync(ct);
-        files = await db.Files.Where(f => files.Contains(f.Id) && owned.Any(p => p.Id == f.ProjectId)).Select(f => f.Id).ToListAsync(ct);
+        var grants = await access.GrantsAsync(userId, ct);
+        var ownedProjects = await owned.Where(p => projects.Contains(p.Id)).Select(p => p.Id).ToListAsync(ct);
+        projects = ownedProjects.Concat(projects.Where(grants.ReachesProject)).Distinct().ToList();
+        var folderRows = await db.Folders.AsNoTracking().Where(f => folders.Contains(f.Id)).ToListAsync(ct);
+        var ownedFolderProjects = await owned.Where(p => folderRows.Select(f => f.ProjectId).Contains(p.Id)).Select(p => p.Id).ToListAsync(ct);
+        folders = folderRows.Where(f => ownedFolderProjects.Contains(f.ProjectId) || (f.DeletedAt == null && grants.FolderLevel(f) != FileAccessLevel.None))
+            .Select(f => f.Id).ToList();
+        var fileRows = await db.Files.AsNoTracking().Where(f => files.Contains(f.Id)).ToListAsync(ct);
+        var ownedFileProjects = await owned.Where(p => fileRows.Select(f => f.ProjectId).Contains(p.Id)).Select(p => p.Id).ToListAsync(ct);
+        files = fileRows.Where(f => ownedFileProjects.Contains(f.ProjectId) || (f.DeletedAt == null && grants.FileLevel(f) != FileAccessLevel.None))
+            .Select(f => f.Id).ToList();
 
         var items = new List<ObjectKeysDto>();
         foreach (var (entity, ids) in new[] { (Project, projects), (Folder, folders), (File, files) })

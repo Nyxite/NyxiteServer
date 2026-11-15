@@ -27,6 +27,9 @@ public sealed class AccessTokenService
     public IEnumerable<SecurityKey> ValidationKeys =>
         _keys.Versions.Select(v => new SymmetricSecurityKey(_keys.TryGet(v, out var k) ? k : []) { KeyId = v.ToString() });
 
+    /// <summary>The current signing key, shared with the guest token (08 §8.2).</summary>
+    internal SecurityKey CurrentSigningKey => new SymmetricSecurityKey(_keys.Current) { KeyId = _keys.CurrentVersion.ToString() };
+
     public (string Token, DateTimeOffset ExpiresAt) Issue(Guid userId, Guid sessionId, UserRole role, AuthMethod method, bool mfaVerified)
     {
         var now = _time.GetUtcNow();

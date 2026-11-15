@@ -93,7 +93,7 @@ public static class ContentEndpoints
     private static Guid KeyId(HttpContext http) =>
         Guid.TryParse(http.Request.Headers[KeyIdHeader], out var id) ? id : throw AuthException.Validation("Nyxite-Key-Id must be a UUID.");
 
-    private static IResult Stream(HttpContext http, BlobRead read)
+    internal static IResult Stream(HttpContext http, BlobRead read)
     {
         http.Response.Headers[LayoutHeader] = read.Version.Layout;
         http.Response.Headers.ETag = $"\"{read.Version.ContentHash}\"";

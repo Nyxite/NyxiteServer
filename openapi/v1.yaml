@@ -23,7 +23,10 @@ info:
     - A caller without reach to an id-addressed resource gets `404`, never `403`
       (existence-hiding, specification/04-rest-api.md §4.4).
     - The real-time relay is the SignalR hub `RelayHub` (MessagePack), specified in
-      specification/05-realtime-collaboration.md; it is not a REST surface and not described here.
+      specification/05-realtime-collaboration.md; it is not a REST surface and not described here. It is served at
+      `/hubs/relay` for accounts and at `/share/{token}/ws` (WebSockets only) for link guests.
+    - No request carries a link share's URL fragment (`#k=…`, the file key); a link share sends only the SHA-256
+      of its token (specification/09-sharing-and-acl.md §9.4).
   license:
     name: PolyForm Noncommercial 1.0.0
     url: https://polyformproject.org/licenses/noncommercial/1.0.0/
@@ -1395,7 +1398,11 @@ paths:
     post:
       tags: [keys]
       summary: Upload wrapped file keys for members
-      parameters: [{ $ref: '#/components/parameters/IdempotencyKey' }]
+      description: >-
+        The project owner only (a grantee gets `403 acl_denied`), from an active device. Every wrap names a member that
+        owns the project or reaches the file through a live share, and a key and generation the file has; otherwise
+        the whole request is `400`. Storing is idempotent without an `Idempotency-Key`: a wrap of a key the member
+        already has is left as it is.
       requestBody:
         required: true
         content:
@@ -1404,16 +1411,20 @@ paths:
               type: object
               required: [wrappedKeys]
               properties:
-                wrappedKeys: { type: array, items: { $ref: '#/components/schemas/WrappedKey' } }
+                wrappedKeys: { type: array, minItems: 1, maxItems: 500, items: { $ref: '#/components/schemas/WrappedKey' } }
       responses:
         '204': { description: 'Stored.' }
         '404': { $ref: '#/components/responses/Problem' }
-        '412': { $ref: '#/components/responses/Problem' }
   /files/{id}/keys/rotate:
     parameters: [{ $ref: '#/components/parameters/Id' }]
     post:
       tags: [keys]
       summary: Commit a file-key rotation (generation-guarded)
+      description: >-
+        Phase 2.3 (P2.3-SRV-1); pinned by the P2.2-CORE-1 fixtures in `sharing.json` and not served before then.
+        Commits only if `generation` is the file's current generation + 1, otherwise `409 conflict` (another rotation
+        won). Updates sealed with the old key are accepted until the commit and answer `412 key_generation_stale`
+        after it.
       parameters: [{ $ref: '#/components/parameters/IdempotencyKey' }]
       requestBody:
         required: true
@@ -1435,7 +1446,13 @@ paths:
     post:
       tags: [keys]
       summary: Batch wrap for subtree shares (idempotent, partial success)
-      parameters: [{ $ref: '#/components/parameters/IdempotencyKey' }]
+      description: >-
+        The fan-out of a folder or project share (09 §9.3): wraps of every file key and, because every folder has its
+        own key (ST-1), every folder key in the subtree. Each grant names exactly one of `fileId` and `folderId` and is
+        judged on its own; results come in request order. `applied` also answers a wrap that was already stored, so a
+        client drains its resumable queue without an `Idempotency-Key`. A rejected grant names why: `not_found` (no
+        reach), `acl_denied` (reach, but only the owner hands out keys), `validation_failed` (malformed wrap, or a key
+        the object does not have) or `not_shared` (the member reaches the object through no share).
       requestBody:
         required: true
         content:
@@ -1446,18 +1463,21 @@ paths:
               properties:
                 grants:
                   type: array
+                  minItems: 1
                   maxItems: 500
                   items:
                     type: object
-                    required: [fileId, keyId, memberId, wrappedKey]
+                    required: [keyId, memberId, wrappedKey]
                     properties:
-                      fileId: { $ref: '#/components/schemas/Uuid' }
+                      fileId: { $ref: '#/components/schemas/NullableUuid' }
+                      folderId: { $ref: '#/components/schemas/NullableUuid' }
                       keyId: { $ref: '#/components/schemas/Uuid' }
                       memberId: { $ref: '#/components/schemas/Uuid' }
                       wrappedKey: { $ref: '#/components/schemas/Bytes' }
+                      algId: { type: [string, 'null'], description: 'X25519MLKEM768, the default' }
       responses:
         '200':
-          description: Result per grant.
+          description: Result per grant, in request order.
           content:
             application/json:
               schema:
@@ -1468,11 +1488,12 @@ paths:
                     type: array
                     items:
                       type: object
-                      required: [fileId, status]
+                      required: [fileId, folderId, status, error]
                       properties:
-                        fileId: { $ref: '#/components/schemas/Uuid' }
+                        fileId: { $ref: '#/components/schemas/NullableUuid' }
+                        folderId: { $ref: '#/components/schemas/NullableUuid' }
                         status: { type: string, enum: [applied, rejected] }
-                        error: { type: [string, 'null'] }
+                        error: { type: [string, 'null'], description: 'null when applied; not_found, acl_denied, validation_failed or not_shared' }
 
   # ---------------------------------------------------------------- key directory + devices + recovery
   /keys/directory:
@@ -1834,10 +1855,16 @@ paths:
   /shares:
     get:
       tags: [shares]
-      summary: List shares on a target
+      summary: List shares on a target, or the account shares granted to the caller
+      description: >-
+        With `targetType` and `targetId`: the live shares on exactly that target, for its owner only (a grantee gets
+        `403 acl_denied`, no reach `404`). Without both: the live account shares granted to the caller ("shared with
+        me"), so a recipient finds what it can open. Revoked shares are never listed.
       parameters:
-        - { name: targetType, in: query, required: true, schema: { $ref: '#/components/schemas/TargetType' } }
-        - { name: targetId, in: query, required: true, schema: { type: string, format: uuid } }
+        - { name: targetType, in: query, schema: { $ref: '#/components/schemas/TargetType' } }
+        - { name: targetId, in: query, schema: { type: string, format: uuid } }
+        - { $ref: '#/components/parameters/Cursor' }
+        - { $ref: '#/components/parameters/Limit' }
       responses:
         '200':
           description: Shares.
@@ -1845,13 +1872,21 @@ paths:
             application/json:
               schema:
                 type: object
-                required: [items]
+                required: [items, nextCursor]
                 properties:
                   items: { type: array, items: { $ref: '#/components/schemas/Share' } }
+                  nextCursor: { type: [string, 'null'] }
         '404': { $ref: '#/components/responses/Problem' }
     post:
       tags: [shares]
       summary: Create an account or link share
+      description: >-
+        The project owner only, from an active device; 30 per minute per user. An account share (`user_grant`) names
+        a grantee with a live directory key and carries the target's own key wrapped to it, the current generation at
+        least (`wrappedKeys`); the keys below a folder or project follow through `POST /files/keys:batch`. A second live
+        account share of one target to one grantee is `409`. A link share targets one file, carries no grantee and no
+        wraps, and sends only `linkTokenHash`, the SHA-256 of the ASCII link token; the token is 32 random bytes as 43
+        base64url characters, and the file key stays in the URL fragment.
       parameters: [{ $ref: '#/components/parameters/IdempotencyKey' }]
       requestBody:
         required: true
@@ -1866,11 +1901,13 @@ paths:
               schema: { $ref: '#/components/schemas/Share' }
         '400': { $ref: '#/components/responses/Problem' }
         '404': { $ref: '#/components/responses/Problem' }
+        '409': { $ref: '#/components/responses/Problem' }
   /shares/{id}:
     parameters: [{ $ref: '#/components/parameters/Id' }]
     patch:
       tags: [shares]
       summary: Change permission / expiry
+      description: The owner only; a grantee gets `403 acl_denied`. `expiresAt` null removes the expiry. A revoked share is `404`.
       requestBody:
         required: true
         content:
@@ -1890,6 +1927,9 @@ paths:
     delete:
       tags: [shares]
       summary: Revoke (instant ACL cutoff; the client rotates the key separately)
+      description: >-
+        The owner revokes; a grantee removes its own share, which leaves the object live for everyone else (DL-3).
+        From then on the share is no path at any checkpoint. Revoking a revoked share answers `204` again.
       responses:
         '204': { description: 'Revoked.' }
         '404': { $ref: '#/components/responses/Problem' }
@@ -2697,13 +2737,20 @@ paths:
     get:
       tags: [public-share]
       security: []
-      summary: Guest bootstrap (serves the guest client; key stays in the URL fragment)
+      summary: Guest bootstrap (key stays in the URL fragment)
+      description: >-
+        Resolves the link token (SHA-256 compared with `shares.link_token_hash`) and answers what the guest needs:
+        the shared file as ciphertext metadata, the key id the fragment key must match, and a fresh guest token. A
+        browser navigation to the same path is the web client's guest shell, routed there by the edge (deploy). An
+        unknown token is `404`, a revoked or expired one `410`. 30 per minute per IP across `/share/{token}*`.
+        Audited as `share.link_access`.
       responses:
         '200':
-          description: Guest client HTML.
+          description: Bootstrap.
           content:
-            text/html:
-              schema: { type: string }
+            application/json:
+              schema: { $ref: '#/components/schemas/ShareBootstrap' }
+        '404': { $ref: '#/components/responses/Problem' }
         '410': { $ref: '#/components/responses/Problem' }
   /share/{token}/session:
     servers: [{ url: 'https://{host}', variables: { host: { default: nyxite.example.org } } }]
@@ -2712,20 +2759,14 @@ paths:
       tags: [public-share]
       security: []
       summary: Issue or renew a 15-minute guest share-session token (re-checks the share)
+      description: The link token in the path is the credential. Audited as `auth.guest_session`.
       responses:
         '200':
           description: Guest token (JWT typ nyx-guest+jwt).
           content:
             application/json:
-              schema:
-                type: object
-                required: [guestToken, expiresAt, permission, targetType, targetId]
-                properties:
-                  guestToken: { type: string }
-                  expiresAt: { type: string, format: date-time }
-                  permission: { $ref: '#/components/schemas/Permission' }
-                  targetType: { $ref: '#/components/schemas/TargetType' }
-                  targetId: { $ref: '#/components/schemas/Uuid' }
+              schema: { $ref: '#/components/schemas/GuestSession' }
+        '404': { $ref: '#/components/responses/Problem' }
         '410': { $ref: '#/components/responses/Problem' }
   /share/{token}/blob:
     servers: [{ url: 'https://{host}', variables: { host: { default: nyxite.example.org } } }]
@@ -2734,12 +2775,42 @@ paths:
       tags: [public-share]
       security: [{ guest: [] }]
       summary: Ciphertext of the shared file
+      description: >-
+        The head version as `GET /files/{id}/blob` serves it (`ETag`, `Nyxite-Key-Id`, `Nyxite-Blob-Layout`, and for a
+        text file `Nyxite-Snapshot-Seq`), for a guest token of this link. Audited as `share.link_access`.
+      parameters:
+        - { name: If-None-Match, in: header, schema: { type: string } }
       responses:
         '200':
           description: Ciphertext.
           content:
             application/octet-stream:
               schema: { type: string, contentMediaType: application/octet-stream }
+        '304': { description: 'The caller has the head already.' }
+        '404': { $ref: '#/components/responses/Problem' }
+        '410': { $ref: '#/components/responses/Problem' }
+  /share/{token}/socket-ticket:
+    servers: [{ url: 'https://{host}', variables: { host: { default: nyxite.example.org } } }]
+    parameters: [{ $ref: '#/components/parameters/ShareToken' }]
+    post:
+      tags: [public-share]
+      security: [{ guest: [] }]
+      summary: Mint a single-use guest relay socket ticket (60 s)
+      description: >-
+        For the guest relay WebSocket `/share/{token}/ws` (08 §8.4): a browser sends the ticket as the `access_token`
+        query value instead of its guest token. The negotiate request checks it, the WebSocket upgrade uses it up. It
+        dies with its share.
+      responses:
+        '200':
+          description: The ticket; only its hash is stored.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [ticket, expiresAt]
+                properties:
+                  ticket: { type: string, description: 'base64url, 43 characters, never a JWT' }
+                  expiresAt: { type: string, format: date-time }
         '410': { $ref: '#/components/responses/Problem' }
 
   # ---------------------------------------------------------------- support relay (04 §4.9), only when support.enabled
@@ -2891,7 +2962,8 @@ components:
       name: token
       in: path
       required: true
-      schema: { type: string }
+      schema: { type: string, pattern: '^[A-Za-z0-9_-]{43}$' }
+      description: The link token, 32 random bytes as base64url; never the fragment key.
     Cursor:
       name: cursor
       in: query
@@ -3208,7 +3280,8 @@ components:
 
     Share:
       type: object
-      required: [id, targetType, targetId, kind, permission, createdAt]
+      required: [id, targetType, targetId, kind, granteeId, permission, createdBy, expiresAt, createdAt]
+      description: Never carries the link token or its hash.
       properties:
         id: { $ref: '#/components/schemas/Uuid' }
         targetType: { $ref: '#/components/schemas/TargetType' }
@@ -3216,8 +3289,40 @@ components:
         kind: { type: string, enum: [user_grant, link] }
         granteeId: { $ref: '#/components/schemas/NullableUuid' }
         permission: { $ref: '#/components/schemas/Permission' }
+        createdBy: { $ref: '#/components/schemas/Uuid' }
         expiresAt: { type: [string, 'null'], format: date-time }
         createdAt: { type: string, format: date-time }
+    GuestSession:
+      type: object
+      required: [guestToken, expiresAt, permission, targetType, targetId]
+      properties:
+        guestToken: { type: string, description: 'JWT HS256, typ nyx-guest+jwt, claims iss, aud, sub (share:{shareId}), share_id, perm, iat, exp, jti' }
+        expiresAt: { type: string, format: date-time }
+        permission: { $ref: '#/components/schemas/Permission' }
+        targetType: { $ref: '#/components/schemas/TargetType' }
+        targetId: { $ref: '#/components/schemas/Uuid' }
+    ShareBootstrap:
+      type: object
+      required: [guestToken, expiresAt, permission, targetType, targetId, shareExpiresAt, file]
+      properties:
+        guestToken: { type: string }
+        expiresAt: { type: string, format: date-time, description: 'When the guest token expires' }
+        permission: { $ref: '#/components/schemas/Permission' }
+        targetType: { $ref: '#/components/schemas/TargetType' }
+        targetId: { $ref: '#/components/schemas/Uuid' }
+        shareExpiresAt: { type: [string, 'null'], format: date-time }
+        file:
+          type: object
+          required: [id, contentType, nameEnc, metadataEnc, keyId, keyGeneration, currentVersionSeq, crdtDocId]
+          properties:
+            id: { $ref: '#/components/schemas/Uuid' }
+            contentType: { $ref: '#/components/schemas/ContentType' }
+            nameEnc: { $ref: '#/components/schemas/Bytes' }
+            metadataEnc: { type: [string, 'null'], contentEncoding: base64url }
+            keyId: { $ref: '#/components/schemas/Uuid', description: 'The current file key; the fragment key must be this one' }
+            keyGeneration: { type: integer }
+            currentVersionSeq: { type: [integer, 'null'], format: int64 }
+            crdtDocId: { $ref: '#/components/schemas/NullableUuid' }
     CreateShareRequest:
       type: object
       required: [targetType, targetId, kind, permission]
@@ -3227,8 +3332,8 @@ components:
         kind: { type: string, enum: [user_grant, link] }
         granteeId: { $ref: '#/components/schemas/NullableUuid' }
         permission: { $ref: '#/components/schemas/Permission' }
-        wrappedKeys: { type: array, items: { $ref: '#/components/schemas/WrappedKey' } }
-        linkTokenHash: { $ref: '#/components/schemas/Bytes' }
+        wrappedKeys: { type: [array, 'null'], items: { $ref: '#/components/schemas/WrappedKey' }, description: 'Account shares only' }
+        linkTokenHash: { type: [string, 'null'], contentEncoding: base64url, description: 'SHA-256 of the ASCII link token, 32 bytes; link shares only' }
         expiresAt: { type: [string, 'null'], format: date-time }
 
     Group:

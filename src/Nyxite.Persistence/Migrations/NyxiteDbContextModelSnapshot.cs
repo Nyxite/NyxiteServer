@@ -396,9 +396,9 @@ namespace Nyxite.Persistence.Migrations
 
                     b.ToTable("ephemeral_tokens", null, t =>
                         {
-                            t.HasCheckConstraint("ck_ephemeral_kind", "kind IN ('mfa','socket_ticket','password_reset','invite','oidc_state','oidc_handoff','webauthn_challenge','totp_enroll','email_verify','email_code','step_up')");
+                            t.HasCheckConstraint("ck_ephemeral_kind", "kind IN ('mfa','socket_ticket','password_reset','invite','oidc_state','oidc_handoff','webauthn_challenge','totp_enroll','email_verify','email_code','step_up','guest_socket_ticket')");
 
-                            t.HasCheckConstraint("ck_ephemeral_user", "user_id IS NOT NULL OR kind IN ('oidc_state','webauthn_challenge')");
+                            t.HasCheckConstraint("ck_ephemeral_user", "user_id IS NOT NULL OR kind IN ('oidc_state','webauthn_challenge','guest_socket_ticket')");
                         });
                 });
 
@@ -585,6 +585,8 @@ namespace Nyxite.Persistence.Migrations
                     b.HasIndex("MemberId")
                         .HasDatabaseName("ix_file_keys_member_live")
                         .HasFilter("revoked_at IS NULL");
+
+                    b.HasIndex("ShareId");
 
                     b.HasIndex("FileId", "KeyId", "MemberId")
                         .IsUnique()
@@ -1092,6 +1094,97 @@ namespace Nyxite.Persistence.Migrations
                         });
                 });
 
+            modelBuilder.Entity("Nyxite.Persistence.Entities.ShareEntity", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .HasColumnType("uuid")
+                        .HasColumnName("id");
+
+                    b.Property<DateTimeOffset>("CreatedAt")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("created_at")
+                        .HasDefaultValueSql("now()");
+
+                    b.Property<Guid>("CreatedBy")
+                        .HasColumnType("uuid")
+                        .HasColumnName("created_by");
+
+                    b.Property<DateTimeOffset?>("ExpiresAt")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("expires_at");
+
+                    b.Property<Guid?>("FileId")
+                        .HasColumnType("uuid")
+                        .HasColumnName("file_id");
+
+                    b.Property<Guid?>("FolderId")
+                        .HasColumnType("uuid")
+                        .HasColumnName("folder_id");
+
+                    b.Property<Guid?>("GranteeId")
+                        .HasColumnType("uuid")
+                        .HasColumnName("grantee_id");
+
+                    b.Property<string>("Kind")
+                        .IsRequired()
+                        .HasColumnType("text")
+                        .HasColumnName("kind");
+
+                    b.Property<byte[]>("LinkTokenHash")
+                        .HasColumnType("bytea")
+                        .HasColumnName("link_token_hash");
+
+                    b.Property<string>("Permission")
+                        .IsRequired()
+                        .HasColumnType("text")
+                        .HasColumnName("permission");
+
+                    b.Property<Guid?>("ProjectId")
+                        .HasColumnType("uuid")
+                        .HasColumnName("project_id");
+
+                    b.Property<DateTimeOffset?>("RevokedAt")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("revoked_at");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("CreatedBy");
+
+                    b.HasIndex("FileId")
+                        .HasDatabaseName("ix_shares_target_file")
+                        .HasFilter("revoked_at IS NULL");
+
+                    b.HasIndex("FolderId")
+                        .HasDatabaseName("ix_shares_target_folder")
+                        .HasFilter("revoked_at IS NULL");
+
+                    b.HasIndex("GranteeId")
+                        .HasDatabaseName("ix_shares_grantee")
+                        .HasFilter("revoked_at IS NULL");
+
+                    b.HasIndex("LinkTokenHash")
+                        .IsUnique()
+                        .HasDatabaseName("uq_shares_link")
+                        .HasFilter("link_token_hash IS NOT NULL");
+
+                    b.HasIndex("ProjectId")
+                        .HasDatabaseName("ix_shares_target_project")
+                        .HasFilter("revoked_at IS NULL");
+
+                    b.ToTable("shares", null, t =>
+                        {
+                            t.HasCheckConstraint("ck_shares_kind", "kind IN ('user_grant','link')");
+
+                            t.HasCheckConstraint("ck_shares_kind_fields", "(kind = 'user_grant' AND grantee_id IS NOT NULL AND link_token_hash IS NULL) OR (kind = 'link' AND grantee_id IS NULL AND octet_length(link_token_hash) = 32 AND file_id IS NOT NULL)");
+
+                            t.HasCheckConstraint("ck_shares_one_target", "num_nonnulls(file_id, folder_id, project_id) = 1");
+
+                            t.HasCheckConstraint("ck_shares_permission", "permission IN ('read','write')");
+                        });
+                });
+
             modelBuilder.Entity("Nyxite.Persistence.Entities.StructureKeyEntity", b =>
                 {
                     b.Property<Guid>("Id")
@@ -1149,6 +1242,8 @@ namespace Nyxite.Persistence.Migrations
                     b.HasIndex("MemberId")
                         .HasDatabaseName("ix_structure_keys_member_live")
                         .HasFilter("revoked_at IS NULL");
+
+                    b.HasIndex("ShareId");
 
                     b.HasIndex("FolderId", "KeyId", "MemberId")
                         .IsUnique()
@@ -1449,6 +1544,11 @@ namespace Nyxite.Persistence.Migrations
                         .WithMany()
                         .HasForeignKey("MemberId")
                         .OnDelete(DeleteBehavior.Restrict);
+
+                    b.HasOne("Nyxite.Persistence.Entities.ShareEntity", null)
+                        .WithMany()
+                        .HasForeignKey("ShareId")
+                        .OnDelete(DeleteBehavior.Restrict);
                 });
 
             modelBuilder.Entity("Nyxite.Persistence.Entities.FileVersionEntity", b =>
@@ -1534,6 +1634,35 @@ namespace Nyxite.Persistence.Migrations
                         .IsRequired();
                 });
 
+            modelBuilder.Entity("Nyxite.Persistence.Entities.ShareEntity", b =>
+                {
+                    b.HasOne("Nyxite.Persistence.Entities.UserEntity", null)
+                        .WithMany()
+                        .HasForeignKey("CreatedBy")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+
+                    b.HasOne("Nyxite.Persistence.Entities.FileEntity", null)
+                        .WithMany()
+                        .HasForeignKey("FileId")
+                        .OnDelete(DeleteBehavior.Restrict);
+
+                    b.HasOne("Nyxite.Persistence.Entities.FolderEntity", null)
+                        .WithMany()
+                        .HasForeignKey("FolderId")
+                        .OnDelete(DeleteBehavior.Restrict);
+
+                    b.HasOne("Nyxite.Persistence.Entities.UserEntity", null)
+                        .WithMany()
+                        .HasForeignKey("GranteeId")
+                        .OnDelete(DeleteBehavior.Restrict);
+
+                    b.HasOne("Nyxite.Persistence.Entities.ProjectEntity", null)
+                        .WithMany()
+                        .HasForeignKey("ProjectId")
+                        .OnDelete(DeleteBehavior.Restrict);
+                });
+
             modelBuilder.Entity("Nyxite.Persistence.Entities.StructureKeyEntity", b =>
                 {
                     b.HasOne("Nyxite.Persistence.Entities.FolderEntity", null)
@@ -1549,6 +1678,11 @@ namespace Nyxite.Persistence.Migrations
                     b.HasOne("Nyxite.Persistence.Entities.ProjectEntity", null)
                         .WithMany()
                         .HasForeignKey("ProjectId")
+                        .OnDelete(DeleteBehavior.Restrict);
+
+                    b.HasOne("Nyxite.Persistence.Entities.ShareEntity", null)
+                        .WithMany()
+                        .HasForeignKey("ShareId")
                         .OnDelete(DeleteBehavior.Restrict);
                 });
 

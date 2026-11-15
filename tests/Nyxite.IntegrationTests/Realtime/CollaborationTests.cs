@@ -14,8 +14,8 @@ using Nyxite.Server.Realtime;
 namespace Nyxite.IntegrationTests.Realtime;
 
 /// <summary>
-/// Stands in for the shares of Phase 2.2, which are the only way a second account reaches a file: grants accounts a
-/// level on the files of a project and takes it back, like a share and its revocation would.
+/// A scripted stand-in for shares: grants accounts a level on the files of a project and takes it back, like a share
+/// and its revocation would, without the key handling a real share needs. The real shares are tested in SharingTests.
 /// </summary>
 public sealed class ProjectGrants
 {
@@ -28,11 +28,13 @@ public sealed class ProjectGrants
     public FileAccessLevel Of(Guid userId, Guid projectId) => _grants.GetValueOrDefault((userId, projectId));
 }
 
-/// <summary>The real ownership check, plus the grants: the maximum over both paths, as 09 §9.5 resolves it.</summary>
-public sealed class GrantingFileAccess(OwnerFileAccess owner, ProjectGrants grants) : IFileAccess
+/// <summary>The real ACL, plus the grants: the maximum over both paths, as 09 §9.5 resolves it.</summary>
+public sealed class GrantingFileAccess(ShareFileAccess owner, ProjectGrants grants) : IFileAccess
 {
     public async Task<FileAccessLevel> LevelAsync(Guid userId, FileEntity file, CancellationToken ct) =>
         (FileAccessLevel)Math.Max((int)await owner.LevelAsync(userId, file, ct), (int)grants.Of(userId, file.ProjectId));
+
+    public Task<FileAccessLevel> GuestLevelAsync(Guid shareId, FileEntity file, CancellationToken ct) => owner.GuestLevelAsync(shareId, file, ct);
 }
 
 /// <summary>Phase 2.1 server: rooms shared by several accounts and devices, the presence roster, awareness and the ACL re-checks.</summary>
@@ -45,7 +47,7 @@ public sealed class CollaborationTests(PostgresFixture pg)
             configureServices: services =>
             {
                 services.AddSingleton(grants);
-                services.AddScoped<OwnerFileAccess>();
+                services.AddScoped<ShareFileAccess>();
                 services.AddScoped<IFileAccess, GrantingFileAccess>();
             });
 

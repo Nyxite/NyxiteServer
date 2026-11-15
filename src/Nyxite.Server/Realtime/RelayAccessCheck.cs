@@ -2,6 +2,7 @@ using Microsoft.AspNetCore.SignalR;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Options;
 using Nyxite.Application.Content;
+using Nyxite.Application.Sharing;
 using Nyxite.Persistence;
 
 namespace Nyxite.Server.Realtime;
@@ -19,8 +20,8 @@ namespace Nyxite.Server.Realtime;
 /// outside the roster.
 /// </remarks>
 public sealed class RelayAccessCheck(
-    RelayPresence presence, IHubContext<RelayHub, IRelayClient> hub, ContentService content, NyxiteDbContext db, TimeProvider time,
-    ILogger<RelayAccessCheck> logger)
+    RelayPresence presence, IHubContext<RelayHub, IRelayClient> hub, ContentService content, NyxiteDbContext db, GuestShareService guests,
+    TimeProvider time, ILogger<RelayAccessCheck> logger)
 {
     /// <summary>Runs one pass and returns how many room memberships it ended.</summary>
     public async Task<int> RunAsync(CancellationToken ct)
@@ -30,7 +31,6 @@ public sealed class RelayAccessCheck(
         var changed = new HashSet<Guid>();
         var removed = 0;
 
-        // Guests carry no session here; their link share is re-checked once guest sessions exist (Phase 2.2).
         var now = time.GetUtcNow();
         var sessionIds = members.Where(m => m.Member.SessionId is not null).Select(m => m.Member.SessionId!.Value).Distinct().ToList();
         var live = (await db.Sessions.AsNoTracking().Where(s => sessionIds.Contains(s.Id) && s.RevokedAt == null && s.ExpiresAt > now)
@@ -82,6 +82,8 @@ public sealed class RelayAccessCheck(
             }
         }
 
+        removed += await RecheckGuestsAsync(members, changed, ct);
+
         foreach (var fileId in changed)
         {
             try
@@ -91,6 +93,75 @@ public sealed class RelayAccessCheck(
             catch (Exception e) when (!ct.IsCancellationRequested)
             {
                 logger.LogWarning(e, "The relay access re-check could not send a roster.");
+            }
+        }
+
+        return removed;
+    }
+
+    /// <summary>
+    /// Link guests (05 §5.8): a guest whose share was revoked or expired gets <c>OnError</c> with <c>share_revoked</c> or
+    /// <c>link_expired</c> for its rooms and is closed, like a connection of an ended session, because its only credential
+    /// is gone. A guest whose file went to Trash leaves that room with <c>not_found</c>.
+    /// </summary>
+    private async Task<int> RecheckGuestsAsync(List<(Guid FileId, string ConnectionId, RelayMember Member)> members, HashSet<Guid> changed, CancellationToken ct)
+    {
+        var guestMembers = members.Where(m => m.Member.ShareId is not null).ToList();
+        if (guestMembers.Count == 0) return 0;
+        var removed = 0;
+        Dictionary<Guid, string> ended;
+        try
+        {
+            ended = await guests.EndedAsync(guestMembers.Select(m => m.Member.ShareId!.Value).Distinct().ToList(), ct);
+        }
+        catch (Exception e) when (!ct.IsCancellationRequested)
+        {
+            logger.LogWarning(e, "The relay access re-check could not read the link shares of guests.");
+            return 0;
+        }
+
+        foreach (var connection in guestMembers.Where(m => ended.ContainsKey(m.Member.ShareId!.Value)).GroupBy(m => m.ConnectionId))
+        {
+            try
+            {
+                foreach (var (fileId, _, member) in connection)
+                {
+                    await hub.Clients.Client(connection.Key).OnError(fileId.ToString(), ended[member.ShareId!.Value], "The link has ended.");
+                    await hub.Groups.RemoveFromGroupAsync(connection.Key, RelayHub.Room(fileId), ct);
+                }
+
+                foreach (var fileId in presence.LeaveAll(connection.Key))
+                {
+                    changed.Add(fileId);
+                    removed++;
+                }
+
+                presence.Abort(connection.Key);
+            }
+            catch (Exception e) when (!ct.IsCancellationRequested)
+            {
+                logger.LogWarning(e, "The relay access re-check could not close a guest connection of an ended link.");
+            }
+        }
+
+        foreach (var pair in guestMembers.Where(m => !ended.ContainsKey(m.Member.ShareId!.Value)).GroupBy(m => (m.FileId, ShareId: m.Member.ShareId!.Value)))
+        {
+            try
+            {
+                if (await content.GuestAccessLevelAsync(pair.Key.ShareId, pair.Key.FileId, ct) != FileAccessLevel.None) continue;
+                foreach (var (fileId, connectionId, _) in pair)
+                {
+                    if (!presence.IsIn(fileId, connectionId)) continue;
+                    await hub.Groups.RemoveFromGroupAsync(connectionId, RelayHub.Room(fileId), ct);
+                    if (!presence.Leave(fileId, connectionId)) continue;
+                    changed.Add(fileId);
+                    removed++;
+                    await hub.Clients.Client(connectionId).OnError(fileId.ToString(), "not_found", "Not found.");
+                }
+            }
+            catch (Exception e) when (!ct.IsCancellationRequested)
+            {
+                logger.LogWarning(e, "The relay access re-check of one guest in one room failed.");
             }
         }
 

@@ -93,6 +93,8 @@ public sealed class NyxiteApp : WebApplicationFactory<Program>
             ["RateLimiting:Auth:PermitLimit"] = "100000",
             ["RateLimiting:Directory:PermitLimit"] = "100000",
             ["RateLimiting:DeviceEnrollment:PermitLimit"] = "100000",
+            ["RateLimiting:Shares:PermitLimit"] = "100000",
+            ["RateLimiting:ShareAccess:PermitLimit"] = "100000",
         };
         foreach (var (k, v) in overrides ?? new Dictionary<string, string?>()) _settings[k] = v;
         Email.Flush = FlushOutboxAsync;

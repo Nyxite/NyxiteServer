@@ -1,10 +1,10 @@
 using System.Collections.Concurrent;
-using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.SignalR;
 using Microsoft.EntityFrameworkCore;
 using Nyxite.Application.Auth;
 using Nyxite.Application.Content;
 using Nyxite.Application.Keys;
+using Nyxite.Application.Sharing;
 using Nyxite.Contracts.Content;
 using Nyxite.Crypto;
 using Nyxite.Persistence;
@@ -40,8 +40,11 @@ public interface IRelayClient
     Task OnError(string fileId, string code, string message);
 }
 
-/// <summary>A connection in a room: what the roster shows, and what the periodic re-check needs to judge it again.</summary>
-public sealed record RelayMember(PresenceDto Who, Guid? UserId, Guid? SessionId);
+/// <summary>
+/// A connection in a room: what the roster shows, and what the periodic re-check needs to judge it again. An account
+/// has its user and session, a link guest only the share it came through.
+/// </summary>
+public sealed record RelayMember(PresenceDto Who, Guid? UserId, Guid? SessionId, Guid? ShareId = null);
 
 /// <summary>
 /// Who is connected to which document room. In memory, because v1 runs one node (05 §5.10). A room that becomes empty
@@ -140,12 +143,22 @@ public sealed class RelayNotifier(IHubContext<RelayHub, IRelayClient> hub) : IRe
 /// payload. An update a client submits here reaches the room through <see cref="RelayNotifier"/>, the sender included,
 /// so every client sees every update in sequence order from one source. Several accounts and devices share a room;
 /// the ACL is checked at join and at every submit, and <see cref="RelayAccessCheck"/> checks it again periodically.
+/// <para>
+/// The same hub serves link guests at <see cref="GuestPath"/> (05 §5.8), so accounts and guests share one room. A guest
+/// connection is authenticated by its guest token, reaches only the file of its link share, is shown as a guest
+/// without identity, and writes with <c>author_id = null</c>; a read-only link's <c>SubmitUpdate</c> answers
+/// <c>acl_denied</c>. Authorization comes from the two endpoint mappings, not from an attribute, because each path
+/// takes its own credential.
+/// </para>
 /// </summary>
-[Authorize]
-public sealed class RelayHub(ContentService content, RelayPresence presence, NyxiteDbContext db, DeviceGuard guard, TimeProvider time)
+public sealed class RelayHub(
+    ContentService content, RelayPresence presence, NyxiteDbContext db, DeviceGuard guard, GuestShareService guests, TimeProvider time)
     : Hub<IRelayClient>
 {
     public const string Path = "/hubs/relay";
+
+    /// <summary>The guest relay (04 §4.8): WebSockets only, so the per-IP share-access limit counts one handshake per connection.</summary>
+    public const string GuestPath = "/share/{token}/ws";
 
     private const int JoinBatch = 200;
 
@@ -166,17 +179,29 @@ public sealed class RelayHub(ContentService content, RelayPresence presence, Nyx
         {
             var user = Context.User!;
             var ct = Context.ConnectionAborted;
-            var session = await guard.SessionAsync(user, ct);
-            if (session.ExpiresAt <= time.GetUtcNow()) throw AuthException.Unauthenticated();
+            RelayMember member;
+            if (user.GuestShareId() is { } shareId)
+            {
+                // A guest's share must still be live (410 otherwise) and reaches its one file only.
+                var share = await guests.LiveShareAsync(shareId, ct);
+                if (share.FileId != id) throw AuthException.NotFound();
+                member = new RelayMember(PresenceDto.ForGuest(), null, null, shareId);
+            }
+            else
+            {
+                var session = await guard.SessionAsync(user, ct);
+                if (session.ExpiresAt <= time.GetUtcNow()) throw AuthException.Unauthenticated();
+                var userId = user.UserId();
+                var name = await db.Users.Where(u => u.Id == userId).Select(u => u.DisplayName).SingleAsync(ct);
+                member = new RelayMember(PresenceDto.ForUser(userId, name), userId, session.Id);
+            }
 
             // Reach is checked by the first read.
             var snapshot = await content.SnapshotPointerAsync(user, id, ct);
-            var userId = user.UserId();
-            var name = await db.Users.Where(u => u.Id == userId).Select(u => u.DisplayName).SingleAsync(ct);
             try
             {
                 await Groups.AddToGroupAsync(Context.ConnectionId, Room(id), ct);
-                presence.Join(id, Context.ConnectionId, new RelayMember(PresenceDto.ForUser(userId, name), userId, session.Id));
+                presence.Join(id, Context.ConnectionId, member);
                 // A disconnect that ran while the join was under way has already left every room, so the join must not stay.
                 ct.ThrowIfCancellationRequested();
                 if (snapshot is not null) await Clients.Caller.OnSnapshot(fileId, snapshot.CrdtSeq ?? 0, snapshot.Seq);

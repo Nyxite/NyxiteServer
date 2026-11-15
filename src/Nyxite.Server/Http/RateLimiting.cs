@@ -26,19 +26,27 @@ public static class RateLimiting
     /// <summary>Per-user bucket of <c>POST /devices</c>; every pending device holds a guessable pairing code (13 §13.5).</summary>
     public const string DeviceEnrollment = "device-enrollment";
 
+    /// <summary>Per-user bucket of <c>POST /shares</c> (13 §13.5).</summary>
+    public const string Shares = "shares";
+
+    /// <summary>Per-IP bucket of every public <c>/share/{token}…</c> request, the guest relay's handshake included (13 §13.5).</summary>
+    public const string ShareAccess = "share-access";
+
     public static IServiceCollection AddNyxiteRateLimiting(this IServiceCollection services, IConfiguration configuration)
     {
         var auth = configuration.GetSection("RateLimiting:Auth").Get<RateLimitOptions>() ?? new RateLimitOptions();
         var directory = configuration.GetSection("RateLimiting:Directory").Get<RateLimitOptions>() ?? new RateLimitOptions { PermitLimit = 60 };
         var enrollment = configuration.GetSection("RateLimiting:DeviceEnrollment").Get<RateLimitOptions>()
                          ?? new RateLimitOptions { PermitLimit = 5, Window = TimeSpan.FromHours(1) };
+        var shares = configuration.GetSection("RateLimiting:Shares").Get<RateLimitOptions>() ?? new RateLimitOptions { PermitLimit = 30 };
+        var shareAccess = configuration.GetSection("RateLimiting:ShareAccess").Get<RateLimitOptions>() ?? new RateLimitOptions { PermitLimit = 30 };
         services.AddRateLimiter(o =>
         {
-            o.AddPolicy(Auth, context => RateLimitPartition.GetFixedWindowLimiter(
-                context.Connection.RemoteIpAddress?.ToString() ?? "unknown",
-                _ => new FixedWindowRateLimiterOptions { PermitLimit = auth.PermitLimit, Window = auth.Window, QueueLimit = 0 }));
+            o.AddPolicy(Auth, context => PerIp(context, auth));
             o.AddPolicy(Directory, context => PerUser(context, directory));
             o.AddPolicy(DeviceEnrollment, context => PerUser(context, enrollment));
+            o.AddPolicy(Shares, context => PerUser(context, shares));
+            o.AddPolicy(ShareAccess, context => PerIp(context, shareAccess));
             o.OnRejected = async (context, ct) =>
             {
                 var retry = context.Lease.TryGetMetadata(MetadataName.RetryAfter, out var after) ? after : auth.Window;
@@ -49,6 +57,12 @@ public static class RateLimiting
         });
         return services;
     }
+
+    /// <summary>Partitions by the client IP, which is only right behind a proxy whose forwarded headers are trusted.</summary>
+    private static RateLimitPartition<string> PerIp(HttpContext context, RateLimitOptions limit) =>
+        RateLimitPartition.GetFixedWindowLimiter(
+            context.Connection.RemoteIpAddress?.ToString() ?? "unknown",
+            _ => new FixedWindowRateLimiterOptions { PermitLimit = limit.PermitLimit, Window = limit.Window, QueueLimit = 0 });
 
     /// <summary>Partitions by the authenticated user (<c>sub</c>); these endpoints all require a session.</summary>
     private static RateLimitPartition<string> PerUser(HttpContext context, RateLimitOptions limit) =>

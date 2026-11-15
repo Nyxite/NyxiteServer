@@ -76,8 +76,8 @@ internal sealed class EphemeralTokenConfiguration : IEntityTypeConfiguration<Eph
         {
             t.HasCheckConstraint("ck_ephemeral_kind",
                 "kind IN ('mfa','socket_ticket','password_reset','invite','oidc_state','oidc_handoff','webauthn_challenge','totp_enroll'," +
-                "'email_verify','email_code','step_up')");
-            t.HasCheckConstraint("ck_ephemeral_user", "user_id IS NOT NULL OR kind IN ('oidc_state','webauthn_challenge')");
+                "'email_verify','email_code','step_up','guest_socket_ticket')");
+            t.HasCheckConstraint("ck_ephemeral_user", "user_id IS NOT NULL OR kind IN ('oidc_state','webauthn_challenge','guest_socket_ticket')");
         });
         b.HasKey(x => x.TokenHash);
         b.Property(x => x.TokenHash).HasColumnName("token_hash");

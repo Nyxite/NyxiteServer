@@ -299,6 +299,7 @@ CREATE INDEX ix_ephemeral_expires ON ephemeral_tokens(expires_at);
 - **Enrollment-limited session.** `sessions.mfa_verified_at` is NULL for the session that `POST /auth/register` (or a login of an account without any second factor) creates. Its tokens carry `amr: ["pwd"]` and may only verify the email, enroll a factor, refresh and log out. Enrollment waits until the email is verified. Enrolling TOTP, email codes or a passkey sets the column, and the next refresh yields a full token. A sentinel timestamp was rejected because the column would then claim a second factor that never happened.
 - **Consume = one statement.** `UPDATE ephemeral_tokens SET used_at = now() WHERE token_hash = $1 AND kind = $2 AND used_at IS NULL AND expires_at > now() RETURNING …` — exactly one request can win, with no read-then-write race, and it works unchanged when several server nodes share the database.
 - **Why Postgres, not in-memory or Redis.** In-memory state is lost on restart and is invisible to a second node, so a ticket minted on node A would fail on node B. Redis would work but would turn an **optional** component (today only the multi-node relay backplane, [14](14-deployment-and-config.md)) into a **required** part of the default stack. The row volume is tiny (one row per login attempt and per socket connect, gone within minutes), so Postgres carries it without cost. Access goes through an `IEphemeralTokenStore` interface, so a Redis implementation can be added later for large multi-node deployments without a schema change.
+- **Guest socket tickets.** Kind `guest_socket_ticket` (Phase 2.2) has no user and no session: `detail` holds `{ shareId }`, and `ck_ephemeral_user` admits it next to `oidc_state` and `webauthn_challenge` ([08 §8.4](08-authentication.md)).
 - **Cleanup.** The ops job deletes rows past `expires_at`; nothing here is kept for audit, because login and relay events are already in `audit_log`.
 
 ### Guest share-session token — stateless, not stored
@@ -440,6 +441,11 @@ CREATE INDEX ix_shares_target_file   ON shares(file_id)   WHERE revoked_at IS NU
 CREATE INDEX ix_shares_target_folder ON shares(folder_id) WHERE revoked_at IS NULL;
 CREATE INDEX ix_shares_link          ON shares(link_token_hash) WHERE kind='link' AND revoked_at IS NULL;
 ```
+> As built (migration `Sharing`) [P]:
+> `ck_shares_kind_fields` requires a grantee and no hash for a `user_grant`, and a 32-byte hash, no grantee and a file target for a `link` ([09 §9.4a](09-sharing-and-acl.md)).
+> The hash index is the unique `uq_shares_link` over every hash, revoked ones included, so a token resolves to exactly one share and a revoked link answers `410` instead of `404`.
+> `ix_shares_target_project` and `ix_shares_grantee` serve project shares and the "shared with me" listing.
+> `file_keys.share_id` and `structure_keys.share_id` now reference `shares(id)`.
 > For a **user_grant**, the file key is wrapped to the grantee's public key in `file_keys`. For a **link**, the key rides the URL fragment ([09](09-sharing-and-acl.md)); the server stores only the token hash.
 
 ### file_keys  (wrapped file keys — one row per authorized member or link-share grant)
@@ -463,7 +469,7 @@ CREATE UNIQUE INDEX uq_file_keys_member ON file_keys(file_id, key_id, member_id)
 CREATE UNIQUE INDEX uq_file_keys_share  ON file_keys(file_id, key_id, share_id)  WHERE share_id IS NOT NULL;
 CREATE INDEX ix_file_keys_member_live   ON file_keys(member_id) WHERE revoked_at IS NULL;
 ```
-> `share_id` has no FK until `shares` exists (Phase 2.2); until then every row is a member grant.
+> `share_id` references `shares(id)` since Phase 2.2. A link share adds no row, because its key rides the URL fragment, so every row is still a member grant.
 
 ### structure_keys  (wrapped project and folder keys)
 ```sql
@@ -472,7 +478,7 @@ CREATE TABLE structure_keys (
   project_id   uuid REFERENCES projects(id),
   folder_id    uuid REFERENCES folders(id),
   member_id    uuid REFERENCES users(id),
-  share_id     uuid,                         -- FK added with shares (Phase 2.2)
+  share_id     uuid REFERENCES shares(id),
   key_id       uuid NOT NULL,
   wrapped_key  bytea NOT NULL,               -- the object's key wrapped to the member's public key (HPKE)
   generation   int  NOT NULL DEFAULT 1,

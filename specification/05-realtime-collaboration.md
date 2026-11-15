@@ -105,6 +105,17 @@ public record PresenceDto(string Kind, string? UserId, string? DisplayName); // 
 - `/share/{token}/ws` serves **both read and write links**. Read-only guests receive `OnUpdate`/`OnAwareness` but are rejected via `OnError` on `SubmitUpdate`.
 - Guest-authored updates/snapshots store `author_id = null` ([03](03-data-model.md)).
 
+> Guest relay [P]:
+> `/share/{token}/ws` is the same `RelayHub` as `/hubs/relay`, mapped a second time, so accounts and guests share one room and one roster.
+> A separate hub was rejected, because SignalR groups belong to one hub type and the rooms would split in two.
+> The guest path serves WebSockets only, so the per-IP share-access limit counts one negotiate and one upgrade per connection, where long polling would spend a request per poll.
+> A browser authenticates the upgrade with a guest socket ticket from `POST /share/{token}/socket-ticket`, a native client may send the guest token as bearer.
+> A guest joins only the file of its link share, and `not_found` answers any other file.
+> Its join checks that the share is still live and answers `share_revoked` or `link_expired` otherwise.
+> The periodic re-check (§5.4) closes a guest connection whose share was revoked or has expired, with `OnError(fileId, "share_revoked" | "link_expired", ...)` for each room, because its only credential is gone.
+> A guest whose file went to Trash leaves the room with `not_found`.
+> A guest connection does not end when its 15-minute guest token expires, because the share row checked on every pass is the stronger and the faster cutoff.
+
 ## 5.9 Ordering, durability, conflict
 
 - The server assigns a monotonic `seq` per doc for the encrypted log; CRDT convergence does not depend on order, but `seq` gives the relay a durable cursor and snapshot watermark.

@@ -15,6 +15,9 @@ public enum RevokeReason { Logout, Admin, DeviceRevoked, UserBlocked, Credential
 public enum EphemeralTokenKind
 {
     Mfa, SocketTicket, PasswordReset, Invite, OidcState, OidcHandoff, WebauthnChallenge, TotpEnroll, EmailVerify, EmailCode, StepUp,
+
+    /// <summary>The relay socket ticket of a link guest (08 §8.4): bound to a share instead of a user and a session.</summary>
+    GuestSocketTicket,
 }
 
 /// <summary>Lower-case wire/DB text values of the auth enums.</summary>
@@ -48,7 +51,7 @@ public static class AuthDbValue
         EphemeralTokenKind.OidcState => "oidc_state", EphemeralTokenKind.OidcHandoff => "oidc_handoff",
         EphemeralTokenKind.WebauthnChallenge => "webauthn_challenge", EphemeralTokenKind.TotpEnroll => "totp_enroll",
         EphemeralTokenKind.EmailVerify => "email_verify", EphemeralTokenKind.EmailCode => "email_code",
-        EphemeralTokenKind.StepUp => "step_up",
+        EphemeralTokenKind.StepUp => "step_up", EphemeralTokenKind.GuestSocketTicket => "guest_socket_ticket",
         _ => throw new ArgumentOutOfRangeException(nameof(v)),
     };
 

@@ -47,8 +47,8 @@ public sealed class OperationsTests(PostgresFixture pg)
             // Route constraints ({id:guid}) are server detail; the contract names the bare parameter ({id}).
             var route = "/" + System.Text.RegularExpressions.Regex.Replace(endpoint.RoutePattern.RawText!.TrimStart('/'), @"\{(\w+):[^}]*\}", "{$1}");
             var path = route.StartsWith("/api/v1/", StringComparison.Ordinal) ? route["/api/v1".Length..] : route;
-            // The relay is a SignalR hub and not a REST surface; the contract leaves it out by design (05).
-            if (route.StartsWith("/hubs/", StringComparison.Ordinal)) continue;
+            // The relay is a SignalR hub and not a REST surface, for accounts and guests alike; the contract leaves it out by design (05).
+            if (route.StartsWith("/hubs/", StringComparison.Ordinal) || route.StartsWith("/share/{token}/ws", StringComparison.Ordinal)) continue;
             var methods = endpoint.Metadata.GetMetadata<HttpMethodMetadata>()?.HttpMethods ?? ["GET"];
             foreach (var method in methods)
             {

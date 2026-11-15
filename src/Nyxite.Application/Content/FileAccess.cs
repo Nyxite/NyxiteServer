@@ -1,5 +1,3 @@
-using Microsoft.EntityFrameworkCore;
-using Nyxite.Persistence;
 using Nyxite.Persistence.Entities;
 
 namespace Nyxite.Application.Content;
@@ -21,16 +19,15 @@ public interface IFileAccess
 {
     /// <summary>The effective level of <paramref name="userId"/> on a live <paramref name="file"/>: the maximum over all its paths.</summary>
     Task<FileAccessLevel> LevelAsync(Guid userId, FileEntity file, CancellationToken ct);
+
+    /// <summary>The level of a link guest on a live <paramref name="file"/>: its link share's permission while the share is live.</summary>
+    Task<FileAccessLevel> GuestLevelAsync(Guid shareId, FileEntity file, CancellationToken ct);
 }
 
-/// <summary>
-/// Ownership as the only path to a file, until shares add direct and inherited grants (Phase 2.2). The project must be
-/// live as well, so a project in Trash cuts off its files.
-/// </summary>
-public sealed class OwnerFileAccess(NyxiteDbContext db) : IFileAccess
+/// <summary>Ownership of the project and account shares on the project, a folder above the file or the file (09 §9.5).</summary>
+public sealed class ShareFileAccess(Sharing.ShareAccess access) : IFileAccess
 {
-    public async Task<FileAccessLevel> LevelAsync(Guid userId, FileEntity file, CancellationToken ct) =>
-        await db.Projects.AnyAsync(p => p.Id == file.ProjectId && p.OwnerId == userId && p.DeletedAt == null, ct)
-            ? FileAccessLevel.Write
-            : FileAccessLevel.None;
+    public Task<FileAccessLevel> LevelAsync(Guid userId, FileEntity file, CancellationToken ct) => access.FileLevelAsync(userId, file, ct);
+
+    public Task<FileAccessLevel> GuestLevelAsync(Guid shareId, FileEntity file, CancellationToken ct) => access.GuestLevelAsync(shareId, file, ct);
 }

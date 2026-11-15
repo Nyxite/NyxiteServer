@@ -36,7 +36,7 @@ public sealed class RelayReviewFindingsTests(PostgresFixture pg)
         public ConcurrentDictionary<Guid, bool> Failing { get; } = new();
     }
 
-    private sealed class ScriptedFileAccess(OwnerFileAccess owner, ScriptedAccess script) : IFileAccess
+    private sealed class ScriptedFileAccess(ShareFileAccess owner, ScriptedAccess script) : IFileAccess
     {
         public async Task<FileAccessLevel> LevelAsync(Guid userId, FileEntity file, CancellationToken ct)
         {
@@ -47,6 +47,8 @@ public sealed class RelayReviewFindingsTests(PostgresFixture pg)
                 return remaining > 0 && script.RemainingChecks.TryUpdate(userId, remaining - 1, remaining) ? FileAccessLevel.Write : FileAccessLevel.None;
             return script.Levels.GetValueOrDefault(userId);
         }
+
+        public Task<FileAccessLevel> GuestLevelAsync(Guid shareId, FileEntity file, CancellationToken ct) => owner.GuestLevelAsync(shareId, file, ct);
     }
 
     private static NyxiteApp App(string connectionString, ScriptedAccess script) =>
@@ -54,7 +56,7 @@ public sealed class RelayReviewFindingsTests(PostgresFixture pg)
             configureServices: services =>
             {
                 services.AddSingleton(script);
-                services.AddScoped<OwnerFileAccess>();
+                services.AddScoped<ShareFileAccess>();
                 services.AddScoped<IFileAccess, ScriptedFileAccess>();
             });
 

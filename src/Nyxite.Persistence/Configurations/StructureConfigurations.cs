@@ -121,6 +121,7 @@ internal sealed class FileKeyConfiguration : IEntityTypeConfiguration<FileKeyEnt
         b.Property(x => x.RevokedAt).HasColumnName("revoked_at");
         b.HasOne<FileEntity>().WithMany().HasForeignKey(x => x.FileId).OnDelete(DeleteBehavior.Restrict);
         b.HasOne<UserEntity>().WithMany().HasForeignKey(x => x.MemberId).OnDelete(DeleteBehavior.Restrict);
+        b.HasOne<ShareEntity>().WithMany().HasForeignKey(x => x.ShareId).OnDelete(DeleteBehavior.Restrict);
         b.HasIndex(x => new { x.FileId, x.KeyId, x.MemberId }).IsUnique().HasFilter("member_id IS NOT NULL").HasDatabaseName("uq_file_keys_member");
         b.HasIndex(x => new { x.FileId, x.KeyId, x.ShareId }).IsUnique().HasFilter("share_id IS NOT NULL").HasDatabaseName("uq_file_keys_share");
         b.HasIndex(x => x.MemberId).HasFilter("revoked_at IS NULL").HasDatabaseName("ix_file_keys_member_live");
@@ -151,6 +152,7 @@ internal sealed class StructureKeyConfiguration : IEntityTypeConfiguration<Struc
         b.HasOne<ProjectEntity>().WithMany().HasForeignKey(x => x.ProjectId).OnDelete(DeleteBehavior.Restrict);
         b.HasOne<FolderEntity>().WithMany().HasForeignKey(x => x.FolderId).OnDelete(DeleteBehavior.Restrict);
         b.HasOne<UserEntity>().WithMany().HasForeignKey(x => x.MemberId).OnDelete(DeleteBehavior.Restrict);
+        b.HasOne<ShareEntity>().WithMany().HasForeignKey(x => x.ShareId).OnDelete(DeleteBehavior.Restrict);
         b.HasIndex(x => new { x.ProjectId, x.KeyId, x.MemberId }).IsUnique().HasFilter("project_id IS NOT NULL AND member_id IS NOT NULL")
             .HasDatabaseName("uq_structure_keys_project_member");
         b.HasIndex(x => new { x.FolderId, x.KeyId, x.MemberId }).IsUnique().HasFilter("folder_id IS NOT NULL AND member_id IS NOT NULL")

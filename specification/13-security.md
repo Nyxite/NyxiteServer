@@ -61,6 +61,9 @@ Concrete starting values (tunable):
 
 `429 rate_limited` + `Retry-After`.
 
+> Wired buckets [P]: `POST /shares` (`NYXITE__RateLimiting__Shares__*`, per user), every `/share/{token}*` request including the guest relay handshake (`__ShareAccess__*`, per client IP) and `GET /keys/directory` (`__Directory__*`, per user), next to the auth and enrollment buckets.
+> The edge adds a looser per-IP flood guard in front of `/share/` ([14](14-deployment-and-config.md)), so the server's limit with its `Retry-After` is the one a client normally meets.
+
 ## 13.6 Input & content safety
 
 - Structure/ACL DTOs validated at the edge; domain invariants enforced. **Content is opaque** — the server cannot and does not inspect plaintext ([04](04-rest-api.md)).
@@ -112,6 +115,6 @@ Two-layered: **instant server-ACL cutoff** + **client-driven key rotation** for 
 - HSTS, secure headers, strict CORS (known client origins only). Every response carries `X-Content-Type-Options: nosniff`, `X-Frame-Options: DENY`, `Referrer-Policy: no-referrer`, `Content-Security-Policy: default-src 'none'; frame-ancestors 'none'` and `Cache-Control: no-store`, and `Strict-Transport-Security` when the request arrived over HTTPS. CORS allows only `NYXITE__Network__CorsOrigins` ([14](14-deployment-and-config.md)).
 - Least-privilege DB roles (app role: no audit UPDATE/DELETE; migrations under a separate role).
 - Signed CRDT updates / key-directory entries (**hybrid Ed25519 + ML-DSA-65**) to detect relay tampering and key swaps. **[P]**
-- Secrets never logged; structured logs scrubbed.
+- Secrets never logged; structured logs scrubbed. The hosting diagnostics that log request lines stay below Information **[P]**, because a request line names the link token of `/share/{token}` and the socket ticket of a relay upgrade. nginx keeps those paths out of its access log as well.
 - Dependency/container scanning in CI; pinned base images.
 - Token-signing-key rotation runbook (and the enterprise Keycloak-secret rotation runbook when that profile is on) — no content KEK to rotate.

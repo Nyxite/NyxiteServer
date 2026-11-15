@@ -171,8 +171,12 @@ public sealed class TrashPurger(
                 $"DELETE FROM crdt_updates WHERE crdt_doc_id IN (SELECT crdt_doc_id FROM files WHERE id = ANY({fileIds}) AND crdt_doc_id IS NOT NULL)", ct);
             var versions = await db.Database.ExecuteSqlAsync($"DELETE FROM file_versions WHERE file_id = ANY({fileIds})", ct);
             await db.Database.ExecuteSqlAsync($"DELETE FROM file_keys WHERE file_id = ANY({fileIds})", ct);
-            await db.Database.ExecuteSqlAsync($"DELETE FROM files WHERE id = ANY({fileIds})", ct);
             await db.Database.ExecuteSqlAsync($"DELETE FROM structure_keys WHERE folder_id = ANY({folderIds})", ct);
+            // Shares on what goes go with it, link hashes included: a purged object leaves no grant behind (09 §9.2).
+            var purgedProject = root.Kind == "project" ? root.Id : Guid.Empty;
+            await db.Database.ExecuteSqlAsync(
+                $"DELETE FROM shares WHERE file_id = ANY({fileIds}) OR folder_id = ANY({folderIds}) OR project_id = {purgedProject}", ct);
+            await db.Database.ExecuteSqlAsync($"DELETE FROM files WHERE id = ANY({fileIds})", ct);
             await db.Database.ExecuteSqlAsync($"DELETE FROM folders WHERE id = ANY({folderIds})", ct);
             if (root.Kind == "project")
             {

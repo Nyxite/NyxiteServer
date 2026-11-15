@@ -17,12 +17,16 @@ public sealed class RelayPeer(HubConnection connection) : IAsyncDisposable
     /// <summary>Set when the server closed the connection.</summary>
     public bool Closed { get; private set; }
 
-    public static async Task<RelayPeer> ConnectAsync(NyxiteApp app, string? token, bool webSockets = false)
+    /// <param name="path">The hub path: the account relay, or a guest's <c>/share/{token}/ws</c>.</param>
+    /// <param name="handler">Wraps the test server's handler, for a test that records every request the client sends.</param>
+    /// <param name="upgrade">Sees the URL of the WebSocket upgrade.</param>
+    public static async Task<RelayPeer> ConnectAsync(NyxiteApp app, string? token, bool webSockets = false, string path = RelayHub.Path,
+        Func<HttpMessageHandler, HttpMessageHandler>? handler = null, Action<Uri>? upgrade = null)
     {
         var connection = new HubConnectionBuilder()
-            .WithUrl("http://localhost" + RelayHub.Path, o =>
+            .WithUrl("http://localhost" + path, o =>
             {
-                o.HttpMessageHandlerFactory = _ => app.Server.CreateHandler();
+                o.HttpMessageHandlerFactory = _ => handler is null ? app.Server.CreateHandler() : handler(app.Server.CreateHandler());
                 o.Transports = webSockets
                     ? Microsoft.AspNetCore.Http.Connections.HttpTransportType.WebSockets
                     : Microsoft.AspNetCore.Http.Connections.HttpTransportType.LongPolling;
@@ -30,6 +34,7 @@ public sealed class RelayPeer(HubConnection connection) : IAsyncDisposable
                 o.WebSocketFactory = async (context, ct) =>
                 {
                     var uri = token is null ? context.Uri : new Uri(context.Uri + "&access_token=" + Uri.EscapeDataString(token));
+                    upgrade?.Invoke(uri);
                     return await app.Server.CreateWebSocketClient().ConnectAsync(uri, ct);
                 };
                 if (token is not null) o.AccessTokenProvider = () => Task.FromResult<string?>(token);

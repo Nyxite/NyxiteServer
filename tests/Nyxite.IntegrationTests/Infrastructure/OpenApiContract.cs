@@ -83,6 +83,20 @@ public static class OpenApiContract
         return errors;
     }
 
+    /// <summary>What is wrong with a JSON request body a client would send, measured against the operation's request schema.</summary>
+    public static List<string> CheckRequestBody(JsonObject operation, JsonElement body)
+    {
+        var errors = new List<string>();
+        if (operation["requestBody"]?["content"]?["application/json"]?["schema"] is not { } schema)
+        {
+            errors.Add("the contract documents no JSON request body");
+            return errors;
+        }
+
+        Validate(body, schema, "$", errors);
+        return errors;
+    }
+
     /// <summary>
     /// What differs between a request DTO and the operation's JSON request body: property names in both directions, and
     /// the JSON type of each property.

@@ -106,6 +106,9 @@ public sealed class TokenLifetimes
 
     /// <summary>Relay socket ticket (08 §8.4): single-use and short, because it travels in a URL.</summary>
     public TimeSpan SocketTicket { get; set; } = TimeSpan.FromSeconds(60);
+
+    /// <summary>Guest share-session token (08 §8.2): stateless, renewable while the link share is live.</summary>
+    public TimeSpan GuestSession { get; set; } = TimeSpan.FromMinutes(15);
 }
 
 /// <summary><c>NYXITE__Auth__WebAuthn__*</c>. Passkey flows answer <c>503</c> until <see cref="RelyingPartyId"/> is set.</summary>

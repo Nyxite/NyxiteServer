@@ -24,6 +24,7 @@ public static class ServiceCollectionExtensions
         services.AddSingleton<TotpCodes>();
         services.AddSingleton<OneTimeCodes>();
         services.AddSingleton<AccessTokenService>();
+        services.AddSingleton<GuestTokenService>();
         services.AddSingleton<KeycloakOidcProvider>();
         services.AddSingleton<ExternalIdentityProviderResolver>();
         services.AddScoped<IEphemeralTokenStore, PostgresEphemeralTokenStore>();
@@ -52,7 +53,11 @@ public static class ServiceCollectionExtensions
         services.AddOptions<Content.RelayOptions>().Bind(configuration.GetSection(Content.RelayOptions.Section))
             .Validate(o => o.AccessRecheckInterval > TimeSpan.Zero, "Relay:AccessRecheckInterval must be positive.")
             .ValidateOnStart();
-        services.AddScoped<Content.IFileAccess, Content.OwnerFileAccess>();
+        services.AddScoped<Sharing.ShareAccess>();
+        services.AddScoped<Content.IFileAccess, Content.ShareFileAccess>();
+        services.AddScoped<Sharing.ShareService>();
+        services.AddScoped<Sharing.KeyGrantService>();
+        services.AddScoped<Sharing.GuestShareService>();
         services.AddScoped<Content.ContentService>();
         services.AddScoped<Content.CrdtLogPruner>();
         services.AddScoped<Content.BlobCollector>();

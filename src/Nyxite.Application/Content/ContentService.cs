@@ -21,6 +21,16 @@ public interface IRelayNotifier
     Task UpdatesStoredAsync(Guid fileId, IReadOnlyList<CrdtUpdateDto> updates, CancellationToken ct);
 }
 
+/// <summary>
+/// Who acts on content: an account, or a link guest through its share (09 §9.4). A guest principal carries the
+/// <c>share_id</c> claim of its guest token and nothing else, so it can never pass for an account.
+/// </summary>
+public readonly record struct ContentActor(Guid? UserId, Guid? ShareId)
+{
+    public static ContentActor Of(ClaimsPrincipal principal) =>
+        principal.GuestShareId() is { } shareId ? new ContentActor(null, shareId) : new ContentActor(principal.UserId(), null);
+}
+
 /// <summary>The outcome of a blob upload: the stored version, and the winning head when it lost a concurrent write.</summary>
 public sealed record BlobWriteResult(VersionDto Version, VersionDto? Winner);
 
@@ -57,16 +67,16 @@ public sealed class ContentService(
     public async Task<BlobWriteResult> PutBlobAsync(ClaimsPrincipal principal, Guid fileId, long parentSeq, string? contentHash, Guid keyId,
         StagedBlob ciphertext, CancellationToken ct)
     {
-        var userId = await WriterAsync(principal, ct);
+        var actor = await WriterAsync(principal, ct);
         var hash = ContentHash(contentHash);
         await using var tx = await db.Database.BeginTransactionAsync(ct);
-        var file = await LockFileAsync(userId, fileId, ct);
+        var file = await LockFileAsync(actor, fileId, ct);
         if (ContentTypes.IsCrdt(file.ContentType)) throw AuthException.Validation("A text file is written through its update log and snapshots, not as a blob.");
-        await CheckUploadAsync(file, userId, keyId, ciphertext, ct);
+        await CheckUploadAsync(file, keyId, ciphertext, ct);
 
         var head = await HeadAsync(file, ct);
         var wins = parentSeq == (head?.Seq ?? 0);
-        var version = await AddVersionAsync(file, userId, hash, keyId, ciphertext, crdtSeq: null, becomesHead: wins, ct);
+        var version = await AddVersionAsync(file, actor.UserId, hash, keyId, ciphertext, crdtSeq: null, becomesHead: wins, ct);
         await feed.VersionAsync(file, version, isHead: wins, ct);
         await db.SaveChangesAsync(ct);
         await tx.CommitAsync(ct);
@@ -76,7 +86,7 @@ public sealed class ContentService(
     /// <summary>The head ciphertext, or null when the caller's copy named by <paramref name="ifNoneMatch"/> is current.</summary>
     public async Task<BlobRead?> ReadHeadAsync(ClaimsPrincipal principal, Guid fileId, string? ifNoneMatch, CancellationToken ct)
     {
-        var file = await FileAsync(principal.UserId(), fileId, ct);
+        var file = await FileAsync(ContentActor.Of(principal), fileId, ct);
         var head = await HeadAsync(file, ct) ?? throw AuthException.NotFound();
         if (ifNoneMatch is not null && ifNoneMatch.Trim().Trim('"') == Base64UrlCodec.Encode(head.ContentHash)) return null;
         return await OpenAsync(head, file, ct);
@@ -87,7 +97,7 @@ public sealed class ContentService(
     public async Task<(IReadOnlyList<VersionDto> Items, string? NextCursor)> ListVersionsAsync(ClaimsPrincipal principal, Guid fileId, string? cursor,
         int? limit, CancellationToken ct)
     {
-        var file = await FileAsync(principal.UserId(), fileId, ct);
+        var file = await FileAsync(ContentActor.Of(principal), fileId, ct);
         if (limit is < 1 or > MaxPageSize) throw AuthException.Validation($"limit must be 1 to {MaxPageSize}.");
         var take = limit ?? DefaultPageSize;
         var before = long.MaxValue;
@@ -110,13 +120,13 @@ public sealed class ContentService(
 
     public async Task<VersionDto> GetVersionAsync(ClaimsPrincipal principal, Guid fileId, long seq, CancellationToken ct)
     {
-        var file = await FileAsync(principal.UserId(), fileId, ct);
+        var file = await FileAsync(ContentActor.Of(principal), fileId, ct);
         return ToDto(await VersionAsync(fileId, seq, ct), file);
     }
 
     public async Task<BlobRead> ReadVersionAsync(ClaimsPrincipal principal, Guid fileId, long seq, CancellationToken ct)
     {
-        var file = await FileAsync(principal.UserId(), fileId, ct);
+        var file = await FileAsync(ContentActor.Of(principal), fileId, ct);
         return await OpenAsync(await VersionAsync(fileId, seq, ct), file, ct);
     }
 
@@ -126,12 +136,12 @@ public sealed class ContentService(
     /// </summary>
     public async Task RecordRestoreAsync(ClaimsPrincipal principal, Guid fileId, RestoreRequest body, RequestInfo request, CancellationToken ct)
     {
-        var userId = await WriterAsync(principal, ct);
+        var actor = await WriterAsync(principal, ct);
         await using var tx = await db.Database.BeginTransactionAsync(ct);
-        var file = await LockFileAsync(userId, fileId, ct);
+        var file = await LockFileAsync(actor, fileId, ct);
         await VersionAsync(fileId, body.Seq, ct);
         file.PendingRestoreSeq = body.Seq;
-        audit.Add("version.restore", userId, request, targetType: "file", targetId: fileId, detail: new { seq = body.Seq });
+        audit.Add("version.restore", actor.UserId, request, kind: actor.UserId is null ? ActorKind.Guest : ActorKind.User, targetType: "file", targetId: fileId, detail: new { seq = body.Seq });
         await db.SaveChangesAsync(ct);
         await tx.CommitAsync(ct);
     }
@@ -145,7 +155,7 @@ public sealed class ContentService(
     /// </summary>
     public async Task<UpdateAcksDto> SubmitUpdatesAsync(ClaimsPrincipal principal, Guid fileId, IReadOnlyList<SubmitUpdateItem> updates, CancellationToken ct)
     {
-        var userId = await WriterAsync(principal, ct);
+        var actor = await WriterAsync(principal, ct);
         if (updates.Count is 0 or > MaxUpdatesPerSubmit) throw AuthException.Validation($"updates must hold 1 to {MaxUpdatesPerSubmit} entries.");
         var frames = new List<byte[]>(updates.Count);
         foreach (var update in updates)
@@ -157,7 +167,7 @@ public sealed class ContentService(
         }
 
         await using var tx = await db.Database.BeginTransactionAsync(ct);
-        var file = await LockFileAsync(userId, fileId, ct);
+        var file = await LockFileAsync(actor, fileId, ct);
         if (file.CrdtDocId is not { } docId) throw AuthException.Validation("Only text files have an update log.");
         if (file.SyncPolicy == SyncPolicies.Excluded) throw ExcludedContent();
         var currentKey = await CurrentKeyIdAsync(file, ct);
@@ -183,11 +193,11 @@ public sealed class ContentService(
             known[update.ClientUpdateId] = seq;
             db.CrdtUpdates.Add(new CrdtUpdateEntity
             {
-                CrdtDocId = docId, Seq = seq, UpdateEnc = frames[i], KeyId = update.KeyId, AuthorId = userId,
+                CrdtDocId = docId, Seq = seq, UpdateEnc = frames[i], KeyId = update.KeyId, AuthorId = actor.UserId,
                 ClientUpdateId = update.ClientUpdateId, CreatedAt = now,
             });
             acks.Add(new UpdateAckDto(update.ClientUpdateId, seq));
-            stored.Add(new CrdtUpdateDto(seq, update.KeyId, update.UpdateEnc!, userId, now));
+            stored.Add(new CrdtUpdateDto(seq, update.KeyId, update.UpdateEnc!, actor.UserId, now));
         }
 
         // New numbers of one submit are consecutive, because the file row is locked; resends add none.
@@ -202,7 +212,7 @@ public sealed class ContentService(
     /// <summary>Updates after <paramref name="since"/> in order. Updates a snapshot covers may be pruned; a client then starts from the snapshot.</summary>
     public async Task<CrdtUpdatesDto> ReadUpdatesAsync(ClaimsPrincipal principal, Guid fileId, long since, int? limit, CancellationToken ct)
     {
-        var file = await FileAsync(principal.UserId(), fileId, ct);
+        var file = await FileAsync(ContentActor.Of(principal), fileId, ct);
         if (file.CrdtDocId is not { } docId) throw AuthException.Validation("Only text files have an update log.");
         if (since < 0 || limit is < 1 or > MaxLogPage) throw AuthException.Validation($"since must not be negative and limit must be 1 to {MaxLogPage}.");
         var take = limit ?? MaxPageSize;
@@ -223,17 +233,17 @@ public sealed class ContentService(
     public async Task<VersionDto> PutSnapshotAsync(ClaimsPrincipal principal, Guid fileId, long crdtSeq, string? contentHash, Guid keyId,
         StagedBlob ciphertext, CancellationToken ct)
     {
-        var userId = await WriterAsync(principal, ct);
+        var actor = await WriterAsync(principal, ct);
         var hash = ContentHash(contentHash);
         await using var tx = await db.Database.BeginTransactionAsync(ct);
-        var file = await LockFileAsync(userId, fileId, ct);
+        var file = await LockFileAsync(actor, fileId, ct);
         if (file.CrdtDocId is null) throw AuthException.Validation("Only text files have snapshots.");
-        await CheckUploadAsync(file, userId, keyId, ciphertext, ct);
+        await CheckUploadAsync(file, keyId, ciphertext, ct);
         if (crdtSeq < 0 || crdtSeq > file.CrdtHeadSeq) throw AuthException.Validation("The snapshot names an update the log does not have.");
         var head = await HeadAsync(file, ct);
         if (head?.CrdtSeq > crdtSeq) throw AuthException.Conflict("A newer snapshot is already stored.");
 
-        var version = await AddVersionAsync(file, userId, hash, keyId, ciphertext, crdtSeq, becomesHead: true, ct);
+        var version = await AddVersionAsync(file, actor.UserId, hash, keyId, ciphertext, crdtSeq, becomesHead: true, ct);
         await feed.VersionAsync(file, version, isHead: true, ct);
         await db.SaveChangesAsync(ct);
         await tx.CommitAsync(ct);
@@ -242,7 +252,7 @@ public sealed class ContentService(
 
     public async Task<BlobRead> ReadSnapshotAsync(ClaimsPrincipal principal, Guid fileId, CancellationToken ct)
     {
-        var file = await FileAsync(principal.UserId(), fileId, ct);
+        var file = await FileAsync(ContentActor.Of(principal), fileId, ct);
         if (file.CrdtDocId is null) throw AuthException.NotFound();
         return await OpenAsync(await HeadAsync(file, ct) ?? throw AuthException.NotFound(), file, ct);
     }
@@ -250,7 +260,7 @@ public sealed class ContentService(
     /// <summary>The head snapshot of a text file, for the relay's join answer; null when there is none yet.</summary>
     public async Task<VersionDto?> SnapshotPointerAsync(ClaimsPrincipal principal, Guid fileId, CancellationToken ct)
     {
-        var file = await FileAsync(principal.UserId(), fileId, ct);
+        var file = await FileAsync(ContentActor.Of(principal), fileId, ct);
         return file.CrdtDocId is null || await HeadAsync(file, ct) is not { } head ? null : ToDto(head, file);
     }
 
@@ -262,7 +272,7 @@ public sealed class ContentService(
 
     // ---------------------------------------------------------------- shared steps
 
-    private async Task CheckUploadAsync(FileEntity file, Guid userId, Guid keyId, StagedBlob ciphertext, CancellationToken ct)
+    private async Task CheckUploadAsync(FileEntity file, Guid keyId, StagedBlob ciphertext, CancellationToken ct)
     {
         if (file.SyncPolicy == SyncPolicies.Excluded) throw ExcludedContent();
         if (ciphertext.Length > _options.MaxInlineBlobBytes) throw PayloadTooLarge("The upload is larger than the inline limit.");
@@ -275,7 +285,7 @@ public sealed class ContentService(
             throw PayloadTooLarge("The upload would exceed the storage quota.");
     }
 
-    private async Task<FileVersionEntity> AddVersionAsync(FileEntity file, Guid userId, byte[] contentHash, Guid keyId, StagedBlob ciphertext,
+    private async Task<FileVersionEntity> AddVersionAsync(FileEntity file, Guid? authorId, byte[] contentHash, Guid keyId, StagedBlob ciphertext,
         long? crdtSeq, bool becomesHead, CancellationToken ct)
     {
         // The blob is named before the row that points to it. A crash in between leaves an unreferenced blob for the
@@ -288,7 +298,7 @@ public sealed class ContentService(
         var version = new FileVersionEntity
         {
             Id = Guid.CreateVersion7(now), FileId = file.Id, Seq = ++file.VersionSeq, ContentHash = contentHash, BlobRef = reference.Address.Hex,
-            SizeCipher = reference.Size, KeyId = keyId, Layout = "single", AuthorId = userId, CrdtSeq = crdtSeq, CreatedAt = now,
+            SizeCipher = reference.Size, KeyId = keyId, Layout = "single", AuthorId = authorId, CrdtSeq = crdtSeq, CreatedAt = now,
         };
         db.FileVersions.Add(version);
         if (becomesHead)
@@ -340,21 +350,24 @@ public sealed class ContentService(
     // ---------------------------------------------------------------- reach
 
     /// <summary>A live file the caller can reach, at least to read (09 §9.5). Without reach it does not exist for them.</summary>
-    private async Task<FileEntity> FileAsync(Guid userId, Guid id, CancellationToken ct)
+    private async Task<FileEntity> FileAsync(ContentActor actor, Guid id, CancellationToken ct)
     {
         var file = await db.Files.AsNoTracking().SingleOrDefaultAsync(f => f.Id == id && f.DeletedAt == null, ct);
-        if (file is null || await access.LevelAsync(userId, file, ct) == FileAccessLevel.None) throw AuthException.NotFound();
+        if (file is null || await LevelAsync(actor, file, ct) == FileAccessLevel.None) throw AuthException.NotFound();
         return file;
     }
+
+    private Task<FileAccessLevel> LevelAsync(ContentActor actor, FileEntity file, CancellationToken ct) =>
+        actor.ShareId is { } shareId ? access.GuestLevelAsync(shareId, file, ct) : access.LevelAsync(actor.UserId!.Value, file, ct);
 
     /// <summary>
     /// The same file for a write, tracked and locked for the transaction: writes to one file are ordered one after the
     /// other. Read reach without write reach is <c>403 acl_denied</c>, because the caller already knows the file exists.
     /// </summary>
-    private async Task<FileEntity> LockFileAsync(Guid userId, Guid id, CancellationToken ct)
+    private async Task<FileEntity> LockFileAsync(ContentActor actor, Guid id, CancellationToken ct)
     {
         var file = (await db.Files.FromSql($"SELECT * FROM files WHERE id = {id} AND deleted_at IS NULL FOR UPDATE").ToListAsync(ct)).SingleOrDefault();
-        return file is null ? throw AuthException.NotFound() : await access.LevelAsync(userId, file, ct) switch
+        return file is null ? throw AuthException.NotFound() : await LevelAsync(actor, file, ct) switch
         {
             FileAccessLevel.Write => file,
             FileAccessLevel.Read => throw AclDenied(),
@@ -369,13 +382,25 @@ public sealed class ContentService(
         return file is null ? FileAccessLevel.None : await access.LevelAsync(userId, file, ct);
     }
 
-    /// <summary>The caller as someone who may write content: on an active device and not blocked (04 "structure").</summary>
-    private async Task<Guid> WriterAsync(ClaimsPrincipal principal, CancellationToken ct)
+    /// <summary>A guest's level on a live file, for the relay's periodic re-check.</summary>
+    public async Task<FileAccessLevel> GuestAccessLevelAsync(Guid shareId, Guid fileId, CancellationToken ct)
     {
-        var userId = principal.UserId();
+        var file = await db.Files.AsNoTracking().SingleOrDefaultAsync(f => f.Id == fileId && f.DeletedAt == null, ct);
+        return file is null ? FileAccessLevel.None : await access.GuestLevelAsync(shareId, file, ct);
+    }
+
+    /// <summary>
+    /// The caller as someone who may write content: an account on an active device and not blocked (04 "structure"), or
+    /// a link guest, whose write permission is checked with the file. A guest writes with <c>author_id = null</c>.
+    /// </summary>
+    private async Task<ContentActor> WriterAsync(ClaimsPrincipal principal, CancellationToken ct)
+    {
+        var actor = ContentActor.Of(principal);
+        if (actor.ShareId is not null) return actor;
+        var userId = actor.UserId!.Value;
         await guard.RequireActiveDeviceAsync(principal, ct);
         var status = await db.Users.Where(u => u.Id == userId).Select(u => u.Status).SingleAsync(ct);
-        return status == UserStatus.Blocked ? throw new AuthException(403, "account_blocked", "This account is blocked for changes.") : userId;
+        return status == UserStatus.Blocked ? throw new AuthException(403, "account_blocked", "This account is blocked for changes.") : actor;
     }
 
     private static AuthException ExcludedContent() => new(409, "excluded_content", "This file is excluded from sync; the server takes no content for it.");

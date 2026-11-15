@@ -49,9 +49,51 @@ Backed by `shares` ([03](03-data-model.md)); wrapped keys for account shares liv
 
 > The link **is** the secret: anyone with the full URL can decrypt. Mitigations: high-entropy token, short `expires_at`, revocation, rate-limited access, and the usual fragment caveats (browser history). **[P]**
 
+## 9.4a Points pinned in Phase 2.2 **[P]**
+
+These fill gaps of §9.3 and §9.4 and are recorded as decisions in the planning repo (`OPEN-DECISIONS.md`, "Sharing, points pinned during Phase 2.2").
+The fixtures `sharing.json` (P2.2-CORE-1) hold one example of each.
+
+- Link token.
+  The client mints 32 random bytes and encodes them as 43 base64url characters, well above the 128-bit minimum of §9.8.
+  `POST /shares` sends only `linkTokenHash`, the SHA-256 of the token's ASCII characters, the hashing every other token of this server uses, so the server never sees the token before a visitor presents it.
+  Letting the server mint the token was rejected, because the server would then hold the secret at creation.
+- Share URL.
+  `https://{host}/share/{token}#k={base64url(fileKey)}`, the file key of the current generation as 32 bytes.
+  The fragment is never part of a request, and `GET /share/{token}` tells the guest the `keyId` its fragment key must match.
+- A link share targets one file.
+  Its fragment carries one file key, which opens no other file, so a folder or project link would be a link without keys.
+  `POST /shares` answers `400` for a link to a folder or project.
+- Object-key wraps.
+  A client wraps the key of a file, folder or project to a member with hybrid HPKE, `info = "nyxite object key v1"` and `aad = object_id(16) ‖ key_id(16)`.
+  The AAD binds a wrap to its object and its generation, so the server cannot hand a member one object's wrap as another's.
+  The server stores the result as opaque bytes and never opens it.
+- Subtree fan-out.
+  Every folder has its own key (ST-1), so `POST /files/keys:batch` takes folder keys as well as file keys, each grant with exactly one of `fileId` and `folderId`.
+  The share itself carries the target's key in `wrappedKeys`, the current generation at least.
+  A batch entry is applied when the wrap is stored or was already stored, so a client drains its resumable queue without an `Idempotency-Key`, and rejected with `not_found`, `acl_denied`, `validation_failed` or `not_shared` otherwise.
+- Who shares.
+  The project owner creates, changes and revokes shares and hands out keys, as `resource:share` of [08 §8.5](08-authentication.md) says.
+  A grantee may remove its own share, which leaves the object live for everyone else (DL-3).
+  A grantee with read reach that tries to share gets `403 acl_denied`.
+- What a write share covers.
+  Content: blobs, the update log, snapshots and the relay.
+  Structure changes in a shared tree (create, rename, move, delete) stay with the owner and answer `403 acl_denied`, because an object a grantee creates would need an owner, a quota and wraps to every member, which nothing specifies yet.
+- Shared with me.
+  `GET /shares` without a target lists the live account shares granted to the caller, so a recipient finds what it can open.
+  Shared projects are not mixed into `GET /projects`, which stays the list of owned projects.
+- One live account share per target and grantee.
+  A second one answers `409 conflict`, and a change goes through `PATCH /shares/{id}`.
+- Expiry and purge.
+  A share counts while `revoked_at` is null and `expires_at` is null or in the future.
+  The purge of an object deletes its shares, link hashes included, so no grant outlives what it grants.
+
 ## 9.5 Permission resolution
 
 Effective permission for (principal, resource) = **max** over: ownership, direct grants, inherited folder/project grants, and (for guests) the resolving link's permission. The **server ACL** uses this to gate ciphertext access and relay writes; the **crypto layer** independently requires the right file key to decrypt. Admins get **structure/usage only — never content** (no key exists for them; no break-glass — [12](12-administration.md)).
+
+> Implementation [P]: `ShareAccess` resolves this maximum for the content seam `IFileAccess` and for the structure endpoints alike, so every checkpoint, the relay's join, submit and periodic re-check included, sees one answer.
+> Ownership is checked first, so an owner's checks cost the query they cost before shares existed.
 
 > **No reach → `404`, not `403`.** When the resolved permission is **none** (the caller has no ownership/grant/link path to the addressed file/folder/project), the server returns **`404 not_found`** — identical to a non-existent id — so existence is never disclosed by an authz failure ([13 §13.6a](13-security.md)). `403 acl_denied` is used only when the caller **has read reach but lacks the action** (e.g. read-only collaborator writing, or a `blocked` account writing its own file), since existence is already known to them.
 

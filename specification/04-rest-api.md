@@ -80,7 +80,7 @@ Rules of the structure endpoints **[P]**:
 - **Trash.** `GET /trash` lists what the caller deleted directly and can still restore, newest first, each entry with the object, the end of its Trash window (`NYXITE__Retention__TrashWindowDays`) and the counts of folders and files that went along. What only went along is not listed on its own. `POST /trash/{projects|folders|files}/{id}/restore` brings an entry back with what its delete took along, as one audited event. The project and the folder it lies in must be live, otherwise `409 conflict` and the client restores those first. Restoring into the project root instead was rejected, because the object would reappear where nobody put it. Restoring something that is live answers `200` and changes nothing. After the window the entry answers `404`, because the grace period belongs to an admin (DL-4). The paths are under `/trash`, because `POST /files/{id}/restore` already restores a version.
 - **Keys of many objects.** Every returned project, folder and file carries `wrappedKey`, the caller's wrap of the object's current key, so a fresh device lists a tree without a single key request. `?keys=false` on any read leaves it out, for a client whose cache is warm, which saves about 1.6 KB per object. `POST /keys/lookup` then returns the wrapped keys of up to 500 named objects, all live generations, also for objects in Trash, and leaves out what the caller cannot reach. Keys only in a separate request were rejected, because every first listing would cost a second round trip and clients would hold objects without keys.
 - **Who may write.** A session on an **active device**, because only a device that holds the identity key can have produced the names and wrapped keys (`403 device_not_active` otherwise), and an account that is not blocked (`403 account_blocked`). Reading needs a full session only.
-- **Reach.** Until shares exist (Phase 2.2) reach is ownership of the project. Everything else answers `404`.
+- **Reach.** Ownership of the project, or a live account share on the project, a folder above the object or the object ([09 §9.5](09-sharing-and-acl.md)). Everything else answers `404`. A grantee's structure change answers `403 acl_denied`, because a write share covers content and the structure stays with the owner ([09 §9.4a](09-sharing-and-acl.md)). A project listing of a grantee shows the folders and files its shares reach.
 - **Paging.** Lists run in id order, which for UUIDv7 is creation order, with the standard envelope and `limit` 1 to 200, default 50.
 
 ### File content (ciphertext)
@@ -120,7 +120,14 @@ Rules of the content endpoints **[P]**:
 | `GET` | `/files/{id}/keys` | Get the caller's **wrapped** file key(s) for this file (to unwrap locally) |
 | `POST` | `/files/{id}/keys` | Upload wrapped file key(s) for members (used when sharing / rotating) |
 | `POST` | `/files/{id}/keys/rotate` | Commit a rotation. Body `{ newKeyId, generation, wrappedKeys[], newHeadRef }`. The server commits **only if** `generation == current + 1`, else `409 conflict` (another rotation won). In-flight CRDT updates tagged with the old `key_id` are accepted until commit, then rejected `412 key_generation_stale` |
-| `POST` | `/files/keys:batch` | Batch wrap (subtree share fan-out). Body `{ grants: [ { fileId, keyId, memberId, wrappedKey } ] }`; **idempotent**, with **partial-success** reporting per item ([09 §9.3](09-sharing-and-acl.md)) |
+| `POST` | `/files/keys:batch` | Batch wrap (subtree share fan-out). Body `{ grants: [ { fileId \| folderId, keyId, memberId, wrappedKey, algId? } ] }`, at most 500, **idempotent**, with **partial-success** reporting per item ([09 §9.3, §9.4a](09-sharing-and-acl.md)) |
+
+Rules of the wrapped-key endpoints **[P]**:
+
+- Only the project owner hands out keys, from a session on an active device, and only to a member that owns the project or reaches the object through a live share. A wrap must name a key and generation the object has.
+- `POST /files/{id}/keys` is atomic, `{ wrappedKeys: [...] }` answers `204`, and any bad wrap makes it `400`. The batch judges each grant on its own and answers `{ results: [ { fileId, folderId, status, error } ] }` in request order, `status` `applied` or `rejected`.
+- Both are idempotent without an `Idempotency-Key`: a wrap of a key the member already has is left as it is, so a retry cannot store a second copy.
+- `POST /files/{id}/keys/rotate` is Phase 2.3 (P2.3-SRV-1). Its contract is pinned by the P2.2-CORE-1 fixtures, and the server does not serve it before then. The `412 key_generation_stale` it relies on already holds: every update and upload must be sealed with the file's current key.
 
 ### Keys, devices, recovery (E2EE)
 | Method | Path | Purpose |
@@ -148,10 +155,10 @@ Rules of the content endpoints **[P]**:
 ### Shares
 | Method | Path | Purpose |
 |--------|------|---------|
-| `GET` | `/shares?targetType={file\|folder\|project}&targetId={id}` | List shares on a target |
-| `POST` | `/shares` | Create share. Account share: include wrapped key(s). Link share: server stores token hash only (key rides the URL fragment, never sent) |
-| `PATCH` | `/shares/{id}` | Change permission / expiry |
-| `DELETE` | `/shares/{id}` | Revoke (instant ACL cutoff; client rotates key separately) |
+| `GET` | `/shares?targetType={file\|folder\|project}&targetId={id}` | List shares on a target (owner only), and without a target, the live account shares granted to the caller. Paginated, revoked shares left out |
+| `POST` | `/shares` | Create share (owner, active device, `Idempotency-Key`, 30/min/user). Account share: include the target's wrapped key(s). Link share: a file only, server stores token hash only (key rides the URL fragment, never sent) ([09 §9.4a](09-sharing-and-acl.md)) |
+| `PATCH` | `/shares/{id}` | Change permission / expiry (owner only) |
+| `DELETE` | `/shares/{id}` | Revoke (instant ACL cutoff; client rotates key separately). The owner revokes, a grantee removes its own share (DL-3), and repeating it answers `204` |
 
 ### Groups (enterprise/family file-sharing)
 Group-key layer on the existing membership model ([03 §3.2b](03-data-model.md), [07 §7.2a](07-encryption.md), [09 §9.9](09-sharing-and-acl.md)). All bodies carry **opaque wrapped bytes and public keys only** — no key column, no plaintext name. Existence-hiding on `{id}` (no reach → `404`). Steps P4.4-SRV-1..4.
@@ -277,12 +284,20 @@ Unauthenticated, token-scoped; the **decryption key is in the URL fragment**, ne
 
 | Method | Path | Purpose |
 |--------|------|---------|
-| `GET` | `/share/{token}` | Resolve a link → guest bootstrap (serves the guest client; fragment key used client-side) |
+| `GET` | `/share/{token}` | Resolve a link → guest bootstrap as JSON: the shared file's ciphertext metadata (`nameEnc`, `contentType`, the current `keyId` the fragment key must match, `currentVersionSeq`, `crdtDocId`) and a fresh guest token. A browser navigation to the same path is the web client's guest shell, routed there by the edge ([14](14-deployment-and-config.md)) |
 | `POST` | `/share/{token}/session` | Issue or **renew** the 15-minute guest share-session token (JWT `typ: nyx-guest+jwt`, [08 §8.2](08-authentication.md)); every call re-checks the `shares` row, so a revoked share stops renewals at once (`410`) |
-| `GET` | `/share/{token}/blob` | Serve **ciphertext** if the link is read/write |
+| `GET` | `/share/{token}/blob` | Serve **ciphertext** if the link is read/write: the head version with the headers of `GET /files/{id}/blob`, and `Nyxite-Snapshot-Seq` for a text file. Needs the guest token of this link |
+| `POST` | `/share/{token}/socket-ticket` | Mint a single-use 60 s guest socket ticket from the guest token, for the `access_token` query value of the relay upgrade ([08 §8.4](08-authentication.md)) |
 | `WS` | `/share/{token}/ws` | Guest WebSocket into the encrypted relay — serves **both read and write links**. Read-only guests receive `OnUpdate`/`OnAwareness` but are rejected (`OnError`) on `SubmitUpdate` ([05 §5.8](05-realtime-collaboration.md)) |
 
 `{token}` validated against `shares.link_token_hash`; expired/revoked → `410`. Guests get a short-lived relay-scoped session token; they **never** receive a key from the server ([09 §9.4](09-sharing-and-acl.md)).
+
+Rules of the public share endpoints **[P]**:
+
+- A token that is not 43 base64url characters, or that was never issued, answers `404`. One that was issued answers `410 share_revoked` or `410 link_expired` once revoked or expired, on every endpoint, and a shared file in Trash answers `404`.
+- The link token in the path is the credential of the bootstrap and of `POST /share/{token}/session`. Blob and socket ticket need the guest token, and a guest token is accepted only on the paths of its own link. It is never accepted under `/api/v1` or on `/hubs/relay`, and an access token is never accepted here, because the two `typ` values differ.
+- Every `/share/{token}*` request counts against one bucket of 30 per minute per client IP, the relay handshake included ([13 §13.5](13-security.md)).
+- Audit: the bootstrap and every blob fetch write `share.link_access`, a renewal writes `auth.guest_session`, each with the share as target and the request's IP and user agent, never the token, its hash or a key.
 
 ## 4.9 Support relay endpoints
 

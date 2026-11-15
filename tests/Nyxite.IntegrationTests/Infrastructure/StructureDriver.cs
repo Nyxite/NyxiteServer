@@ -11,10 +11,10 @@ namespace Nyxite.IntegrationTests.Infrastructure;
 /// Drives the structure endpoints the way a client does (server 04 "structure"): it allocates the id, makes the
 /// object's key, seals the name with it and wraps the key to its own X-Wing key, so tests can also open what comes back.
 /// </summary>
-public sealed class StructureDriver(HttpClient client)
+public sealed class StructureDriver(HttpClient client, byte[]? kemSeed = null)
 {
-    /// <summary>The client's key-wrapping seed. The server never sees it.</summary>
-    private readonly byte[] _kemSeed = RandomNumberGenerator.GetBytes(XWing.SeedSize);
+    /// <summary>The client's key-wrapping seed, whose public key the account publishes. The server never sees it.</summary>
+    private readonly byte[] _kemSeed = kemSeed ?? RandomNumberGenerator.GetBytes(XWing.SeedSize);
 
     public sealed record Sealed(Guid Id, Guid KeyId, byte[] Key);
 
@@ -31,7 +31,7 @@ public sealed class StructureDriver(HttpClient client)
     public object Wrap(Sealed s) => new
     {
         keyId = s.KeyId,
-        ciphertext = Base64UrlCodec.Encode(HybridHpke.Seal(XWing.PublicKeyFromSeed(_kemSeed), "nyxite object key"u8, s.Id.ToByteArray(bigEndian: true), s.Key)),
+        ciphertext = Base64UrlCodec.Encode(ObjectKeyWrap.Seal(XWing.PublicKeyFromSeed(_kemSeed), s.Id, s.KeyId, s.Key)),
         generation = 1,
     };
 
@@ -89,7 +89,7 @@ public sealed class StructureDriver(HttpClient client)
     {
         var item = await (await GetAsync($"/{kind}/{id}")).JsonAsync();
         var wrapped = (await (await GetAsync($"/{kind}/{id}/keys")).JsonAsync()).GetProperty("items")[0];
-        var key = HybridHpke.Open(_kemSeed, "nyxite object key"u8, id.ToByteArray(bigEndian: true), Base64UrlCodec.Decode(wrapped.GetProperty("ciphertext").GetString()!));
+        var key = ObjectKeyWrap.Open(_kemSeed, id, wrapped.GetProperty("keyId").GetGuid(), Base64UrlCodec.Decode(wrapped.GetProperty("ciphertext").GetString()!));
         var aad = NyxcFrame.BuildAad(wrapped.GetProperty("keyId").GetGuid(), id, ObjectKind.Name);
         return Encoding.UTF8.GetString(NyxcFrame.Open(key, Base64UrlCodec.Decode(item.GetProperty("nameEnc").GetString()!), aad));
     }
@@ -99,7 +99,7 @@ public sealed class StructureDriver(HttpClient client)
     {
         var id = item.GetProperty("id").GetGuid();
         var wrapped = item.GetProperty("wrappedKey");
-        var key = HybridHpke.Open(_kemSeed, "nyxite object key"u8, id.ToByteArray(bigEndian: true), Base64UrlCodec.Decode(wrapped.GetProperty("ciphertext").GetString()!));
+        var key = ObjectKeyWrap.Open(_kemSeed, id, wrapped.GetProperty("keyId").GetGuid(), Base64UrlCodec.Decode(wrapped.GetProperty("ciphertext").GetString()!));
         var aad = NyxcFrame.BuildAad(wrapped.GetProperty("keyId").GetGuid(), id, ObjectKind.Name);
         return Encoding.UTF8.GetString(NyxcFrame.Open(key, Base64UrlCodec.Decode(item.GetProperty("nameEnc").GetString()!), aad));
     }

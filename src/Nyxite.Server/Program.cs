@@ -27,6 +27,10 @@ if (!builder.Environment.IsDevelopment())
         ActivityTrackingOptions.TraceId | ActivityTrackingOptions.SpanId);
 }
 
+// The request line names the link token of /share/{token} and the socket ticket of a relay upgrade, both secrets, so
+// the hosting diagnostics that log it stay below Information (13 §13.9 "secrets never logged").
+builder.Logging.AddFilter("Microsoft.AspNetCore.Hosting.Diagnostics", LogLevel.Warning);
+
 builder.Services.AddDbContext<NyxiteDbContext>((sp, options) =>
     options.UseNpgsql(sp.GetRequiredService<IConfiguration>()["Database:ConnectionString"]
                       ?? throw new InvalidOperationException("Database:ConnectionString is not configured.")));
@@ -79,7 +83,12 @@ api.MapKeyEndpoints();
 api.MapStructureEndpoints();
 api.MapContentEndpoints();
 api.MapSyncEndpoints();
-app.MapHub<Nyxite.Server.Realtime.RelayHub>(Nyxite.Server.Realtime.RelayHub.Path).RequireAuthorization();
+api.MapShareEndpoints();
+app.MapPublicShareEndpoints();
+app.MapHub<RelayHub>(RelayHub.Path).RequireAuthorization();
+// One hub type on both paths, so guests and accounts share the rooms (05 §5.8).
+app.MapHub<RelayHub>(RelayHub.GuestPath, o => o.Transports = Microsoft.AspNetCore.Http.Connections.HttpTransportType.WebSockets)
+    .RequireAuthorization(AuthSetup.Guest).RequireRateLimiting(RateLimiting.ShareAccess);
 
 await app.RunAsync();
 return 0;
