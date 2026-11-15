@@ -49,7 +49,9 @@ public static class ServiceCollectionExtensions
         services.AddScoped<Sync.SyncService>();
         services.AddScoped<Sync.ChangeLogPruner>();
         services.AddScoped<Structure.StructureService>();
-        services.AddOptions<Content.ContentOptions>().Bind(configuration.GetSection(Structure.StructureOptions.Section));
+        services.AddOptions<Content.ContentOptions>().Bind(configuration.GetSection(Structure.StructureOptions.Section))
+            .Validate(o => o.RestoreMarkLifetime > TimeSpan.Zero, "Limits:RestoreMarkLifetime must be positive.")
+            .ValidateOnStart();
         services.AddOptions<Content.RelayOptions>().Bind(configuration.GetSection(Content.RelayOptions.Section))
             .Validate(o => o.AccessRecheckInterval > TimeSpan.Zero, "Relay:AccessRecheckInterval must be positive.")
             .Validate(o => o.AwarenessPerSecond > 0, "Relay:AwarenessPerSecond must be positive.")

@@ -68,7 +68,7 @@ public sealed record UpdateFileRequest(string? NameEnc, string? SyncPolicy, Patc
 
 public sealed record FileDto(Guid Id, Guid ProjectId, Guid? FolderId, Guid OwnerId, string NameEnc, string? MetadataEnc, string ContentType,
     string SyncPolicy, long? CurrentVersionSeq, Guid? CrdtDocId, int KeyGeneration,
-    DateTimeOffset CreatedAt, DateTimeOffset UpdatedAt, DateTimeOffset? DeletedAt, WrappedKeyDto? WrappedKey);
+    DateTimeOffset CreatedAt, DateTimeOffset UpdatedAt, DateTimeOffset? DeletedAt, WrappedKeyDto? WrappedKey, bool RotationPending = false);
 
 /// <summary>
 /// One entry of the Trash view: something the caller deleted directly, with what went to Trash along with it. Exactly

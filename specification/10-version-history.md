@@ -9,6 +9,13 @@
 - History is **full**; retention/purge is an explicit admin/GC action ([§10.6](#106-retention--garbage-collection)).
 - Who sees it **[P]**: every account with read reach on the file lists and fetches its versions, a read-only grantee included, because the history is content the grantee can already decrypt. Link guests get the head only, because a guest token is never accepted under `/api/v1` ([04 §4.8](04-rest-api.md)).
   A version sealed with an older key generation stays listed for a member who never had that generation, who sees the record but cannot open it ([09 §9.6](09-sharing-and-acl.md)).
+  Read access sees and diffs the history, write access restores, and link guests get no history (confirmed by the user on 2026-11-15).
+- Parent of a version [P]: every version records `parent_seq`, the version its upload was based on: the `If-Match` of a blob, the head a snapshot or a rotation's head replaced, `0` for none ([03](03-data-model.md)).
+  A version whose parent was not the head when it arrived lost last-write-wins and is a kept sibling ([06 §6.5](06-sync.md)).
+  A client replays the list in `seq` order, keeping the head: a version whose `parentSeq` equals the head becomes the head, any other is a kept loser.
+  The record is the signal, so every member, a grantee included, flags concurrent siblings from the history alone (decided by the user on 2026-11-15).
+  Flagging from the change feed was rejected, because the feed stays owner-scoped until shared-tree sync exists, and the `409` sibling and a `seq` above the head reach only the writer of the losing upload.
+  Versions written before the column was added take `seq - 1` as their parent, which is right for every version that won.
 
 ## 10.2 How versions are produced
 
@@ -51,8 +58,15 @@ The server records `content_hash` (client-computed), `blob_ref`, `size_cipher`, 
 >    A retry on top of the new head is then a plain write, and a client that wants that head marked as well records the restore again.
 > 3. A second restore, by the same or another account, replaces a pending mark, and the audit keeps both events.
 >    One mark per file was chosen over a list of pending restores, because the mark only labels the history and the audit is the record.
+> 4. A mark that no version of the restoring account takes within `NYXITE__Limits__RestoreMarkLifetime` (default 10 minutes, [14](14-deployment-and-config.md)) lapses, stored as `pending_restore_at`.
+>    The next version of any account then clears it without taking it, so a client that recorded a restore and never saved does not label a later unrelated write as a restore.
+>    A time limit was chosen over a header that marks the next write as no restore, because it needs no change to the write paths and still covers a client that crashed after the record.
+>    Ten minutes cover the decrypt, verify and upload of a large version, and an operator with slow clients raises it.
+>
+> Points 1 to 4 were confirmed by the user on 2026-11-15.
 >
 > The call requires `Idempotency-Key`, and a replay of the same request answers `204` again without a second event, because a client retrying after a lost answer must not double the audit.
+> The idempotency record names the file and the seq, so the same key reused on another file is `409 idempotency_conflict` instead of a silent success that recorded nothing (V3 of the review of 2026-11-15).
 > It needs write reach from a session on an active device, so a read-only grantee gets `403 acl_denied`, and a seq the file does not have is `404`.
 > A file excluded from sync answers `409 excluded_content`, because the server takes no content for it and no new head could follow.
 > The restored content is written with the file's current key like every other write, otherwise `412 key_generation_stale`, so a client restoring a version of an older generation opens it with that generation's wrap and seals it again ([09 §9.6](09-sharing-and-acl.md)).

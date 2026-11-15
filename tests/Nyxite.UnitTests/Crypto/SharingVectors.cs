@@ -9,7 +9,8 @@ namespace Nyxite.UnitTests.Crypto;
 /// URL fragment or the file key in any form. The rotation part pins the 2.3 contract: the new head is staged under the
 /// new key first, the commit names it by content hash in <c>newHeadRef</c>, wraps the new key to every member, the owner
 /// included, and re-seals the name; it commits only at generation + 1, otherwise <c>409</c>; an update sealed with the
-/// old key passes until the commit and is <c>412</c> after it.
+/// old key passes until the commit and is <c>412</c> after it. Since the decisions of 2026-11-15 any writer rotates after
+/// reading the members, and the commit revokes the file's links by default or keeps them frozen.
 /// </summary>
 internal static class SharingVectors
 {
@@ -135,6 +136,11 @@ internal static class SharingVectors
                 new { name = "guestRelay", method = "GET", path = shareSession + "/ws?access_token=<ticket>", headers = new Dictionary<string, string>(), body = (object?)null },
                 new
                 {
+                    name = "rotationMembers", method = "GET", path = $"/api/v1/files/{FileId}/keys/rotate/members",
+                    headers = new Dictionary<string, string>(), body = (object?)null,
+                },
+                new
+                {
                     name = "stageRotationHead", method = "PUT", path = $"/api/v1/files/{FileId}/keys/rotate/head",
                     headers = new Dictionary<string, string>
                     {
@@ -150,7 +156,7 @@ internal static class SharingVectors
                     {
                         newKeyId = RotatedKeyId, generation = 2,
                         wrappedKeys = new[] { Wrap(RotatedKeyId, rotatedWrap, 2), Wrap(RotatedKeyId, ownerRotatedWrap, 2, OwnerId) },
-                        newHeadRef, nameEnc = B(rotatedName), metadataEnc = (string?)null,
+                        newHeadRef, nameEnc = B(rotatedName), metadataEnc = (string?)null, links = "revoke",
                     },
                 },
             },
@@ -209,9 +215,17 @@ internal static class SharingVectors
                     new { submittedGeneration = 3, status = 409, code = (string?)"conflict" },
                 },
                 oldKeyUpdate = new { beforeCommit = 200, afterCommit = 412, code = "key_generation_stale" },
-                order = new[] { "stageRotationHead", "rotate" },
+                order = new[] { "rotationMembers", "stageRotationHead", "rotate" },
                 newHeadRef = "The base64url BLAKE3-256 content hash of the plaintext head staged under newKeyId with PUT /files/{id}/keys/rotate/head "
-                             + "(its Nyxite-Content-Hash); null only when the file has no head. The commit makes the staged head the head.",
+                             + "(its Nyxite-Content-Hash); null only when the file has no content yet or is excluded from sync. A text head covers "
+                             + "every update of the log. The commit makes the staged head the head.",
+                links = new
+                {
+                    @default = "revoke",
+                    revoke = "Every link of the file is revoked and answers 410 share_revoked; the rotating client offers new links under the new key.",
+                    keep = "Every link that follows the file is frozen at the old generation: bootstrap answers frozen: true with the old keyId, name and "
+                           + "head, the link is read only, and its relay join and socket ticket answer link_frozen.",
+                },
                 ownerRecipientSeed = H(Bytes(32, 0xa0)),
                 rotatedKey = H(RotatedKey),
                 rotatedHeadPlaintext = H(RotatedHeadPlaintext),

@@ -77,7 +77,7 @@ public sealed class ContentService(
 
         var head = await HeadAsync(file, ct);
         var wins = parentSeq == (head?.Seq ?? 0);
-        var version = await AddVersionAsync(file, actor.UserId, hash, keyId, ciphertext, crdtSeq: null, becomesHead: wins, ct);
+        var version = await AddVersionAsync(file, actor.UserId, hash, keyId, ciphertext, crdtSeq: null, parentSeq, becomesHead: wins, ct);
         await feed.VersionAsync(file, version, isHead: wins, ct);
         await db.SaveChangesAsync(ct);
         await tx.CommitAsync(ct);
@@ -131,12 +131,23 @@ public sealed class ContentService(
         return await OpenAsync(await VersionAsync(fileId, seq, ct), file, ct);
     }
 
+    /// <summary>One version, or null when the caller's copy named by <paramref name="ifNoneMatch"/> is that version.</summary>
+    public async Task<BlobRead?> ReadVersionAsync(ClaimsPrincipal principal, Guid fileId, long seq, string? ifNoneMatch, CancellationToken ct)
+    {
+        var file = await FileAsync(ContentActor.Of(principal), fileId, ct);
+        var version = await VersionAsync(fileId, seq, ct);
+        if (ifNoneMatch is not null && ifNoneMatch.Trim().Trim('"') == Base64UrlCodec.Encode(version.ContentHash)) return null;
+        return await OpenAsync(version, file, ct);
+    }
+
     /// <summary>
     /// Records that the caller's next version of the file is a restore of version <c>seq</c> (10 §10.5). No content
     /// moves here: the restored bytes arrive through the normal write path, and the caller's next version, head or kept
     /// LWW loser, then carries the link. A version another account writes in between neither takes nor clears it, so a
     /// collaborator's edit is never labelled a restore. A second restore by anyone replaces the pending one, while the
-    /// audit keeps both. A replay of the same <c>Idempotency-Key</c> answers again without a second audit event.
+    /// audit keeps both, and a mark no version of its account takes within <see cref="ContentOptions.RestoreMarkLifetime"/>
+    /// lapses. A replay of the same <c>Idempotency-Key</c> on the same file answers again without a second audit event;
+    /// the key reused on another file is <c>409 idempotency_conflict</c>, because the stored request names the file.
     /// </summary>
     public async Task RecordRestoreAsync(ClaimsPrincipal principal, Guid fileId, RestoreRequest body, string? idempotencyKey, RequestInfo request,
         CancellationToken ct)
@@ -145,7 +156,8 @@ public sealed class ContentService(
         var actor = await WriterAsync(principal, ct);
         // History is an account feature: a guest token is never accepted under /api/v1 (04 §4.8).
         var userId = actor.UserId ?? throw AuthException.NotFound();
-        var hash = IdempotencyStore.Hash(body);
+        // The path id is part of the request, so the stored hash names the file as well as the version.
+        var hash = IdempotencyStore.Hash(new { fileId, seq = body.Seq });
         await using var tx = await db.Database.BeginTransactionAsync(ct);
         var file = await LockFileAsync(actor, fileId, ct);
         // Looked up under the file lock, so a retry that raced its own first attempt sees that attempt's answer.
@@ -154,6 +166,7 @@ public sealed class ContentService(
         if (file.SyncPolicy == SyncPolicies.Excluded) throw ExcludedContent();
         file.PendingRestoreSeq = body.Seq;
         file.PendingRestoreBy = userId;
+        file.PendingRestoreAt = time.GetUtcNow();
         audit.Add("version.restore", userId, request, targetType: "file", targetId: fileId, detail: new { seq = body.Seq });
         idempotency.Add(userId, RestoreEndpoint, key, hash, 204, new { });
         await db.SaveChangesAsync(ct);
@@ -257,7 +270,8 @@ public sealed class ContentService(
         var head = await HeadAsync(file, ct);
         if (head?.CrdtSeq > crdtSeq) throw AuthException.Conflict("A newer snapshot is already stored.");
 
-        var version = await AddVersionAsync(file, actor.UserId, hash, keyId, ciphertext, crdtSeq, becomesHead: true, ct);
+        // A snapshot always builds on the head, so its parent is the head it replaces.
+        var version = await AddVersionAsync(file, actor.UserId, hash, keyId, ciphertext, crdtSeq, head?.Seq ?? 0, becomesHead: true, ct);
         await feed.VersionAsync(file, version, isHead: true, ct);
         await db.SaveChangesAsync(ct);
         await tx.CommitAsync(ct);
@@ -287,7 +301,8 @@ public sealed class ContentService(
     /// switches the key. Until then every client keeps reading the old head, so nothing is replaced before its
     /// successor exists. A text file stages a snapshot (<paramref name="crdtSeq"/>), any other file the re-encrypted
     /// head version it is based on (<paramref name="parentSeq"/>, 0 when it has none). Staging again for the same key
-    /// replaces the earlier stage. Only the owner rotates, so only the owner stages.
+    /// replaces the earlier stage. Every account with write reach may rotate, so every such account may stage; a link
+    /// guest never does, because it holds no wrap to hand the new key on with.
     /// </summary>
     public async Task StageRotationHeadAsync(ClaimsPrincipal principal, Guid fileId, Guid newKeyId, string? contentHash, long? crdtSeq, long? parentSeq,
         StagedBlob ciphertext, CancellationToken ct)
@@ -296,8 +311,7 @@ public sealed class ContentService(
         var hash = ContentHash(contentHash);
         await using var tx = await db.Database.BeginTransactionAsync(ct);
         var file = await LockFileAsync(actor, fileId, ct);
-        if (actor.UserId is not { } userId || !await db.Projects.AnyAsync(p => p.Id == file.ProjectId && p.OwnerId == userId, ct))
-            throw RotateDenied();
+        if (actor.UserId is not { } userId) throw RotateDenied();
         await CheckUploadAsync(file, newKeyId, ciphertext, ct, currentKey: false);
         if (await db.FileKeys.AnyAsync(k => k.FileId == fileId && k.KeyId == newKeyId, ct))
             throw AuthException.Validation("Nyxite-Key-Id must name the new key of the rotation, not a key the file already has.");
@@ -334,7 +348,7 @@ public sealed class ContentService(
     /// <summary>The head moved since the staged head was based on it; the rotating client stages the new head again.</summary>
     public static AuthException HeadMoved() => new(409, "version_conflict", "The head changed since the rotated head was based on it; stage it again.");
 
-    public static AuthException RotateDenied() => new(403, "acl_denied", "Only the owner rotates the key of a file.");
+    public static AuthException RotateDenied() => new(403, "acl_denied", "Only an account with write access rotates the key of a file.");
 
     // ---------------------------------------------------------------- usage
 
@@ -366,7 +380,7 @@ public sealed class ContentService(
     }
 
     private async Task<FileVersionEntity> AddVersionAsync(FileEntity file, Guid? authorId, byte[] contentHash, Guid keyId, StagedBlob ciphertext,
-        long? crdtSeq, bool becomesHead, CancellationToken ct)
+        long? crdtSeq, long parentSeq, bool becomesHead, CancellationToken ct)
     {
         // The blob is named before the row that points to it. A crash in between leaves an unreferenced blob for the
         // garbage collector, never a version without bytes. The address lock keeps the collector from deleting a blob
@@ -378,17 +392,10 @@ public sealed class ContentService(
         var version = new FileVersionEntity
         {
             Id = Guid.CreateVersion7(now), FileId = file.Id, Seq = ++file.VersionSeq, ContentHash = contentHash, BlobRef = reference.Address.Hex,
-            SizeCipher = reference.Size, KeyId = keyId, Layout = "single", AuthorId = authorId, CrdtSeq = crdtSeq, CreatedAt = now,
+            SizeCipher = reference.Size, KeyId = keyId, Layout = "single", AuthorId = authorId, CrdtSeq = crdtSeq, ParentSeq = parentSeq, CreatedAt = now,
         };
         db.FileVersions.Add(version);
-        // A recorded restore links the restoring account's next version, also when that one lost LWW and is kept as a
-        // sibling, because it still holds the restored bytes (10 §10.5).
-        if (file.PendingRestoreSeq is { } restoredFrom && authorId is not null && file.PendingRestoreBy == authorId)
-        {
-            version.RestoredFromSeq = restoredFrom;
-            file.PendingRestoreSeq = null;
-            file.PendingRestoreBy = null;
-        }
+        TakeRestoreMark(file, version, now);
 
         if (becomesHead)
         {
@@ -397,6 +404,22 @@ public sealed class ContentService(
         }
 
         return version;
+    }
+
+    /// <summary>
+    /// A recorded restore links the restoring account's next version, also when that one lost LWW and is kept as a
+    /// sibling, because it still holds the restored bytes (10 §10.5). A version of another account leaves the mark alone.
+    /// A mark older than <see cref="ContentOptions.RestoreMarkLifetime"/> has lapsed: it labels nothing and is cleared.
+    /// </summary>
+    internal void TakeRestoreMark(FileEntity file, FileVersionEntity version, DateTimeOffset now)
+    {
+        if (file.PendingRestoreSeq is not { } restoredFrom) return;
+        var lapsed = file.PendingRestoreAt is not { } at || now - at > _options.RestoreMarkLifetime;
+        if (!lapsed && (version.AuthorId is null || file.PendingRestoreBy != version.AuthorId)) return;
+        if (!lapsed) version.RestoredFromSeq = restoredFrom;
+        file.PendingRestoreSeq = null;
+        file.PendingRestoreBy = null;
+        file.PendingRestoreAt = null;
     }
 
     /// <summary>
@@ -500,7 +523,7 @@ public sealed class ContentService(
 
     private static VersionDto ToDto(FileVersionEntity v, FileEntity file) =>
         new(v.Seq, Base64UrlCodec.Encode(v.ContentHash), v.Layout, v.SizeCipher, v.KeyId, v.Id == file.CurrentVersionId, v.AuthorId,
-            v.RestoredFromSeq, v.CrdtSeq, v.CreatedAt);
+            v.RestoredFromSeq, v.CrdtSeq, v.ParentSeq, v.CreatedAt);
 }
 
 /// <summary>

@@ -324,4 +324,67 @@ public sealed class VersionHistoryTests(PostgresFixture pg)
         Assert.Equal(JsonValueKind.Null, retry.GetProperty("restoredFromSeq").ValueKind);
         Assert.Equal((long?)null, await Sql.ScalarAsync<long?>(app.ConnectionString, "SELECT pending_restore_seq FROM files WHERE id = @f", ("f", file.Id)));
     }
+
+    /// <summary>
+    /// Every version records the seq it was based on (<c>parentSeq</c>), so any member, a grantee included, flags kept
+    /// LWW losers from the history alone: replaying the list in seq order, a version whose parent was not the head of its
+    /// moment lost.
+    /// </summary>
+    [Fact]
+    public async Task Every_version_records_its_parent_so_a_grantee_flags_lww_losers_from_the_history()
+    {
+        await using var app = App(await pg.CreateDatabaseAsync());
+        var owner = await MemberAsync(app, "Owner");
+        var writer = await MemberAsync(app, "Writer");
+        var reader = await MemberAsync(app, "Reader");
+        var file = await owner.S.FileAsync(await owner.S.ProjectAsync("p"), "drawing.ink", contentType: "ink");
+        await ShareAsync(owner, file, writer, "write");
+        await ShareAsync(owner, file, reader, "read");
+        await BlobAsync(owner.S, file, 0, "strokes one");
+        await BlobAsync(writer.S, file, 1, "writer strokes");
+        Assert.Equal(HttpStatusCode.Conflict, (await BlobAsync(owner.S, file, 1, "owner strokes")).StatusCode);
+        await BlobAsync(owner.S, file, 2, "strokes merged");
+
+        var versions = (await (await reader.S.GetAsync($"/files/{file.Id}/versions")).JsonAsync()).GetProperty("items").EnumerateArray()
+            .OrderBy(v => v.GetProperty("seq").GetInt64()).ToList();
+        Assert.Equal([0L, 1L, 1L, 2L], versions.Select(v => v.GetProperty("parentSeq").GetInt64()));
+        long head = 0;
+        var losers = new List<long>();
+        foreach (var v in versions)
+        {
+            if (v.GetProperty("parentSeq").GetInt64() == head) head = v.GetProperty("seq").GetInt64();
+            else losers.Add(v.GetProperty("seq").GetInt64());
+        }
+
+        Assert.Equal([3L], losers);
+        Assert.Equal(4, head);
+    }
+
+    /// <summary>
+    /// A recorded restore that no version of the restoring account follows within <c>Limits:RestoreMarkLifetime</c>
+    /// (10 minutes by default, 2 minutes here) lapses, so a later unrelated write is not labelled a restore.
+    /// </summary>
+    [Fact]
+    public async Task A_restore_mark_that_no_save_follows_in_time_lapses()
+    {
+        await using var app = App(await pg.CreateDatabaseAsync(), overrides: new Dictionary<string, string?>
+        {
+            ["Relay:AccessRecheckInterval"] = "01:00:00", ["Limits:RestoreMarkLifetime"] = "00:02:00",
+        });
+        var owner = await MemberAsync(app, "Owner");
+        var file = await owner.S.FileAsync(await owner.S.ProjectAsync("p"), "drawing.ink", contentType: "ink");
+        await BlobAsync(owner.S, file, 0, "strokes one");
+        await BlobAsync(owner.S, file, 1, "strokes two");
+
+        Assert.Equal(HttpStatusCode.NoContent, (await RestoreAsync(owner.S, file, 1)).StatusCode);
+        app.Clock.Advance(TimeSpan.FromMinutes(1));
+        var inTime = await (await BlobAsync(owner.S, file, 2, "strokes one")).JsonAsync();
+        Assert.Equal(1, inTime.GetProperty("restoredFromSeq").GetInt64());
+
+        Assert.Equal(HttpStatusCode.NoContent, (await RestoreAsync(owner.S, file, 2)).StatusCode);
+        app.Clock.Advance(TimeSpan.FromMinutes(3));
+        var late = await (await BlobAsync(owner.S, file, 3, "unrelated strokes")).JsonAsync();
+        Assert.Equal(JsonValueKind.Null, late.GetProperty("restoredFromSeq").ValueKind);
+        Assert.Equal((long?)null, await Sql.ScalarAsync<long?>(app.ConnectionString, "SELECT pending_restore_seq FROM files WHERE id = @f", ("f", file.Id)));
+    }
 }

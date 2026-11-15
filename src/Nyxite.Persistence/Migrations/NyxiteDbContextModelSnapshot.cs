@@ -468,6 +468,10 @@ namespace Nyxite.Persistence.Migrations
                         .HasColumnType("uuid")
                         .HasColumnName("owner_id");
 
+                    b.Property<DateTimeOffset?>("PendingRestoreAt")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("pending_restore_at");
+
                     b.Property<Guid?>("PendingRestoreBy")
                         .HasColumnType("uuid")
                         .HasColumnName("pending_restore_by");
@@ -479,6 +483,10 @@ namespace Nyxite.Persistence.Migrations
                     b.Property<Guid>("ProjectId")
                         .HasColumnType("uuid")
                         .HasColumnName("project_id");
+
+                    b.Property<DateTimeOffset?>("RotationPendingAt")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("rotation_pending_at");
 
                     b.Property<string>("SyncPolicy")
                         .IsRequired()
@@ -710,6 +718,10 @@ namespace Nyxite.Persistence.Migrations
                         .HasColumnType("text")
                         .HasColumnName("layout")
                         .HasDefaultValueSql("'single'");
+
+                    b.Property<long>("ParentSeq")
+                        .HasColumnType("bigint")
+                        .HasColumnName("parent_seq");
 
                     b.Property<long?>("RestoredFromSeq")
                         .HasColumnType("bigint")
@@ -1184,6 +1196,22 @@ namespace Nyxite.Persistence.Migrations
                         .HasColumnType("uuid")
                         .HasColumnName("folder_id");
 
+                    b.Property<int?>("FrozenGeneration")
+                        .HasColumnType("integer")
+                        .HasColumnName("frozen_generation");
+
+                    b.Property<byte[]>("FrozenMetadataEnc")
+                        .HasColumnType("bytea")
+                        .HasColumnName("frozen_metadata_enc");
+
+                    b.Property<byte[]>("FrozenNameEnc")
+                        .HasColumnType("bytea")
+                        .HasColumnName("frozen_name_enc");
+
+                    b.Property<long?>("FrozenVersionSeq")
+                        .HasColumnType("bigint")
+                        .HasColumnName("frozen_version_seq");
+
                     b.Property<Guid?>("GranteeId")
                         .HasColumnType("uuid")
                         .HasColumnName("grantee_id");
@@ -1244,6 +1272,8 @@ namespace Nyxite.Persistence.Migrations
 
                     b.ToTable("shares", null, t =>
                         {
+                            t.HasCheckConstraint("ck_shares_frozen_link", "frozen_generation IS NULL OR (kind = 'link' AND frozen_name_enc IS NOT NULL)");
+
                             t.HasCheckConstraint("ck_shares_kind", "kind IN ('user_grant','link')");
 
                             t.HasCheckConstraint("ck_shares_kind_fields", "(kind = 'user_grant' AND grantee_id IS NOT NULL AND link_token_hash IS NULL) OR (kind = 'link' AND grantee_id IS NULL AND octet_length(link_token_hash) = 32 AND file_id IS NOT NULL)");

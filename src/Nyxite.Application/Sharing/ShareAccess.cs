@@ -67,13 +67,16 @@ public sealed class ShareAccess(NyxiteDbContext db, TimeProvider time)
         return await GrantLevelAsync(userId, file.ProjectId, folders, file.Id, ct);
     }
 
-    /// <summary>A guest's level on a file: the permission of its live link share, which names exactly this file.</summary>
+    /// <summary>
+    /// A guest's level on a file: the permission of its live link share, which names exactly this file. A link a rotation
+    /// froze is read only (09 §9.6).
+    /// </summary>
     public async Task<FileAccessLevel> GuestLevelAsync(Guid shareId, FileEntity file, CancellationToken ct)
     {
         var now = time.GetUtcNow();
         var permission = await db.Shares.AsNoTracking()
             .Where(s => s.Id == shareId && s.Kind == ShareEntity.Link && s.FileId == file.Id && s.RevokedAt == null && (s.ExpiresAt == null || s.ExpiresAt > now))
-            .Select(s => s.Permission).SingleOrDefaultAsync(ct);
+            .Select(s => s.FrozenGeneration != null ? ShareEntity.Read : s.Permission).SingleOrDefaultAsync(ct);
         if (permission is null || await LiveProjectOwnerAsync(file.ProjectId, ct) is null) return FileAccessLevel.None;
         return permission == ShareEntity.Write ? FileAccessLevel.Write : FileAccessLevel.Read;
     }

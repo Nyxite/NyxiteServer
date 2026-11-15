@@ -175,9 +175,10 @@ public sealed class RotationTests(PostgresFixture pg)
     // ---------------------------------------------------------------- P2.3-TC-2
 
     /// <summary>
-    /// P2.3-TC-2, server side: after a share is revoked, the owner's client rotates the file key. The new head is staged
-    /// under the new key and becomes the head with the commit, which succeeds at generation + 1 only; of two concurrent
-    /// rotations one wins and the other gets <c>409</c>. An old-key update is accepted until the commit and is
+    /// P2.3-TC-2, server side: after a share is revoked, a remaining writer's client, here the owner's, rotates the file
+    /// key. The new head is staged under the new key and becomes the head with the commit, which succeeds at generation
+    /// + 1 only and only while the stage covers the whole log; of two concurrent rotations one wins and the other gets
+    /// <c>409</c>. An old-key update is accepted until the commit and is
     /// <c>412 key_generation_stale</c> after it, over REST and the relay, and passes once re-sealed. The remaining member
     /// unwraps the new key and still opens the old versions, while the removed member gets no wrap of the new key, can
     /// fetch nothing, and could not open what was written after the rotation if it had the bytes.
@@ -213,8 +214,13 @@ public sealed class RotationTests(PostgresFixture pg)
         Assert.Equal(1, await Sql.ScalarAsync<int>(app.ConnectionString, "SELECT key_generation FROM files WHERE id = @f", ("f", file.Id)));
         Assert.Equal(2, await Sql.ScalarAsync<long>(app.ConnectionString, "SELECT count(*) FROM file_rotation_heads WHERE file_id = @f", ("f", file.Id)));
 
-        // An in-flight update sealed with the old key is accepted until the commit.
+        // An in-flight update sealed with the old key is accepted until the commit, and it makes both stages stale: a
+        // commit now would leave an old-key update behind the new head (V1), so it is a version conflict.
         Assert.Equal(HttpStatusCode.OK, (await SubmitAsync(keeper.S, oldKey, "in flight before commit")).StatusCode);
+        var stale = await RotateAsync(owner.S, file.Id, RotateBody(first, 2, members, "rotated head body", "rotation-plan.md"));
+        Assert.Equal("version_conflict", await stale.ProblemCodeAsync());
+        Assert.Equal(HttpStatusCode.NoContent, (await StageAsync(owner.S, first, "rotated head body", crdtSeq: 3)).StatusCode);
+        Assert.Equal(HttpStatusCode.NoContent, (await StageAsync(owner.S, second, "rotated head body", crdtSeq: 3)).StatusCode);
 
         // Two rotations race for generation 2: exactly one commits, the other is the 409 loser.
         var responses = await Task.WhenAll(
@@ -238,9 +244,9 @@ public sealed class RotationTests(PostgresFixture pg)
 
         // After the commit, old-key writes are 412 on every path; the re-sealed update passes with its old client id.
         var inFlight = Guid.CreateVersion7();
-        var stale = await SubmitAsync(keeper.S, oldKey, "in flight after commit", inFlight);
-        Assert.Equal(HttpStatusCode.PreconditionFailed, stale.StatusCode);
-        Assert.Equal("key_generation_stale", await stale.ProblemCodeAsync());
+        var staleUpdate = await SubmitAsync(keeper.S, oldKey, "in flight after commit", inFlight);
+        Assert.Equal(HttpStatusCode.PreconditionFailed, staleUpdate.StatusCode);
+        Assert.Equal("key_generation_stale", await staleUpdate.ProblemCodeAsync());
         var relayStale = await Assert.ThrowsAsync<HubException>(() => keeperPeer.Connection.InvokeAsync<long>("SubmitUpdate", file.Id.ToString(),
             new EncryptedUpdate(0, oldKey.Seal(ObjectKind.Crdt, "relay after commit"), oldKey.KeyId.ToString())));
         Assert.Contains("key_generation_stale", relayStale.Message);
@@ -261,10 +267,11 @@ public sealed class RotationTests(PostgresFixture pg)
         Assert.Equal(2, listed.GetProperty("wrappedKey").GetProperty("generation").GetInt32());
         Assert.Equal("rotation-plan.md", keeper.S.NameOf(listed));
 
-        // The head is the staged snapshot, sealed with the new key; the old head stays in the history, readable with the old key.
+        // The head is the staged snapshot, sealed with the new key and covering the whole log, so no old-key update is
+        // left behind it; the old head stays in the history, readable with the old key.
         var head = await keeper.S.GetAsync($"/files/{file.Id}/snapshot");
         Assert.Equal(newKey.KeyId.ToString(), head.Headers.GetValues("Nyxite-Key-Id").Single());
-        Assert.Equal("2", head.Headers.GetValues("Nyxite-Snapshot-Seq").Single());
+        Assert.Equal("3", head.Headers.GetValues("Nyxite-Snapshot-Seq").Single());
         Assert.Equal("rotated head body", newKey.Open(ObjectKind.Snapshot, await head.Content.ReadAsByteArrayAsync()));
         var versions = (await (await keeper.S.GetAsync($"/files/{file.Id}/versions")).JsonAsync()).GetProperty("items").EnumerateArray().ToList();
         Assert.Equal([2L, 1L], versions.Select(v => v.GetProperty("seq").GetInt64()));
@@ -275,7 +282,7 @@ public sealed class RotationTests(PostgresFixture pg)
         Assert.Equal([oldKey.KeyId, oldKey.KeyId, oldKey.KeyId, newKey.KeyId, newKey.KeyId], log.Select(u => u.GetProperty("keyId").GetGuid()));
         await using var rejoin = await RelayPeer.ConnectAsync(app, keeper.Token);
         await rejoin.Connection.InvokeAsync("JoinDocument", file.Id.ToString(), 0L);
-        Assert.Equal((2L, 2L), Assert.Single(rejoin.Snapshots));
+        Assert.Equal((3L, 2L), Assert.Single(rejoin.Snapshots));
 
         // The removed member: nothing to fetch, no wrap of the new key, and its old key opens nothing written since.
         foreach (var path in new[] { "", "/keys", "/snapshot", "/versions", "/crdt/log?since=0" })
@@ -327,29 +334,33 @@ public sealed class RotationTests(PostgresFixture pg)
     }
 
     /// <summary>
-    /// What the commit refuses: anyone but the owner, wraps that miss a member or reach a non-member, a name not sealed
-    /// with the new key, a missing or unknown staged head, and a head that moved since it was staged, which is a
-    /// <c>409 version_conflict</c> that keeps the newer head. A blob file then rotates, and only new-key blobs pass.
+    /// What the commit refuses: a reader and anyone without reach, wraps that miss a member or reach a non-member, a
+    /// name not sealed with the new key, a missing or unknown staged head, and a head that moved since it was staged,
+    /// which is a <c>409 version_conflict</c> that keeps the newer head. A blob file then rotates, and only new-key blobs
+    /// pass.
     /// </summary>
     [Fact]
-    public async Task The_commit_is_the_owners_wraps_exactly_the_members_and_never_replaces_a_head_that_moved()
+    public async Task The_commit_needs_write_reach_wraps_exactly_the_members_and_never_replaces_a_head_that_moved()
     {
         await using var app = App(await pg.CreateDatabaseAsync());
         var owner = await MemberAsync(app, "Ada");
         var writer = await MemberAsync(app, "Grace");
+        var reader = await MemberAsync(app, "Rita");
         var stranger = await MemberAsync(app, "Eve");
         var project = await owner.S.ProjectAsync("p");
         var file = await owner.S.FileAsync(project, "sketch.ink", contentType: "ink");
         var oldKey = Key.Of(file);
         Assert.Equal(HttpStatusCode.Created, (await BlobAsync(owner.S, oldKey, 0, "strokes one")).StatusCode);
         await ShareAsync(owner, file, writer, "write");
+        await ShareAsync(owner, file, reader, "read");
         var ownerMember = (owner.Id, XWing.PublicKeyFromSeed(owner.Seed));
         var writerMember = (writer.Id, await DirectoryKeyAsync(owner, writer.Id));
+        var readerMember = (reader.Id, await DirectoryKeyAsync(owner, reader.Id));
         var strangerMember = (stranger.Id, await DirectoryKeyAsync(owner, stranger.Id));
         var key = Key.New(file.Id);
 
-        // Staging: the owner only, a key the file does not have, the fields of a blob file, the current head as base.
-        Assert.Equal("acl_denied", await (await StageAsync(writer.S, key, "strokes one", parentSeq: 1)).ProblemCodeAsync());
+        // Staging: write reach, a key the file does not have, the fields of a blob file, the current head as base.
+        Assert.Equal("acl_denied", await (await StageAsync(reader.S, key, "strokes one", parentSeq: 1)).ProblemCodeAsync());
         Assert.Equal(HttpStatusCode.NotFound, (await StageAsync(stranger.S, key, "strokes one", parentSeq: 1)).StatusCode);
         Assert.Equal("validation_failed", await (await StageAsync(owner.S, oldKey, "strokes one", parentSeq: 1)).ProblemCodeAsync());
         Assert.Equal("validation_failed", await (await StageAsync(owner.S, key, "strokes one", crdtSeq: 0)).ProblemCodeAsync());
@@ -357,18 +368,19 @@ public sealed class RotationTests(PostgresFixture pg)
         Assert.Equal(HttpStatusCode.NoContent, (await StageAsync(owner.S, key, "strokes one", parentSeq: 1)).StatusCode);
 
         async Task<string> Commit(Member caller, object body) => await (await RotateAsync(caller.S, file.Id, body)).ProblemCodeAsync();
-        var good = RotateBody(key, 2, [ownerMember, writerMember], "strokes one", "sketch.ink");
-        Assert.Equal("acl_denied", await Commit(writer, good));
+        var good = RotateBody(key, 2, [ownerMember, writerMember, readerMember], "strokes one", "sketch.ink");
+        Assert.Equal("acl_denied", await Commit(reader, good));
         Assert.Equal("not_found", await Commit(stranger, good));
-        Assert.Equal("validation_failed", await Commit(owner, RotateBody(key, 2, [ownerMember], "strokes one", "sketch.ink")));
-        Assert.Equal("validation_failed", await Commit(owner, RotateBody(key, 2, [ownerMember, writerMember, strangerMember], "strokes one", "sketch.ink")));
-        Assert.Equal("validation_failed", await Commit(owner, RotateBody(key, 2, [ownerMember, writerMember, writerMember], "strokes one", "sketch.ink")));
-        Assert.Equal("validation_failed", await Commit(owner, RotateBody(key, 2, [ownerMember, writerMember], "strokes one", "sketch.ink", nameKey: oldKey)));
-        Assert.Equal("validation_failed", await Commit(owner, RotateBody(key, 2, [ownerMember, writerMember], null, "sketch.ink")));
-        Assert.Equal("validation_failed", await Commit(owner, RotateBody(key, 2, [ownerMember, writerMember], "other strokes", "sketch.ink")));
+        Assert.Equal("validation_failed", await Commit(owner, RotateBody(key, 2, [ownerMember, writerMember], "strokes one", "sketch.ink")));
+        Assert.Equal("validation_failed", await Commit(owner, RotateBody(key, 2, [ownerMember, writerMember, readerMember, strangerMember], "strokes one", "sketch.ink")));
+        Assert.Equal("validation_failed", await Commit(owner, RotateBody(key, 2, [ownerMember, writerMember, readerMember, writerMember], "strokes one", "sketch.ink")));
+        Assert.Equal("validation_failed", await Commit(owner, RotateBody(key, 2, [ownerMember, writerMember, readerMember], "strokes one", "sketch.ink", nameKey: oldKey)));
+        Assert.Equal("validation_failed", await Commit(owner, RotateBody(key, 2, [ownerMember, writerMember, readerMember], null, "sketch.ink")));
+        Assert.Equal("validation_failed", await Commit(owner, RotateBody(key, 2, [ownerMember, writerMember, readerMember], "other strokes", "sketch.ink")));
         Assert.Equal("validation_failed", await Commit(owner, new
         {
-            newKeyId = key.KeyId, generation = 2, wrappedKeys = new[] { key.WrapFor(owner.Id, ownerMember.Item2, 3), key.WrapFor(writer.Id, writerMember.Item2, 2) },
+            newKeyId = key.KeyId, generation = 2,
+            wrappedKeys = new[] { key.WrapFor(owner.Id, ownerMember.Item2, 3), key.WrapFor(writer.Id, writerMember.Item2, 2), key.WrapFor(reader.Id, readerMember.Item2, 2) },
             newHeadRef = Hash("strokes one"), nameEnc = Base64UrlCodec.Encode(key.Seal(ObjectKind.Name, "sketch.ink")),
         }));
         Assert.Equal(1, await Sql.ScalarAsync<int>(app.ConnectionString, "SELECT key_generation FROM files WHERE id = @f", ("f", file.Id)));
@@ -382,7 +394,7 @@ public sealed class RotationTests(PostgresFixture pg)
 
         // The client stages the new head again and commits.
         Assert.Equal(HttpStatusCode.NoContent, (await StageAsync(owner.S, key, "strokes two", parentSeq: 2)).StatusCode);
-        Assert.Equal(HttpStatusCode.NoContent, (await RotateAsync(owner.S, file.Id, RotateBody(key, 2, [ownerMember, writerMember], "strokes two", "sketch.ink"))).StatusCode);
+        Assert.Equal(HttpStatusCode.NoContent, (await RotateAsync(owner.S, file.Id, RotateBody(key, 2, [ownerMember, writerMember, readerMember], "strokes two", "sketch.ink"))).StatusCode);
         head = await writer.S.GetAsync($"/files/{file.Id}/blob");
         Assert.Equal(key.KeyId.ToString(), head.Headers.GetValues("Nyxite-Key-Id").Single());
         Assert.Equal("strokes two", key.Open(ObjectKind.Blob, await head.Content.ReadAsByteArrayAsync()));

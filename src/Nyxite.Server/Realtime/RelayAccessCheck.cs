@@ -21,7 +21,10 @@ namespace Nyxite.Server.Realtime;
 /// <para>
 /// A targeted pass judges only the members a <see cref="RelayAccessScope"/> names. It runs as soon as a share is revoked
 /// or changed or a file goes to Trash (<see cref="RelayAccessSignal"/>), with the same checks and the same order of
-/// removal as the periodic pass, which stays the backstop for what no event covers.
+/// removal as the periodic pass, which stays the backstop for what no event covers. A targeted pass fails closed: a
+/// member whose check cannot complete is disconnected with <c>access_unverified</c>, because the event says its access
+/// just changed and the instant cutoff must not wait for the next periodic pass. It may reconnect, and its join is
+/// checked again. The periodic pass keeps the isolation above, so a database hiccup does not drop every room at once.
 /// </para>
 /// </remarks>
 public sealed class RelayAccessCheck(
@@ -37,13 +40,25 @@ public sealed class RelayAccessCheck(
         var members = presence.Members();
         if (scope is not null) members = members.Where(m => scope.Matches(m.FileId, m.Member.UserId, m.Member.ShareId)).ToList();
         if (members.Count == 0) return 0;
+        var failClosed = scope is not null;
         var changed = new HashSet<Guid>();
         var removed = 0;
 
         var now = time.GetUtcNow();
         var sessionIds = members.Where(m => m.Member.SessionId is not null).Select(m => m.Member.SessionId!.Value).Distinct().ToList();
-        var live = (await db.Sessions.AsNoTracking().Where(s => sessionIds.Contains(s.Id) && s.RevokedAt == null && s.ExpiresAt > now)
-            .Select(s => s.Id).ToListAsync(ct)).ToHashSet();
+        HashSet<Guid> live;
+        try
+        {
+            live = (await db.Sessions.AsNoTracking().Where(s => sessionIds.Contains(s.Id) && s.RevokedAt == null && s.ExpiresAt > now)
+                .Select(s => s.Id).ToListAsync(ct)).ToHashSet();
+        }
+        catch (Exception e) when (failClosed && !ct.IsCancellationRequested)
+        {
+            logger.LogWarning(e, "The targeted relay access re-check could not read sessions; its members are disconnected.");
+            removed += await DisconnectAsync(members, changed, ct);
+            await RostersAsync(changed, ct);
+            return removed;
+        }
         foreach (var connection in members.Where(m => m.Member.SessionId is { } sid && !live.Contains(sid)).GroupBy(m => m.ConnectionId))
         {
             try
@@ -88,11 +103,55 @@ public sealed class RelayAccessCheck(
             catch (Exception e) when (!ct.IsCancellationRequested)
             {
                 logger.LogWarning(e, "The relay access re-check of one account in one room failed.");
+                if (failClosed) removed += await DisconnectAsync(pair.ToList(), changed, ct);
             }
         }
 
-        removed += await RecheckGuestsAsync(members, changed, ct);
+        removed += await RecheckGuestsAsync(members, changed, failClosed, ct);
+        await RostersAsync(changed, ct);
+        return removed;
+    }
 
+    /// <summary>
+    /// Fail-closed removal of members a targeted pass could not judge: each connection gets
+    /// <c>OnError(fileId, "access_unverified", ...)</c> for its rooms, leaves them and is closed, so it reconnects and is
+    /// checked again at its join. Every step is isolated, and the group goes before the presence, as everywhere here.
+    /// </summary>
+    private async Task<int> DisconnectAsync(IReadOnlyCollection<(Guid FileId, string ConnectionId, RelayMember Member)> members, HashSet<Guid> changed,
+        CancellationToken ct)
+    {
+        var removed = 0;
+        foreach (var connection in members.GroupBy(m => m.ConnectionId))
+        {
+            try
+            {
+                foreach (var (fileId, _, _) in connection)
+                {
+                    await hub.Groups.RemoveFromGroupAsync(connection.Key, RelayHub.Room(fileId), ct);
+                    await hub.Clients.Client(connection.Key).OnError(fileId.ToString(), AccessUnverified, "Access could not be checked; join again.");
+                }
+
+                foreach (var fileId in presence.LeaveAll(connection.Key))
+                {
+                    changed.Add(fileId);
+                    removed++;
+                }
+
+                presence.Abort(connection.Key);
+            }
+            catch (Exception e) when (!ct.IsCancellationRequested)
+            {
+                logger.LogWarning(e, "The relay access re-check could not disconnect a member it could not judge.");
+            }
+        }
+
+        return removed;
+    }
+
+    public const string AccessUnverified = "access_unverified";
+
+    private async Task RostersAsync(HashSet<Guid> changed, CancellationToken ct)
+    {
         foreach (var fileId in changed)
         {
             try
@@ -104,16 +163,16 @@ public sealed class RelayAccessCheck(
                 logger.LogWarning(e, "The relay access re-check could not send a roster.");
             }
         }
-
-        return removed;
     }
 
     /// <summary>
     /// Link guests (05 §5.8): a guest whose share was revoked or expired gets <c>OnError</c> with <c>share_revoked</c> or
     /// <c>link_expired</c> for its rooms and is closed, like a connection of an ended session, because its only credential
-    /// is gone. A guest whose file went to Trash leaves that room with <c>not_found</c>.
+    /// is gone. A guest of a link a rotation kept is closed the same way with <c>link_frozen</c>, because nothing the room
+    /// carries opens with its key. A guest whose file went to Trash leaves that room with <c>not_found</c>.
     /// </summary>
-    private async Task<int> RecheckGuestsAsync(List<(Guid FileId, string ConnectionId, RelayMember Member)> members, HashSet<Guid> changed, CancellationToken ct)
+    private async Task<int> RecheckGuestsAsync(List<(Guid FileId, string ConnectionId, RelayMember Member)> members, HashSet<Guid> changed, bool failClosed,
+        CancellationToken ct)
     {
         var guestMembers = members.Where(m => m.Member.ShareId is not null).ToList();
         if (guestMembers.Count == 0) return 0;
@@ -126,7 +185,7 @@ public sealed class RelayAccessCheck(
         catch (Exception e) when (!ct.IsCancellationRequested)
         {
             logger.LogWarning(e, "The relay access re-check could not read the link shares of guests.");
-            return 0;
+            return failClosed ? await DisconnectAsync(guestMembers, changed, ct) : 0;
         }
 
         foreach (var connection in guestMembers.Where(m => ended.ContainsKey(m.Member.ShareId!.Value)).GroupBy(m => m.ConnectionId))
@@ -171,6 +230,7 @@ public sealed class RelayAccessCheck(
             catch (Exception e) when (!ct.IsCancellationRequested)
             {
                 logger.LogWarning(e, "The relay access re-check of one guest in one room failed.");
+                if (failClosed) removed += await DisconnectAsync(pair.ToList(), changed, ct);
             }
         }
 

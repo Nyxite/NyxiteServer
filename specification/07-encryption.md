@@ -140,8 +140,10 @@ E2EE "in all places" is pushed as far as practical while keeping the server able
 
 ## 7.9 Rotation & revocation
 
-- **Member removal** ([09](09-sharing-and-acl.md)): the file key is **rotated** by a remaining member's client (new FK, re-encrypt head, re-wrap to remaining members); the server simultaneously drops the removed member's ACL grant so it is **cut off from the relay/storage immediately**, even before rotation completes. Past ciphertext the removed member already downloaded cannot be un-seen (inherent to any system).
+- **Member removal** ([09](09-sharing-and-acl.md)): the file key is **rotated** by the client of any remaining member with write access, whichever eligible device comes online first (new FK, re-encrypt head, re-wrap to remaining members); the server simultaneously drops the removed member's ACL grant so it is **cut off from the relay/storage immediately**, even before rotation completes. Past ciphertext the removed member already downloaded cannot be un-seen (inherent to any system).
   The new head is staged under the new key before the commit names it, so the swap is atomic and nothing is replaced before its successor exists, and the commit also re-seals the file's name and metadata ([09 §9.6](09-sharing-and-acl.md)).
+  A reader cannot rotate, because it may not write the re-sealed head, and the server checks write reach under the commit's locks.
+  The file's links are revoked by the rotation or kept frozen at the old generation, as the rotating account chooses ([09 §9.6](09-sharing-and-acl.md)).
 - **Device loss:** revoke the device's enrollment; rotate the identity keypair if the device may be compromised, then re-wrap file keys (background, client-driven). **[P]**
 
 ## 7.10 Backups

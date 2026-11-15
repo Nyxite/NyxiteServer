@@ -81,6 +81,11 @@ public record PresenceDto(string Kind, string? UserId, string? DisplayName); // 
 > A revocation that runs inside a larger transaction is announced before that transaction commits, so its pass may still see the session live, and the periodic pass closes the connection then.
 > A share that expires on its own and a session that reaches its absolute lifetime stay with the periodic pass, because no request marks their moment.
 > Waiting for the timer was rejected, because a revoked reader would keep receiving for up to `NYXITE__Relay__AccessRecheckInterval` against the instant cutoff of [09 §9.6](09-sharing-and-acl.md).
+> A targeted pass fails closed (decided by the user on 2026-11-15, V7 of the review of 2026-11-15): a member whose check cannot complete, a timed out query for example, gets `OnError(fileId, "access_unverified", ...)` for each of its rooms and its connection is closed, so the client reconnects and its join is checked again.
+> This also holds when the pass cannot read the sessions or the link shares at all, then every member in its scope is disconnected.
+> Retrying the pass once was rejected, because a second failure would still leave the member listening, and the event says its access has just changed.
+> The periodic pass keeps the isolation above and drops nobody it cannot judge, because a database hiccup would otherwise close every room of the instance at once.
+> A key rotation that revokes or freezes the file's links triggers a targeted pass over their guests ([09 §9.6](09-sharing-and-acl.md)).
 
 > Relay limits [P]:
 > a connection is in at most `NYXITE__Relay__MaxRoomsPerConnection` rooms (default 50), and a room holds at most `NYXITE__Relay__MaxConnectionsPerRoom` connections (default 100), accounts and guests together ([13 §13.5](13-security.md)).
@@ -139,6 +144,7 @@ public record PresenceDto(string Kind, string? UserId, string? DisplayName); // 
 > Its join checks that the share is still live and answers `share_revoked` or `link_expired` otherwise.
 > The periodic re-check (§5.4), and right after a revoke of the link the targeted pass, closes a guest connection whose share was revoked or has expired, with `OnError(fileId, "share_revoked" | "link_expired", ...)` for each room, because its only credential is gone.
 > A guest whose file went to Trash leaves the room with `not_found`.
+> A link a key rotation kept (`frozen`, [09 §9.6](09-sharing-and-acl.md)) has no room, because nothing the room carries opens with its key: its join answers `link_frozen`, and a guest of it that is still connected is closed with `OnError(fileId, "link_frozen", ...)` by the targeted pass after the rotation or by the periodic pass.
 > A guest connection does not end when its 15-minute guest token expires, because the share row checked on every pass is the stronger and the faster cutoff.
 
 ## 5.9 Ordering, durability, conflict

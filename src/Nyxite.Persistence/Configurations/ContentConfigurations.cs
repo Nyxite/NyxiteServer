@@ -21,6 +21,7 @@ internal sealed class FileVersionConfiguration : IEntityTypeConfiguration<FileVe
         b.Property(x => x.AuthorId).HasColumnName("author_id");
         b.Property(x => x.CrdtSeq).HasColumnName("crdt_seq");
         b.Property(x => x.RestoredFromSeq).HasColumnName("restored_from_seq");
+        b.Property(x => x.ParentSeq).HasColumnName("parent_seq");
         b.Property(x => x.CreatedAt).HasColumnName("created_at").HasDefaultValueSql("now()");
         b.HasOne<FileEntity>().WithMany().HasForeignKey(x => x.FileId).OnDelete(DeleteBehavior.Restrict);
         b.HasOne<UserEntity>().WithMany().HasForeignKey(x => x.AuthorId).OnDelete(DeleteBehavior.Restrict);

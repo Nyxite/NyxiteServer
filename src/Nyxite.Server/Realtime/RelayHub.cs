@@ -206,6 +206,8 @@ public sealed class RelayHub(
                 // A guest's share must still be live (410 otherwise) and reaches its one file only.
                 var share = await guests.LiveShareAsync(shareId, ct);
                 if (share.FileId != id) throw AuthException.NotFound();
+                // A link a rotation kept opens nothing the room carries, so it has no room (09 §9.6).
+                if (share.FrozenGeneration is not null) throw GuestShareService.Frozen();
                 member = new RelayMember(PresenceDto.ForGuest(), null, null, shareId);
             }
             else

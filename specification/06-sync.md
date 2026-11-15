@@ -105,8 +105,8 @@ ServerChange = { "seq": 9001, "at": "…", "kind": "structure|blob|crdt|delete|k
 
 | `kind` | `ref` | Client action |
 |---|---|---|
-| `structure` | `{ entity, id, parentFolderId, contentType?, crdtDocId?, nameEnc, metadataEnc, syncPolicy?, wrappedKey?, updatedAt }`, the **full** current row. `wrappedKey` is absent with `keys: false` | Upsert, decrypt `nameEnc`. A Trash restore arrives as this upsert |
-| `blob` | `{ fileId, seq, contentHash, layout, sizeCipher, keyId, isHead, url }`, `url` = `/api/v1/files/{id}/versions/{seq}/blob` | Mark pending pull; fetch eagerly or on demand. `isHead=false` = an LWW losing sibling ([§6.5](#65-ink--binary-sync-lww-encrypted)) |
+| `structure` | `{ entity, id, parentFolderId, contentType?, crdtDocId?, nameEnc, metadataEnc, syncPolicy?, wrappedKey?, rotationPending?, updatedAt }`, the **full** current row. `wrappedKey` is absent with `keys: false`. `rotationPending` (files only) is true while a revocation by the owner waits for its key rotation ([09 §9.6](09-sharing-and-acl.md)) | Upsert, decrypt `nameEnc`. A Trash restore arrives as this upsert. `rotationPending: true` queues the rotation task |
+| `blob` | `{ fileId, seq, contentHash, layout, sizeCipher, keyId, isHead, parentSeq, url }`, `url` = `/api/v1/files/{id}/versions/{seq}/blob` | Mark pending pull; fetch eagerly or on demand. `isHead=false` = an LWW losing sibling ([§6.5](#65-ink--binary-sync-lww-encrypted)), `parentSeq` the version it was based on ([10 §10.1](10-version-history.md)) |
 | `crdt` | `{ fileId, fromSeq, toSeq }` | Fetch `GET /files/{id}/crdt/log?since=<local>` unless the relay already delivered them. Consecutive updates to one file are **coalesced** into one change |
 | `delete` | `{ entity, id, deletedAt, reason: "deleted|purged|access_revoked" }` | Propagate soft delete; on `purged` or `access_revoked` drop local ciphertext and plaintext cache |
 | `keyrotate` | `{ fileId, keyId, generation }` | Refetch the wrapped key for the new generation |

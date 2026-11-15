@@ -56,6 +56,18 @@ public sealed class FileEntity
 
     /// <summary>The account that recorded <see cref="PendingRestoreSeq"/>. Only its own next version takes the link (10 §10.5).</summary>
     public Guid? PendingRestoreBy { get; set; }
+
+    /// <summary>
+    /// When <see cref="PendingRestoreSeq"/> was recorded. The mark lapses once it is older than
+    /// <c>Limits:RestoreMarkLifetime</c> without a version of the restoring account (10 §10.5).
+    /// </summary>
+    public DateTimeOffset? PendingRestoreAt { get; set; }
+
+    /// <summary>
+    /// Set when the owner revoked a share that reached this file, cleared by the next committed key rotation (09 §9.6).
+    /// It tells every member with write reach that the second layer of revocation is still due.
+    /// </summary>
+    public DateTimeOffset? RotationPendingAt { get; set; }
     public int KeyGeneration { get; set; } = 1;
     public byte[]? MetadataEnc { get; set; }
     public DateTimeOffset CreatedAt { get; set; }

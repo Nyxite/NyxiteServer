@@ -119,8 +119,9 @@ Rules of the content endpoints **[P]**:
 |--------|------|---------|
 | `GET` | `/files/{id}/keys` | Get the caller's **wrapped** file key(s) for this file (to unwrap locally) |
 | `POST` | `/files/{id}/keys` | Upload wrapped file key(s) for members (used when sharing / rotating) |
+| `GET` | `/files/{id}/keys/rotate/members` | The accounts a rotation must wrap the new key to, for an account with write reach (a reader gets `403 acl_denied`): `{ generation, rotationPending, members: [accountId] }`, account ids only ([09 §9.6](09-sharing-and-acl.md)) |
 | `PUT` | `/files/{id}/keys/rotate/head` | Stage the head sealed with the key a rotation is about to commit: headers `Nyxite-Key-Id` (the new key), `Nyxite-Content-Hash`, and `Nyxite-Snapshot-Seq` (text file) or `If-Match` (other files). `204`; no version until the commit |
-| `POST` | `/files/{id}/keys/rotate` | Commit a rotation. Body `{ newKeyId, generation, wrappedKeys[], newHeadRef, nameEnc, metadataEnc }`, `Idempotency-Key` required. The server commits **only if** `generation == current + 1`, else `409 conflict` (another rotation won). In-flight CRDT updates tagged with the old `key_id` are accepted until commit, then rejected `412 key_generation_stale` |
+| `POST` | `/files/{id}/keys/rotate` | Commit a rotation. Body `{ newKeyId, generation, wrappedKeys[], newHeadRef, nameEnc, metadataEnc, links }`, `links` `revoke` (default) or `keep`, `Idempotency-Key` required. The server commits **only if** `generation == current + 1`, else `409 conflict` (another rotation won). In-flight CRDT updates tagged with the old `key_id` are accepted until commit, then rejected `412 key_generation_stale` |
 | `POST` | `/files/keys:batch` | Batch wrap (subtree share fan-out). Body `{ grants: [ { fileId \| folderId, keyId, memberId, wrappedKey, algId? } ] }`, at most 500, **idempotent**, with **partial-success** reporting per item ([09 §9.3, §9.4a](09-sharing-and-acl.md)) |
 
 Rules of the wrapped-key endpoints **[P]**:
@@ -129,8 +130,10 @@ Rules of the wrapped-key endpoints **[P]**:
 - `POST /files/{id}/keys` is atomic, `{ wrappedKeys: [...] }` answers `204`, and any bad wrap makes it `400`. The batch judges each grant on its own and answers `{ results: [ { fileId, folderId, status, error } ] }` in request order, `status` `applied` or `rejected`.
 - Both are idempotent without an `Idempotency-Key`: a wrap of a key the member already has is left as it is, so a retry cannot store a second copy.
 - `POST /files/{id}/keys/rotate` and its staged head are served since Phase 2.3 (P2.3-SRV-1), and the P2.2-CORE-1 fixtures `sharing.json` pin both requests.
-  Only the project owner rotates, and the wraps must name exactly the accounts that reach the file, the owner included, so a removed member gets no wrap of the new key.
-  `newHeadRef` is the content hash of the staged head, required when the file has a head, and a head that moved since staging is `409 version_conflict`.
+  Any account with write reach rotates and stages (decided by the user on 2026-11-15), a reader gets `403 acl_denied`, and the wraps must name exactly the accounts that reach the file, the owner included, so a removed member gets no wrap of the new key.
+  `newHeadRef` is the content hash of the staged head, required when the file has a head or its log ever took an update, unless the file is excluded from sync, which rotates without one.
+  A text head covers the whole log, and a head, snapshot or update that moved since staging is `409 version_conflict`.
+  `links` revokes the file's links (`revoke`, the default) or freezes them at the old generation (`keep`).
   `nameEnc` and `metadataEnc` are sealed again with the new key, because listings carry only the wrap of the current generation.
   The rules and their reasons are in [09 §9.6](09-sharing-and-acl.md).
 - Every update, snapshot, blob and name change must be sealed with the file's current key, otherwise `412 key_generation_stale` or, for a name, `400`.
@@ -160,8 +163,11 @@ Rules of the wrapped-key endpoints **[P]**:
 Rules of the version endpoints, served since Phase 1.1 and completed in Phase 2.4 (P2.4-SRV-1) **[P]**:
 
 - Listing and fetching need read reach, so a read-only grantee browses and diffs the history too. Link guests have none, because a guest token is never accepted under `/api/v1` ([§4.8](#48-public-share-endpoints)).
-- A version is a record: `seq`, `contentHash`, `layout`, `sizeCipher`, `keyId`, `isHead`, `authorId` (null for a guest), `restoredFromSeq`, `crdtSeq` (text snapshots) and `createdAt`. No plaintext size and no diff summary exist.
+- A version is a record: `seq`, `contentHash`, `layout`, `sizeCipher`, `keyId`, `isHead`, `authorId` (null for a guest), `restoredFromSeq`, `crdtSeq` (text snapshots), `parentSeq` and `createdAt`. No plaintext size and no diff summary exist.
+  `parentSeq` is the version the upload was based on: the `If-Match` of a blob, the head a snapshot or a rotation replaced, `0` for none. Every member, a grantee included, flags kept LWW losers from it ([10 §10.1](10-version-history.md)).
 - A restore needs write reach on an active device (`403 acl_denied` with read reach only), names a version of the file (`404` otherwise) and is refused for a file excluded from sync (`409 excluded_content`), because no new head could follow.
+  Its idempotency record names the file and the seq, so a retry with the same `Idempotency-Key` answers `204` with one audit event, and the key reused on another file is `409 idempotency_conflict`.
+  The mark goes only on the restoring account's next version and lapses after `NYXITE__Limits__RestoreMarkLifetime` (default 10 minutes) without one.
 - The restored content must be sealed with the file's current key like every write (`412 key_generation_stale`), so a client that restores a version of an older generation opens it with that generation's wrap and seals it again.
 - The details and their reasons are in [10 §10.5](10-version-history.md#105-restore).
 
@@ -207,7 +213,7 @@ RFC 9457 `application/problem+json`. Selected codes:
 | 401 | `unauthenticated`, `token_expired` | Missing/invalid bearer — uniform across all ids, reveals no specific resource |
 | 403 | `acl_denied`, `2fa_required`, `email_unverified`, `account_blocked`, `pairing_code_invalid`, `device_not_active` | Authz denied **only when the caller already has read reach** to the resource (existence not secret to them) or on capability/collection denials that expose no id; **no** `breakglass`. `2fa_required` also covers a missing or invalid step-up token, `email_unverified` a factor enrollment before email verification, `account_blocked` a web session for a blocked account ([08](08-authentication.md)), `device_not_active` a key-management write (device approval, key rotation, recovery-blob replacement) from a session that is not bound to an active device |
 | 404 | `not_found` | Resource missing **or** the caller has no reach to it — **the two are indistinguishable** (existence-hiding, see below) |
-| 409 | `conflict`, `version_conflict`, `excluded_content`, `address_exists`, `idempotency_conflict`, `group_full`, `key_not_transparent`, `room_full`, `too_many_rooms` | LWW conflict / policy / write-once / rotation lost (file or group scope) / same key + different body / group at member limit ([12 §12.7](12-administration.md)) / enrollment key failed the transparency inclusion proof ([09 §9.9](09-sharing-and-acl.md)) / relay only: the room or the connection is at its cap ([05 §5.4](05-realtime-collaboration.md)) |
+| 409 | `conflict`, `version_conflict`, `excluded_content`, `address_exists`, `idempotency_conflict`, `group_full`, `key_not_transparent`, `room_full`, `too_many_rooms`, `link_frozen` | LWW conflict / policy / write-once / rotation lost (file or group scope) / same key + different body / group at member limit ([12 §12.7](12-administration.md)) / enrollment key failed the transparency inclusion proof ([09 §9.9](09-sharing-and-acl.md)) / relay only: the room or the connection is at its cap ([05 §5.4](05-realtime-collaboration.md)) / a link a key rotation kept has no relay room ([09 §9.6](09-sharing-and-acl.md)) |
 | 410 | `share_revoked`, `link_expired`, `pairing_expired`, `cursor_expired` | Dead share/link / pairing code expired or attempt cap reached / sync cursor older than the change-log retention ([06 §6.3.2](06-sync.md)) |
 | 412 | `key_generation_stale` | Client used a superseded file-key generation (rotate/refetch) |
 | 413 | `payload_too_large` | Ciphertext exceeds the upload limit **or the per-user storage quota** ([§4.7](#47-limits--validation-p), [12 §12.6](12-administration.md)) |
@@ -312,6 +318,7 @@ Rules of the public share endpoints **[P]**:
 - A token that is not 43 base64url characters, or that was never issued, answers `404`. One that was issued answers `410 share_revoked` or `410 link_expired` once revoked or expired, on every endpoint, and a shared file in Trash answers `404`.
 - The link token in the path is the credential of the bootstrap and of `POST /share/{token}/session`. Blob and socket ticket need the guest token, and a guest token is accepted only on the paths of its own link. It is never accepted under `/api/v1` or on `/hubs/relay`, and an access token is never accepted here, because the two `typ` values differ.
 - Every `/share/{token}*` request counts against one bucket of 30 per minute per client IP, the relay handshake included ([13 §13.5](13-security.md)).
+- A link a key rotation kept (`links: keep`, [09 §9.6](09-sharing-and-acl.md)) answers the bootstrap with `frozen: true` and the old `keyId`, name, metadata and head, serves that head at `/blob`, is read only, and answers `409 link_frozen` on the socket ticket and the relay join. A link the rotation revoked answers `410 share_revoked` like any revoked link.
 - Audit: the bootstrap and every blob fetch write `share.link_access`, a renewal writes `auth.guest_session`, each with the share as target and the request's IP and user agent, never the token, its hash or a key.
 
 ## 4.9 Support relay endpoints

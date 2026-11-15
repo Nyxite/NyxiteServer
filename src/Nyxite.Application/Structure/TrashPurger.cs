@@ -104,7 +104,7 @@ public sealed class TrashPurger(
 
             blobRefs = await db.FileVersions.Where(v => v.FileId == fileId).Select(v => v.BlobRef).Distinct().ToListAsync(ct);
             await db.Database.ExecuteSqlAsync(
-                $"UPDATE files SET current_version_id = NULL, pending_restore_seq = NULL, excluded_at = NULL WHERE id = {fileId}", ct);
+                $"UPDATE files SET current_version_id = NULL, pending_restore_seq = NULL, pending_restore_by = NULL, pending_restore_at = NULL, excluded_at = NULL WHERE id = {fileId}", ct);
             var updates = await db.Database.ExecuteSqlAsync(
                 $"DELETE FROM crdt_updates WHERE crdt_doc_id = (SELECT crdt_doc_id FROM files WHERE id = {fileId})", ct);
             var versions = await db.Database.ExecuteSqlAsync($"DELETE FROM file_versions WHERE file_id = {fileId}", ct);

@@ -5,7 +5,7 @@ namespace Nyxite.Contracts.Content;
 
 /// <summary>One immutable encrypted version of a file. <c>CrdtSeq</c> is set on a text snapshot: the last update it covers.</summary>
 public sealed record VersionDto(long Seq, string ContentHash, string Layout, long SizeCipher, Guid KeyId, bool IsHead, Guid? AuthorId,
-    long? RestoredFromSeq, long? CrdtSeq, DateTimeOffset CreatedAt);
+    long? RestoredFromSeq, long? CrdtSeq, long ParentSeq, DateTimeOffset CreatedAt);
 
 public sealed record SubmitUpdateItem(Guid ClientUpdateId, Guid KeyId, string? UpdateEnc);
 

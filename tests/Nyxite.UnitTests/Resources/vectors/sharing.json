@@ -186,6 +186,13 @@
       "body": null
     },
     {
+      "name": "rotationMembers",
+      "method": "GET",
+      "path": "/api/v1/files/01890a5d-ac96-774b-bcce-b302099a8058/keys/rotate/members",
+      "headers": {},
+      "body": null
+    },
+    {
       "name": "stageRotationHead",
       "method": "PUT",
       "path": "/api/v1/files/01890a5d-ac96-774b-bcce-b302099a8058/keys/rotate/head",
@@ -225,7 +232,8 @@
         ],
         "newHeadRef": "HcP8B1gNqZdnAkP9Tmm57JJ1EZHRwkMceVJQ95LBj5Y",
         "nameEnc": "TllYQwEBiQpdrJZ3S7zOswIJmoBfoKGio6Slpqeoqaqr9PAeMo7hiHdZVeVGpmdYyi-MLSXGTuo",
-        "metadataEnc": null
+        "metadataEnc": null,
+        "links": "revoke"
       }
     }
   ],
@@ -387,10 +395,16 @@
       "code": "key_generation_stale"
     },
     "order": [
+      "rotationMembers",
       "stageRotationHead",
       "rotate"
     ],
-    "newHeadRef": "The base64url BLAKE3-256 content hash of the plaintext head staged under newKeyId with PUT /files/{id}/keys/rotate/head (its Nyxite-Content-Hash); null only when the file has no head. The commit makes the staged head the head.",
+    "newHeadRef": "The base64url BLAKE3-256 content hash of the plaintext head staged under newKeyId with PUT /files/{id}/keys/rotate/head (its Nyxite-Content-Hash); null only when the file has no content yet or is excluded from sync. A text head covers every update of the log. The commit makes the staged head the head.",
+    "links": {
+      "default": "revoke",
+      "revoke": "Every link of the file is revoked and answers 410 share_revoked; the rotating client offers new links under the new key.",
+      "keep": "Every link that follows the file is frozen at the old generation: bootstrap answers frozen: true with the old keyId, name and head, the link is read only, and its relay join and socket ticket answer link_frozen."
+    },
     "ownerRecipientSeed": "a0a1a2a3a4a5a6a7a8a9aaabacadaeafb0b1b2b3b4b5b6b7b8b9babbbcbdbebf",
     "rotatedKey": "e0e1e2e3e4e5e6e7e8e9eaebecedeeeff0f1f2f3f4f5f6f7f8f9fafbfcfdfeff",
     "rotatedHeadPlaintext": "6865616420616674657220726f746174696f6e",

@@ -105,7 +105,9 @@ Two-layered: **instant server-ACL cutoff** + **client-driven key rotation** for 
 > the cutoff ends fetch, join and submit at the commit of the revoke, and the open rooms of the grantee or the link at once through the targeted relay pass ([05 §5.4](05-realtime-collaboration.md)).
 > A logout, a revoked session or device, a detected refresh-token reuse and a credential change end the account's relay connections the same way, instead of at the next periodic pass.
 > The rotation commit is generation-guarded, wraps the new key only to the accounts that reach the file, and from then on every write sealed with an older key is `412 key_generation_stale` ([09 §9.6](09-sharing-and-acl.md)).
-> The server checks frame headers, wrap sizes and the member set and opens nothing, and the audit of `key.rotate` names the generation and the member count, never a key.
+> The server checks frame headers, wrap sizes and the member set and opens nothing, and the audit of `key.rotate` names the rotating account, the generation, the member count and the link choice, never a key.
+> Any remaining member with write access rotates, after the server checked its write reach under the commit's locks, and only such a member learns the member set the wraps must cover, as account ids (decided by the user on 2026-11-15).
+> A targeted relay re-check that cannot complete disconnects the member instead of leaving it in the room ([05 §5.4](05-realtime-collaboration.md)).
 
 ## 13.8 Threat notes & boundaries
 
@@ -114,7 +116,7 @@ Two-layered: **instant server-ACL cutoff** + **client-driven key rotation** for 
 | DB/blob theft | **E2EE** — no content key on the server | None for content; structure/sizes/timestamps still leak metadata |
 | Compromised/malicious server or operator | **E2EE** — server never holds keys | Metadata visible; server could withhold/relay-tamper (detectable via client signatures **[P]**) |
 | Curious/rogue admin | No content path, no break-glass | Can see structure/usage/audit only |
-| Stolen link | Hashed token + expiry + revocation + rate limits | A live link's fragment key decrypts until expiry/rotation |
+| Stolen link | Hashed token + expiry + revocation + rate limits | A live link's fragment key decrypts until expiry or revocation. A rotation revokes the file's links by default, and a link kept through a rotation opens only the content frozen at its generation ([09 §9.6](09-sharing-and-acl.md)) |
 | Confirmation-of-file | No convergent encryption | Narrower dedup accepted |
 | Lost keys | Recovery key | Lose all devices **and** recovery key → permanent loss (by design) |
 | Malicious client (bad updates) | Trusted single-tenant; client-side merge tolerates/ignores | No server-side validation possible |

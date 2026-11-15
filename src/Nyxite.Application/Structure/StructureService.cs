@@ -896,7 +896,22 @@ public sealed class StructureService(
         var seqs = heads.Count == 0
             ? []
             : await db.FileVersions.Where(v => heads.Contains(v.Id)).ToDictionaryAsync(v => v.Id, v => v.Seq, ct);
-        return f => ToDto(f, map.GetValueOrDefault(f.Id), f.CurrentVersionId is { } head ? seqs[head] : null);
+        var pending = await RotationPendingAsync(list, userId, ct);
+        return f => ToDto(f, map.GetValueOrDefault(f.Id), f.CurrentVersionId is { } head ? seqs[head] : null, pending.Contains(f.Id));
+    }
+
+    /// <summary>
+    /// The files whose pending key rotation (09 §9.6) the caller may perform and so is told about: its own projects' files
+    /// and files it reaches with write access. A reader cannot rotate and learns nothing about revocations.
+    /// </summary>
+    private async Task<HashSet<Guid>> RotationPendingAsync(List<FileEntity> rows, Guid userId, CancellationToken ct)
+    {
+        var marked = rows.Where(r => r.RotationPendingAt is not null).ToList();
+        if (marked.Count == 0) return [];
+        var projectIds = marked.Select(r => r.ProjectId).Distinct().ToList();
+        var owned = (await db.Projects.AsNoTracking().Where(p => projectIds.Contains(p.Id) && p.OwnerId == userId).Select(p => p.Id).ToListAsync(ct)).ToHashSet();
+        var grants = marked.All(r => owned.Contains(r.ProjectId)) ? null : await access.GrantsAsync(userId, ct);
+        return marked.Where(r => owned.Contains(r.ProjectId) || grants!.FileLevel(r) == FileAccessLevel.Write).Select(r => r.Id).ToHashSet();
     }
 
     private async Task<ProjectDto> ToDtoAsync(ProjectEntity p, Guid userId, bool keys, CancellationToken ct) => (await ProjectMapAsync([p], userId, keys, ct))(p);
@@ -912,7 +927,7 @@ public sealed class StructureService(
         new(f.Id, f.ProjectId, f.ParentFolderId, Base64UrlCodec.Encode(f.NameEnc), Encode(f.MetadataEnc), f.SyncPolicy, f.KeyGeneration,
             f.CreatedAt, f.UpdatedAt, f.DeletedAt, key);
 
-    private static FileDto ToDto(FileEntity f, WrappedKeyDto? key, long? currentVersionSeq = null) =>
+    private static FileDto ToDto(FileEntity f, WrappedKeyDto? key, long? currentVersionSeq = null, bool rotationPending = false) =>
         new(f.Id, f.ProjectId, f.FolderId, f.OwnerId, Base64UrlCodec.Encode(f.NameEnc), Encode(f.MetadataEnc), f.ContentType, f.SyncPolicy,
-            currentVersionSeq, f.CrdtDocId, f.KeyGeneration, f.CreatedAt, f.UpdatedAt, f.DeletedAt, key);
+            currentVersionSeq, f.CrdtDocId, f.KeyGeneration, f.CreatedAt, f.UpdatedAt, f.DeletedAt, key, rotationPending);
 }

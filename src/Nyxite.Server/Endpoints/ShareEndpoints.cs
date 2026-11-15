@@ -43,6 +43,8 @@ public static class ShareEndpoints
             await rotation.CommitAsync(http.User, id, body, key, http.Info(), ct);
             return Results.NoContent();
         });
+        files.MapGet("/{id:guid}/keys/rotate/members", async (Guid id, KeyRotationService rotation, HttpContext http, CancellationToken ct) =>
+            Results.Ok(await rotation.MembersAsync(http.User, id, ct)));
         files.MapPost("/keys:batch", async (BatchGrantRequest body, KeyGrantService keys, HttpContext http, CancellationToken ct) =>
             Results.Ok(await keys.BatchAsync(http.User, body, ct)));
 
@@ -73,7 +75,11 @@ public static class PublicShareEndpoints
         {
             var shareId = http.User.GuestShareIdOrThrow();
             var share = await guests.LiveShareAsync(shareId, ct);
-            var read = await content.ReadHeadAsync(http.User, share.FileId!.Value, http.Request.Headers.IfNoneMatch.ToString() is { Length: > 0 } tag ? tag : null, ct);
+            var ifNoneMatch = http.Request.Headers.IfNoneMatch.ToString() is { Length: > 0 } tag ? tag : null;
+            // A link a rotation kept reads its frozen head, the last content its fragment key opens (09 §9.6).
+            var read = GuestShareService.FrozenHead(share) is { } frozen
+                ? await content.ReadVersionAsync(http.User, share.FileId!.Value, frozen, ifNoneMatch, ct)
+                : await content.ReadHeadAsync(http.User, share.FileId!.Value, ifNoneMatch, ct);
             await guests.RecordBlobAccessAsync(shareId, http.Info(), ct);
             if (read is null) return Results.StatusCode(StatusCodes.Status304NotModified);
             if (read.Version.CrdtSeq is { } crdtSeq)

@@ -45,32 +45,46 @@ public sealed class GuestShareService(
         return share;
     }
 
-    /// <summary>Guest bootstrap: what the shared file is, sealed as it is, and a fresh guest token. Audited as a link access.</summary>
+    /// <summary>
+    /// Guest bootstrap: what the shared file is, sealed as it is, and a fresh guest token. Audited as a link access. A
+    /// link a rotation kept is answered in its frozen generation: the name, metadata, key and head its fragment key opens,
+    /// read only, so a kept link never looks live while serving ciphertext it cannot decrypt (09 §9.6).
+    /// </summary>
     public async Task<ShareBootstrapDto> BootstrapAsync(string token, RequestInfo request, CancellationToken ct)
     {
         var share = await ResolveAsync(token, ct);
         var file = await FileAsync(share, ct);
-        var keyId = await db.FileKeys.AsNoTracking().Where(k => k.FileId == file.Id && k.Generation == file.KeyGeneration).Select(k => k.KeyId).FirstAsync(ct);
-        var head = file.CurrentVersionId is { } versionId
-            ? await db.FileVersions.AsNoTracking().Where(v => v.Id == versionId).Select(v => (long?)v.Seq).SingleAsync(ct)
-            : null;
-        var (guestToken, expires) = tokens.Issue(share.Id, share.Permission);
+        var generation = share.FrozenGeneration ?? file.KeyGeneration;
+        var keyId = await db.FileKeys.AsNoTracking().Where(k => k.FileId == file.Id && k.Generation == generation).Select(k => k.KeyId).FirstAsync(ct);
+        long? head = share.FrozenGeneration is not null
+            ? share.FrozenVersionSeq
+            : file.CurrentVersionId is { } versionId
+                ? await db.FileVersions.AsNoTracking().Where(v => v.Id == versionId).Select(v => (long?)v.Seq).SingleAsync(ct)
+                : null;
+        var nameEnc = share.FrozenNameEnc ?? file.NameEnc;
+        var metadataEnc = share.FrozenGeneration is not null ? share.FrozenMetadataEnc : file.MetadataEnc;
+        var permission = Permission(share);
+        var (guestToken, expires) = tokens.Issue(share.Id, permission);
         audit.Add("share.link_access", null, request, ActorKind.Guest, "share", share.Id, new { via = "bootstrap" });
         await db.SaveChangesAsync(ct);
-        return new ShareBootstrapDto(guestToken, expires, share.Permission, StructureTypes.File, file.Id, share.ExpiresAt,
-            new GuestFileDto(file.Id, file.ContentType, Base64UrlCodec.Encode(file.NameEnc), file.MetadataEnc is null ? null : Base64UrlCodec.Encode(file.MetadataEnc),
-                keyId, file.KeyGeneration, head, file.CrdtDocId));
+        return new ShareBootstrapDto(guestToken, expires, permission, StructureTypes.File, file.Id, share.ExpiresAt,
+            new GuestFileDto(file.Id, file.ContentType, Base64UrlCodec.Encode(nameEnc), metadataEnc is null ? null : Base64UrlCodec.Encode(metadataEnc),
+                keyId, generation, head, file.CrdtDocId, share.FrozenGeneration is not null));
     }
+
+    /// <summary>The permission a guest of the share gets: a frozen link is read only, whatever it was created with.</summary>
+    public static string Permission(ShareEntity share) => share.FrozenGeneration is not null ? ShareEntity.Read : share.Permission;
 
     /// <summary>Issues or renews the guest token. A revoked or expired share stops renewals at once (<c>410</c>).</summary>
     public async Task<GuestSessionDto> SessionAsync(string token, RequestInfo request, CancellationToken ct)
     {
         var share = await ResolveAsync(token, ct);
         var file = await FileAsync(share, ct);
-        var (guestToken, expires) = tokens.Issue(share.Id, share.Permission);
+        var permission = Permission(share);
+        var (guestToken, expires) = tokens.Issue(share.Id, permission);
         audit.Add("auth.guest_session", null, request, ActorKind.Guest, "share", share.Id);
         await db.SaveChangesAsync(ct);
-        return new GuestSessionDto(guestToken, expires, share.Permission, StructureTypes.File, file.Id);
+        return new GuestSessionDto(guestToken, expires, permission, StructureTypes.File, file.Id);
     }
 
     /// <summary>Records a guest's ciphertext fetch: the share and the request, never a key (09 §9.7).</summary>
@@ -100,18 +114,21 @@ public sealed class GuestShareService(
     }
 
     /// <summary>
-    /// Null while the share is live, otherwise the code that ends a guest's relay connection: <c>share_revoked</c> or
-    /// <c>link_expired</c> (purged shares count as revoked).
+    /// The shares whose guests have no business in a relay room any more, each with the code that ends the connection:
+    /// <c>share_revoked</c>, <c>link_expired</c> (purged shares count as revoked), or <c>link_frozen</c> for a link a
+    /// rotation kept, because nothing in the room opens with its key. Live shares are left out.
     /// </summary>
     public async Task<Dictionary<Guid, string>> EndedAsync(IReadOnlyCollection<Guid> shareIds, CancellationToken ct)
     {
         var now = time.GetUtcNow();
-        var rows = await db.Shares.AsNoTracking().Where(s => shareIds.Contains(s.Id)).Select(s => new { s.Id, s.RevokedAt, s.ExpiresAt }).ToListAsync(ct);
+        var rows = await db.Shares.AsNoTracking().Where(s => shareIds.Contains(s.Id))
+            .Select(s => new { s.Id, s.RevokedAt, s.ExpiresAt, s.FrozenGeneration }).ToListAsync(ct);
         var ended = shareIds.ToDictionary(id => id, _ => SharesRevoked);
         foreach (var row in rows)
         {
             if (row.RevokedAt is not null) continue;
             if (row.ExpiresAt is { } e && e <= now) ended[row.Id] = LinkExpired;
+            else if (row.FrozenGeneration is not null) ended[row.Id] = LinkFrozen;
             else ended.Remove(row.Id);
         }
 
@@ -120,6 +137,16 @@ public sealed class GuestShareService(
 
     public const string SharesRevoked = "share_revoked";
     public const string LinkExpired = "link_expired";
+    public const string LinkFrozen = "link_frozen";
+
+    /// <summary>A frozen link has no relay room: what the room carries is sealed with keys its fragment does not hold.</summary>
+    public static AuthException Frozen() => new(409, LinkFrozen, "This link was kept through a key rotation; it opens its frozen content only.");
+
+    /// <summary>
+    /// The version a guest's blob request reads: the frozen head for a link a rotation kept, otherwise null for the
+    /// file's current head. A frozen link of a file that had no head, or whose head was purged since, has nothing.
+    /// </summary>
+    public static long? FrozenHead(ShareEntity share) => share.FrozenGeneration is null ? null : share.FrozenVersionSeq ?? 0;
 
     /// <summary>
     /// A single-use 60-second relay socket ticket for a guest (08 §8.4), so a browser puts no reusable credential into
@@ -127,7 +154,7 @@ public sealed class GuestShareService(
     /// </summary>
     public async Task<SocketTicketDto> IssueTicketAsync(Guid shareId, CancellationToken ct)
     {
-        await LiveShareAsync(shareId, ct);
+        if ((await LiveShareAsync(shareId, ct)).FrozenGeneration is not null) throw Frozen();
         var lifetime = options.Value.Lifetimes.SocketTicket;
         var expires = time.GetUtcNow() + lifetime;
         var ticket = await ephemeral.IssueAsync(EphemeralTokenKind.GuestSocketTicket, null, null, lifetime,
@@ -151,7 +178,7 @@ public sealed class GuestShareService(
         var now = time.GetUtcNow();
         var share = await db.Shares.AsNoTracking()
             .SingleOrDefaultAsync(s => s.Id == shareId && s.RevokedAt == null && (s.ExpiresAt == null || s.ExpiresAt > now), ct);
-        return share is null ? null : tokens.Issue(share.Id, share.Permission).Token;
+        return share is null || share.FrozenGeneration is not null ? null : tokens.Issue(share.Id, share.Permission).Token;
     }
 
     private void EnsureLive(ShareEntity share)

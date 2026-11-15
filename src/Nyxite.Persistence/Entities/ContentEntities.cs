@@ -18,6 +18,13 @@ public sealed class FileVersionEntity
     public Guid? AuthorId { get; set; }
     public long? CrdtSeq { get; set; }
     public long? RestoredFromSeq { get; set; }
+
+    /// <summary>
+    /// The version the upload was based on: the client's <c>If-Match</c> for a blob, the head at the time for a snapshot
+    /// or a rotation's head, 0 when there was none (10 §10.1). A version whose <c>ParentSeq</c> was not the head when it
+    /// arrived lost last-write-wins, so every member can flag kept losers from the history alone.
+    /// </summary>
+    public long ParentSeq { get; set; }
     public DateTimeOffset CreatedAt { get; set; }
 }
 

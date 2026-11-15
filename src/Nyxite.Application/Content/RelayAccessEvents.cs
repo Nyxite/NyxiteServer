@@ -10,6 +10,8 @@ public sealed record RelayAccessScope(IReadOnlySet<Guid> Users, IReadOnlySet<Gui
 
     public static RelayAccessScope ForShare(Guid shareId) => new(Empty, new HashSet<Guid> { shareId }, Empty);
 
+    public static RelayAccessScope ForShares(IEnumerable<Guid> shareIds) => new(Empty, shareIds.ToHashSet(), Empty);
+
     public static RelayAccessScope ForFiles(IEnumerable<Guid> fileIds) => new(Empty, Empty, fileIds.ToHashSet());
 
     public bool IsEmpty => Users.Count == 0 && Shares.Count == 0 && Files.Count == 0;

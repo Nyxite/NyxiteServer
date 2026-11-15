@@ -111,7 +111,8 @@ public sealed class ChangeFeed(NyxiteDbContext db, TimeProvider time)
         AddAsync(f.ProjectId, Structure, "file", f.Id, new JsonObject
         {
             ["entity"] = "file", ["id"] = f.Id, ["parentFolderId"] = f.FolderId, ["contentType"] = f.ContentType, ["crdtDocId"] = f.CrdtDocId,
-            ["nameEnc"] = Encode(f.NameEnc), ["metadataEnc"] = Encode(f.MetadataEnc), ["syncPolicy"] = f.SyncPolicy, ["updatedAt"] = f.UpdatedAt,
+            ["nameEnc"] = Encode(f.NameEnc), ["metadataEnc"] = Encode(f.MetadataEnc), ["syncPolicy"] = f.SyncPolicy,
+            ["rotationPending"] = f.RotationPendingAt is not null, ["updatedAt"] = f.UpdatedAt,
         }, ct);
 
     /// <summary>A soft delete, a purge or lost reach of one row.</summary>
@@ -128,7 +129,8 @@ public sealed class ChangeFeed(NyxiteDbContext db, TimeProvider time)
         AddAsync(file.ProjectId, Blob, "file", file.Id, new JsonObject
         {
             ["fileId"] = file.Id, ["seq"] = v.Seq, ["contentHash"] = Base64UrlCodec.Encode(v.ContentHash), ["layout"] = v.Layout,
-            ["sizeCipher"] = v.SizeCipher, ["keyId"] = v.KeyId, ["isHead"] = isHead, ["url"] = $"/api/v1/files/{file.Id}/versions/{v.Seq}/blob",
+            ["sizeCipher"] = v.SizeCipher, ["keyId"] = v.KeyId, ["isHead"] = isHead, ["parentSeq"] = v.ParentSeq,
+            ["url"] = $"/api/v1/files/{file.Id}/versions/{v.Seq}/blob",
         }, ct);
 
     /// <summary>A committed key rotation: the file's current key is now <paramref name="keyId"/> of <paramref name="generation"/> (06 §6.3.2).</summary>

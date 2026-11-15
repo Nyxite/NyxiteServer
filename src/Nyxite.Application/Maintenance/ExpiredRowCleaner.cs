@@ -64,9 +64,13 @@ public sealed class ExpiredRowCleaner(NyxiteDbContext db, TimeProvider time, IOp
         var sessions = await db.Sessions
             .Where(s => s.ExpiresAt <= sessionCutoff || (s.RevokedAt != null && s.RevokedAt <= sessionCutoff))
             .ExecuteDeleteAsync(ct);
-        // A staged rotation head no commit took within the orphan age is abandoned; its blob is then an orphan.
+        // A staged rotation head no commit took within the orphan age is abandoned; its blob is then an orphan. A stage a
+        // commit holds locked right now is skipped, so the commit never turns a stage into a head whose blob is gone.
         var stageCutoff = now - TimeSpan.FromHours(options.Value.OrphanBlobAgeHours);
-        var stages = await db.FileRotationHeads.Where(h => h.CreatedAt <= stageCutoff).ExecuteDeleteAsync(ct);
+        var stages = await db.Database.ExecuteSqlAsync($"""
+            DELETE FROM file_rotation_heads WHERE (file_id, key_id) IN (
+                SELECT file_id, key_id FROM file_rotation_heads WHERE created_at <= {stageCutoff} FOR UPDATE SKIP LOCKED)
+            """, ct);
         Count("ephemeral_tokens", tokens);
         Count("idempotency_keys", keys);
         Count("sessions", sessions);

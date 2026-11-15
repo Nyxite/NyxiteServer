@@ -11,6 +11,14 @@ public sealed class ContentOptions
 
     /// <summary>Largest encrypted awareness message the relay forwards.</summary>
     public int MaxAwarenessBytes { get; set; } = 64 * 1024;
+
+    /// <summary>
+    /// How long a recorded restore waits for the restoring account's next version (10 §10.5). A mark no version of that
+    /// account takes within this time lapses, so a client that recorded a restore and never wrote does not label an
+    /// unrelated later write as a restore. Ten minutes covers the decrypt, verify and upload of a large version. Must be
+    /// positive, checked at startup.
+    /// </summary>
+    public TimeSpan RestoreMarkLifetime { get; set; } = TimeSpan.FromMinutes(10);
 }
 
 public sealed class RelayOptions

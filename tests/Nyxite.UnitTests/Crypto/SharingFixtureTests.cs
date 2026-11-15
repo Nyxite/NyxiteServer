@@ -60,7 +60,7 @@ public sealed class SharingFixtureTests
         var key = Hex(V, "fileKey");
         string[] forbidden = ["#", Base64UrlCodec.Encode(key), Convert.ToHexStringLower(key), Convert.ToBase64String(key), V.GetProperty("fragment").GetString()!];
         var requests = V.GetProperty("requests").EnumerateArray().ToList();
-        Assert.Equal(12, requests.Count);
+        Assert.Equal(13, requests.Count);
         foreach (var request in requests)
         {
             var text = request.GetRawText();
@@ -86,7 +86,7 @@ public sealed class SharingFixtureTests
     {
         var r = V.GetProperty("rotation");
         var requests = V.GetProperty("requests").EnumerateArray().ToDictionary(e => e.GetProperty("name").GetString()!);
-        Assert.Equal(["stageRotationHead", "rotate"], r.GetProperty("order").EnumerateArray().Select(e => e.GetString()));
+        Assert.Equal(["rotationMembers", "stageRotationHead", "rotate"], r.GetProperty("order").EnumerateArray().Select(e => e.GetString()));
         var stage = requests["stageRotationHead"];
         var rotate = requests["rotate"].GetProperty("body");
         var newKeyId = rotate.GetProperty("newKeyId").GetGuid();

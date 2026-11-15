@@ -23,7 +23,8 @@ internal sealed record ShareTarget(string Type, Guid Id, Guid ProjectId, Guid Ow
 /// the URL fragment and never reaches the server (09 §9.4). Every change is audited without keys or token hashes.
 /// </summary>
 public sealed class ShareService(
-    NyxiteDbContext db, DeviceGuard guard, IdempotencyStore idempotency, AuditWriter audit, TimeProvider time, ShareAccess access, IRelayAccessEvents relay)
+    NyxiteDbContext db, DeviceGuard guard, IdempotencyStore idempotency, AuditWriter audit, TimeProvider time, ShareAccess access, IRelayAccessEvents relay,
+    Sync.ChangeFeed feed)
 {
     public const string CreateShareEndpoint = "POST /shares";
     public const int LinkTokenHashSize = 32;
@@ -48,6 +49,7 @@ public sealed class ShareService(
 
         await using var tx = await db.Database.BeginTransactionAsync(ct);
         var target = await OwnedTargetAsync(userId, targetType, body.TargetId, ct);
+        await LockProjectAsync(target.ProjectId, ct);
         var share = new ShareEntity
         {
             Id = Guid.CreateVersion7(now), Kind = body.Kind ?? "", Permission = permission, CreatedBy = userId, CreatedAt = now, ExpiresAt = body.ExpiresAt,
@@ -207,15 +209,27 @@ public sealed class ShareService(
         return new PageDto<ShareDto>(page.Select(ToDto).ToList(), next);
     }
 
-    /// <summary>Changes permission or expiry. The owner only; a grantee, who knows the share, gets <c>403 acl_denied</c>.</summary>
+    /// <summary>
+    /// Changes permission or expiry. The owner only; a grantee, who knows the share, gets <c>403 acl_denied</c>. A link a
+    /// rotation froze stays read only, because its key opens nothing a write could be sealed with.
+    /// </summary>
     public async Task<ShareDto> UpdateAsync(ClaimsPrincipal principal, Guid id, UpdateShareRequest body, RequestInfo request, CancellationToken ct)
     {
         var userId = await WriterAsync(principal, requireDevice: false, ct);
+        await using var tx = await db.Database.BeginTransactionAsync(ct);
         var share = await db.Shares.SingleOrDefaultAsync(s => s.Id == id && s.RevokedAt == null, ct) ?? throw AuthException.NotFound();
-        var owner = await OwnerOfAsync(share, ct);
-        if (owner != userId) throw share.GranteeId == userId ? AclDenied("Only the owner changes a share.") : AuthException.NotFound();
+        var target = await TargetOfAsync(share, ct);
+        if (target.OwnerId != userId) throw share.GranteeId == userId ? AclDenied("Only the owner changes a share.") : AuthException.NotFound();
+        // An expiry can change who reaches a file, so it is ordered against a rotation's member check like a create.
+        await LockProjectAsync(target.ProjectId, ct);
 
-        if (body.Permission is not null) share.Permission = Permission(body.Permission);
+        if (body.Permission is not null)
+        {
+            share.Permission = Permission(body.Permission);
+            if (share.FrozenGeneration is not null && share.Permission == ShareEntity.Write)
+                throw AuthException.Conflict("A link kept through a key rotation stays read only; create a new link instead.");
+        }
+
         if (body.ExpiresAt.IsSet)
         {
             if (body.ExpiresAt.Value is { } expires && expires <= time.GetUtcNow()) throw AuthException.Validation("expiresAt must lie in the future.");
@@ -225,6 +239,7 @@ public sealed class ShareService(
         audit.Add("share.update", userId, request, targetType: "share", targetId: share.Id,
             detail: new { permission = share.Permission, expiresAt = share.ExpiresAt });
         await db.SaveChangesAsync(ct);
+        await tx.CommitAsync(ct);
         // A downgrade or a new expiry is judged in the open rooms now, not at the next periodic pass.
         relay.AccessChanged(RelayScope(share));
         return ToDto(share);
@@ -233,23 +248,69 @@ public sealed class ShareService(
     /// <summary>
     /// Revokes a share: from now on it is no path at any checkpoint (fetch, join, submit, the relay's re-check), which is
     /// the instant first layer of 09 §9.6. The owner revokes, and a grantee removes its own share, which leaves the
-    /// object live for everyone else (DL-3). Revoking a revoked share changes nothing. Key rotation is the client's.
+    /// object live for everyone else (DL-3). Revoking a revoked share changes nothing. Key rotation is the client's: an
+    /// owner's revoke marks every file the share reached as waiting for its rotation, which any member with write reach
+    /// then performs. A grantee that leaves on its own needs no rotation, because it gave its access up.
     /// </summary>
     public async Task RevokeAsync(ClaimsPrincipal principal, Guid id, RequestInfo request, CancellationToken ct)
     {
         var userId = principal.UserId();
+        await using var tx = await db.Database.BeginTransactionAsync(ct);
         var share = await db.Shares.SingleOrDefaultAsync(s => s.Id == id, ct) ?? throw AuthException.NotFound();
-        var owner = await OwnerOfAsync(share, ct);
-        if (owner != userId && share.GranteeId != userId) throw AuthException.NotFound();
+        var target = await TargetOfAsync(share, ct);
+        if (target.OwnerId != userId && share.GranteeId != userId) throw AuthException.NotFound();
+        if (share.RevokedAt is not null) return;
+        // Ordered against a rotation's member check, so a rotation never wraps the new key to an account revoked meanwhile.
+        await LockProjectAsync(target.ProjectId, ct);
+        await db.Entry(share).ReloadAsync(ct);
         if (share.RevokedAt is not null) return;
 
-        share.RevokedAt = time.GetUtcNow();
+        var now = time.GetUtcNow();
+        share.RevokedAt = now;
+        var byOwner = target.OwnerId == userId;
+        if (byOwner) await MarkRotationPendingAsync(target, now, ct);
         audit.Add("share.revoke", userId, request, targetType: "share", targetId: share.Id,
-            detail: new { kind = share.Kind, by = owner == userId ? "owner" : "grantee" });
+            detail: new { kind = share.Kind, by = byOwner ? "owner" : "grantee" });
         await db.SaveChangesAsync(ct);
+        await tx.CommitAsync(ct);
         // The instant layer of 09 §9.6 for open rooms: the grantee's or the link's connections are judged right away.
         relay.AccessChanged(RelayScope(share));
     }
+
+    /// <summary>
+    /// Marks the files a revoked share reached as waiting for a key rotation (09 §9.6): the file itself, every file in the
+    /// folder's subtree, or every file of the project. Files already marked keep their first moment. Each newly marked
+    /// file is announced in the change feed, so the owner's other devices queue the rotation as well.
+    /// </summary>
+    private async Task MarkRotationPendingAsync(ShareTarget target, DateTimeOffset now, CancellationToken ct)
+    {
+        var ids = target.Type switch
+        {
+            StructureTypes.File => await db.Database.SqlQuery<Guid>(
+                $"UPDATE files SET rotation_pending_at = {now} WHERE id = {target.Id} AND rotation_pending_at IS NULL RETURNING id AS \"Value\"").ToListAsync(ct),
+            StructureTypes.Folder => await db.Database.SqlQuery<Guid>($"""
+                WITH RECURSIVE sub AS (
+                    SELECT id FROM folders WHERE id = {target.Id}
+                    UNION ALL
+                    SELECT f.id FROM folders f JOIN sub ON f.parent_folder_id = sub.id)
+                UPDATE files SET rotation_pending_at = {now} WHERE folder_id IN (SELECT id FROM sub) AND rotation_pending_at IS NULL
+                RETURNING id AS "Value"
+                """).ToListAsync(ct),
+            _ => await db.Database.SqlQuery<Guid>(
+                $"UPDATE files SET rotation_pending_at = {now} WHERE project_id = {target.Id} AND rotation_pending_at IS NULL RETURNING id AS \"Value\"").ToListAsync(ct),
+        };
+        if (ids.Count == 0) return;
+        foreach (var file in await db.Files.AsNoTracking().Where(f => ids.Contains(f.Id) && f.DeletedAt == null).ToListAsync(ct))
+            await feed.FileAsync(file, ct);
+    }
+
+    /// <summary>
+    /// The project row <c>FOR SHARE</c>: every share change that can change who reaches a file takes it before anything
+    /// else, and a rotation's commit takes it <c>FOR NO KEY UPDATE</c> before its member check (09 §9.6), so the two never
+    /// interleave. Share changes do not block each other.
+    /// </summary>
+    private async Task LockProjectAsync(Guid projectId, CancellationToken ct) =>
+        await db.Database.ExecuteSqlAsync($"SELECT 1 FROM projects WHERE id = {projectId} FOR SHARE", ct);
 
     /// <summary>Who a share reaches in the relay: the grantee's connections, or the guests of the link.</summary>
     private static RelayAccessScope RelayScope(ShareEntity share) =>
@@ -295,10 +356,10 @@ public sealed class ShareService(
         } != FileAccessLevel.None;
     }
 
-    private async Task<Guid> OwnerOfAsync(ShareEntity share, CancellationToken ct)
+    private async Task<ShareTarget> TargetOfAsync(ShareEntity share, CancellationToken ct)
     {
         var (type, id) = TargetOf(share);
-        return (await TargetAsync(type, id, ct))!.OwnerId;
+        return (await TargetAsync(type, id, ct))!;
     }
 
     internal static (string Type, Guid Id) TargetOf(ShareEntity s) =>
@@ -342,7 +403,7 @@ public sealed class ShareService(
     public static ShareDto ToDto(ShareEntity s)
     {
         var (type, id) = TargetOf(s);
-        return new ShareDto(s.Id, type, id, s.Kind, s.GranteeId, s.Permission, s.CreatedBy, s.ExpiresAt, s.CreatedAt);
+        return new ShareDto(s.Id, type, id, s.Kind, s.GranteeId, s.Permission, s.CreatedBy, s.ExpiresAt, s.CreatedAt, s.FrozenGeneration);
     }
 }
 

@@ -1422,15 +1422,23 @@ paths:
       summary: Commit a file-key rotation (generation-guarded)
       description: >-
         The second layer of revocation (09 §9.6, P2.3-SRV-1), pinned by the P2.2-CORE-1 fixtures in `sharing.json`.
-        The project owner only (a grantee gets `403 acl_denied`), from an active device. Commits only if `generation` is
-        the file's current generation + 1, otherwise `409 conflict` (another rotation won). `wrappedKeys` wraps
-        `newKeyId` to exactly the accounts that reach the file, the owner included, so a removed member gets no wrap
-        and no remaining member is left out (`400` otherwise). `nameEnc` and `metadataEnc` are the file's name and
-        metadata sealed again with the new key. `newHeadRef` is the base64url BLAKE3-256 content hash of the head staged
-        under the new key through `PUT /files/{id}/keys/rotate/head`; it is required when the file has a head and
-        becomes the head in the same transaction that switches the key. A head that moved since it was staged answers
-        `409 version_conflict`. Updates, snapshots and blobs sealed with an older key are accepted until the commit and
-        answer `412 key_generation_stale` after it; wraps and versions of older generations stay readable.
+        Any account with write reach, from an active device (a reader gets `403 acl_denied`); authorization is checked
+        under the file lock. Commits only if `generation` is the file's current generation + 1, otherwise
+        `409 conflict`: another rotation, by this or another writer, won, and the client reads the file again.
+        `wrappedKeys` wraps `newKeyId` to exactly the accounts that reach the file (`GET /files/{id}/keys/rotate/members`),
+        the owner included, so a removed member gets no wrap and no remaining member is left out (`400` otherwise).
+        `nameEnc` and `metadataEnc` are the file's name and metadata sealed again with the new key. `newHeadRef` is the
+        base64url BLAKE3-256 content hash of the head staged under the new key through `PUT /files/{id}/keys/rotate/head`;
+        it is required when the file has a head or its log ever took an update, unless the file is excluded from sync,
+        which rotates without a head and leaves its old content to the purge. It becomes the head in the same transaction
+        that switches the key. A text head must cover every update of the log, and anything that moved since staging, a
+        newer update, snapshot or blob, answers `409 version_conflict`. `links` decides the file's links: `revoke`, the
+        default, revokes them all; `keep` freezes every link that follows the file at the old generation, so it keeps
+        serving the head, name and metadata its fragment key opens, read only and without a relay room. Keeping links
+        of a text file needs a head snapshot under the old key that covers the whole log (`409 version_conflict`
+        otherwise). The commit clears the file's pending rotation and is audited with the rotating account. Updates,
+        snapshots and blobs sealed with an older key are accepted until the commit and answer
+        `412 key_generation_stale` after it; wraps and versions of older generations stay readable.
       parameters: [{ $ref: '#/components/parameters/IdempotencyKey' }]
       requestBody:
         required: true
@@ -1446,10 +1454,36 @@ paths:
                 newHeadRef: { oneOf: [{ $ref: '#/components/schemas/Bytes' }, { type: 'null' }] }
                 nameEnc: { $ref: '#/components/schemas/Bytes' }
                 metadataEnc: { oneOf: [{ $ref: '#/components/schemas/Bytes' }, { type: 'null' }] }
+                links: { type: [string, 'null'], enum: [revoke, keep, null], description: 'What happens to the file''s links; revoke when absent' }
       responses:
         '204': { description: 'Rotation committed (also the replay of a committed request).' }
+        '403': { description: 'Read reach only (acl_denied), no active device (device_not_active) or a blocked account (account_blocked).', content: { application/problem+json: { schema: { $ref: '#/components/schemas/Problem' } } } }
         '404': { $ref: '#/components/responses/Problem' }
         '409': { $ref: '#/components/responses/Problem' }
+  /files/{id}/keys/rotate/members:
+    parameters: [{ $ref: '#/components/parameters/Id' }]
+    get:
+      tags: [keys]
+      summary: The accounts a rotation must wrap the new key to
+      description: >-
+        For an account with write reach, which may rotate (09 §9.6); a reader gets `403 acl_denied`. Account ids only:
+        not how each reaches the file, not its permission and nothing about links, because the rotating client needs no
+        more to look up directory keys and wrap. `rotationPending` is true while a revocation by the owner waits for its
+        rotation.
+      responses:
+        '200':
+          description: The members and the file's current generation.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [generation, rotationPending, members]
+                properties:
+                  generation: { type: integer }
+                  rotationPending: { type: boolean }
+                  members: { type: array, items: { $ref: '#/components/schemas/Uuid' } }
+        '403': { description: 'Read reach only (acl_denied).', content: { application/problem+json: { schema: { $ref: '#/components/schemas/Problem' } } } }
+        '404': { $ref: '#/components/responses/Problem' }
   /files/{id}/keys/rotate/head:
     parameters: [{ $ref: '#/components/parameters/Id' }]
     put:
@@ -1458,7 +1492,9 @@ paths:
       description: >-
         Write-then-swap for rotation (09 §9.6): the head is uploaded before the commit and is no version until
         `POST /files/{id}/keys/rotate` names it in `newHeadRef`, so every client keeps the old head until its successor
-        exists. The project owner only. `Nyxite-Key-Id` is the new key, which the file must not have yet. A text file
+        exists. Any account with write reach (a reader gets `403 acl_denied`), never a link guest. `Nyxite-Key-Id` is
+        the new key, which the file must not have yet. A file excluded from sync takes no stage (`409 excluded_content`)
+        and rotates without one. A text file
         stages a snapshot and sends `Nyxite-Snapshot-Seq`; any other file stages its re-encrypted head and sends
         `If-Match` with the head version seq it is based on (`0` for none). Staging again for the same key replaces the
         stage. A stage that no commit takes expires after `NYXITE__Retention__OrphanBlobAgeHours` and counts against
@@ -1887,8 +1923,10 @@ paths:
         caller's next version of the file, head or kept LWW loser, as `restoredFromSeq: seq`; a version another account
         writes in between is no restore. The client then writes the restored content with the file's current key:
         a CRDT update on the relay or log followed by `PUT /files/{id}/snapshot` for text, `PUT /files/{id}/blob`
-        otherwise. Needs write reach on an active device; a replay of the same `Idempotency-Key` answers `204` again
-        without a second event (server 10 §10.5).
+        otherwise. Needs write reach on an active device; a replay of the same `Idempotency-Key` on the same file
+        answers `204` again without a second event, and the key reused on another file or with another seq is
+        `409 idempotency_conflict`. One mark per file: a newer restore replaces it, and a mark that no version of the
+        restoring account takes within `NYXITE__Limits__RestoreMarkLifetime` (default 10 minutes) lapses (server 10 §10.5).
       parameters: [{ $ref: '#/components/parameters/IdempotencyKey' }]
       requestBody:
         required: true
@@ -1903,7 +1941,7 @@ paths:
         '204': { description: 'Recorded.' }
         '403': { description: 'Read reach only (acl_denied), no active device (device_not_active) or a blocked account (account_blocked).', content: { application/problem+json: { schema: { $ref: '#/components/schemas/Problem' } } } }
         '404': { $ref: '#/components/responses/Problem' }
-        '409': { description: 'The file is excluded from sync, so no new head can follow (excluded_content), or the Idempotency-Key was used with another seq (idempotency_conflict).', content: { application/problem+json: { schema: { $ref: '#/components/schemas/Problem' } } } }
+        '409': { description: 'The file is excluded from sync, so no new head can follow (excluded_content), or the Idempotency-Key was used with another file or seq (idempotency_conflict).', content: { application/problem+json: { schema: { $ref: '#/components/schemas/Problem' } } } }
 
   # ---------------------------------------------------------------- shares
   /shares:
@@ -1963,7 +2001,9 @@ paths:
     patch:
       tags: [shares]
       summary: Change permission / expiry
-      description: The owner only; a grantee gets `403 acl_denied`. `expiresAt` null removes the expiry. A revoked share is `404`.
+      description: >-
+        The owner only; a grantee gets `403 acl_denied`. `expiresAt` null removes the expiry. A revoked share is `404`.
+        A link a key rotation kept (`frozenGeneration` set) stays read only, and `permission: write` on it is `409 conflict`.
       requestBody:
         required: true
         content:
@@ -1980,12 +2020,15 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/Share' }
         '404': { $ref: '#/components/responses/Problem' }
+        '409': { $ref: '#/components/responses/Problem' }
     delete:
       tags: [shares]
       summary: Revoke (instant ACL cutoff; the client rotates the key separately)
       description: >-
         The owner revokes; a grantee removes its own share, which leaves the object live for everyone else (DL-3).
-        From then on the share is no path at any checkpoint. Revoking a revoked share answers `204` again.
+        From then on the share is no path at any checkpoint. Revoking a revoked share answers `204` again. An owner's
+        revoke marks every file the share reached with `rotationPending`, which the next committed key rotation clears;
+        a grantee's own removal needs no rotation and marks nothing (09 §9.6).
       responses:
         '204': { description: 'Revoked.' }
         '404': { $ref: '#/components/responses/Problem' }
@@ -2833,7 +2876,9 @@ paths:
       summary: Ciphertext of the shared file
       description: >-
         The head version as `GET /files/{id}/blob` serves it (`ETag`, `Nyxite-Key-Id`, `Nyxite-Blob-Layout`, and for a
-        text file `Nyxite-Snapshot-Seq`), for a guest token of this link. Audited as `share.link_access`.
+        text file `Nyxite-Snapshot-Seq`), for a guest token of this link. A link a key rotation kept serves its frozen
+        head instead, the last version its fragment key opens, and `404` when the file had none or it was purged since
+        (09 §9.6). Audited as `share.link_access`.
       parameters:
         - { name: If-None-Match, in: header, schema: { type: string } }
       responses:
@@ -2855,7 +2900,7 @@ paths:
       description: >-
         For the guest relay WebSocket `/share/{token}/ws` (08 §8.4): a browser sends the ticket as the `access_token`
         query value instead of its guest token. The negotiate request checks it, the WebSocket upgrade uses it up. It
-        dies with its share.
+        dies with its share. A link a key rotation kept has no relay room and gets `409 link_frozen`.
       responses:
         '200':
           description: The ticket; only its hash is stored.
@@ -2867,6 +2912,7 @@ paths:
                 properties:
                   ticket: { type: string, description: 'base64url, 43 characters, never a JWT' }
                   expiresAt: { type: string, format: date-time }
+        '409': { $ref: '#/components/responses/Problem' }
         '410': { $ref: '#/components/responses/Problem' }
 
   # ---------------------------------------------------------------- support relay (04 §4.9), only when support.enabled
@@ -3093,6 +3139,7 @@ components:
             - key_not_transparent
             - share_revoked
             - link_expired
+            - link_frozen
             - pairing_expired
             - cursor_expired
             - key_generation_stale
@@ -3218,6 +3265,7 @@ components:
         createdAt: { type: string, format: date-time }
         updatedAt: { type: string, format: date-time }
         deletedAt: { type: [string, 'null'], format: date-time }
+        rotationPending: { type: boolean, description: 'True while a revocation by the owner waits for its key rotation (09 §9.6); shown only to accounts with write reach, false for readers' }
     FilePage:
       type: object
       required: [items, nextCursor]
@@ -3241,7 +3289,7 @@ components:
 
     Version:
       type: object
-      required: [seq, contentHash, layout, sizeCipher, keyId, isHead, createdAt]
+      required: [seq, contentHash, layout, sizeCipher, keyId, isHead, parentSeq, createdAt]
       properties:
         seq: { type: integer, format: int64 }
         contentHash: { $ref: '#/components/schemas/Bytes' }
@@ -3252,6 +3300,7 @@ components:
         authorId: { $ref: '#/components/schemas/NullableUuid' }
         restoredFromSeq: { type: [integer, 'null'], format: int64, description: 'Set when this version is a recorded restore of that version (POST /files/{id}/restore)' }
         crdtSeq: { type: [integer, 'null'], format: int64, description: 'Text snapshots only: the last CRDT update the snapshot contains' }
+        parentSeq: { type: integer, format: int64, minimum: 0, description: 'The version this upload was based on (If-Match of a blob, the head of a snapshot or rotation), 0 for none. A version whose parentSeq was not the head when it arrived lost LWW (server 10 §10.1)' }
         createdAt: { type: string, format: date-time }
     CrdtUpdate:
       type: object
@@ -3348,6 +3397,7 @@ components:
         createdBy: { $ref: '#/components/schemas/Uuid' }
         expiresAt: { type: [string, 'null'], format: date-time }
         createdAt: { type: string, format: date-time }
+        frozenGeneration: { type: [integer, 'null'], description: 'Links only: set when a key rotation kept the link, which then serves only that generation''s content, read only (09 §9.6)' }
     GuestSession:
       type: object
       required: [guestToken, expiresAt, permission, targetType, targetId]
@@ -3375,10 +3425,11 @@ components:
             contentType: { $ref: '#/components/schemas/ContentType' }
             nameEnc: { $ref: '#/components/schemas/Bytes' }
             metadataEnc: { type: [string, 'null'], contentEncoding: base64url }
-            keyId: { $ref: '#/components/schemas/Uuid', description: 'The current file key; the fragment key must be this one' }
+            keyId: { $ref: '#/components/schemas/Uuid', description: 'The key the link opens: the current file key, or the frozen generation''s key; the fragment key must be this one' }
             keyGeneration: { type: integer }
-            currentVersionSeq: { type: [integer, 'null'], format: int64 }
+            currentVersionSeq: { type: [integer, 'null'], format: int64, description: 'The head the link serves at /share/{token}/blob: the current head, or the frozen head' }
             crdtDocId: { $ref: '#/components/schemas/NullableUuid' }
+            frozen: { type: boolean, description: 'True for a link a key rotation kept (09 §9.6): read only, no relay room (link_frozen), and only the frozen head, name and metadata' }
     CreateShareRequest:
       type: object
       required: [targetType, targetId, kind, permission]
@@ -3521,10 +3572,11 @@ components:
                 metadataEnc: { oneOf: [{ $ref: '#/components/schemas/Bytes' }, { type: 'null' }] }
                 syncPolicy: { oneOf: [{ $ref: '#/components/schemas/SyncPolicy' }, { type: 'null' }] }
                 wrappedKey: { $ref: '#/components/schemas/WrappedKey', description: "The object's key wrapped to the caller; absent with keys=false (ST-4)" }
+                rotationPending: { type: boolean, description: 'Files only: true while a revocation by the owner waits for its key rotation (09 §9.6)' }
                 updatedAt: { type: string, format: date-time }
             - type: object
               title: BlobChange
-              required: [fileId, seq, contentHash, layout, sizeCipher, keyId, isHead, url]
+              required: [fileId, seq, contentHash, layout, sizeCipher, keyId, isHead, parentSeq, url]
               properties:
                 fileId: { $ref: '#/components/schemas/Uuid' }
                 seq: { type: integer, format: int64 }
@@ -3533,6 +3585,7 @@ components:
                 sizeCipher: { type: integer, format: int64 }
                 keyId: { $ref: '#/components/schemas/Uuid' }
                 isHead: { type: boolean }
+                parentSeq: { type: integer, format: int64, description: 'The version the upload was based on (server 10 §10.1)' }
                 url: { type: string }
             - type: object
               title: CrdtChange

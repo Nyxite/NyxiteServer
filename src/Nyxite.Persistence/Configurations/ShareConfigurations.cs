@@ -18,6 +18,8 @@ internal sealed class ShareConfiguration : IEntityTypeConfiguration<ShareEntity>
             t.HasCheckConstraint("ck_shares_kind_fields",
                 "(kind = 'user_grant' AND grantee_id IS NOT NULL AND link_token_hash IS NULL) OR " +
                 "(kind = 'link' AND grantee_id IS NULL AND octet_length(link_token_hash) = 32 AND file_id IS NOT NULL)");
+            // Only a link is frozen by a rotation; an account share gets a wrap of the new key instead (09 §9.6).
+            t.HasCheckConstraint("ck_shares_frozen_link", "frozen_generation IS NULL OR (kind = 'link' AND frozen_name_enc IS NOT NULL)");
         });
         b.HasKey(x => x.Id);
         b.Property(x => x.Id).HasColumnName("id").ValueGeneratedNever();
@@ -32,6 +34,10 @@ internal sealed class ShareConfiguration : IEntityTypeConfiguration<ShareEntity>
         b.Property(x => x.CreatedAt).HasColumnName("created_at").HasDefaultValueSql("now()");
         b.Property(x => x.ExpiresAt).HasColumnName("expires_at");
         b.Property(x => x.RevokedAt).HasColumnName("revoked_at");
+        b.Property(x => x.FrozenGeneration).HasColumnName("frozen_generation");
+        b.Property(x => x.FrozenVersionSeq).HasColumnName("frozen_version_seq");
+        b.Property(x => x.FrozenNameEnc).HasColumnName("frozen_name_enc");
+        b.Property(x => x.FrozenMetadataEnc).HasColumnName("frozen_metadata_enc");
         b.HasOne<FileEntity>().WithMany().HasForeignKey(x => x.FileId).OnDelete(DeleteBehavior.Restrict);
         b.HasOne<FolderEntity>().WithMany().HasForeignKey(x => x.FolderId).OnDelete(DeleteBehavior.Restrict);
         b.HasOne<ProjectEntity>().WithMany().HasForeignKey(x => x.ProjectId).OnDelete(DeleteBehavior.Restrict);

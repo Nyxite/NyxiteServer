@@ -31,5 +31,21 @@ public sealed class ShareEntity
     public Guid CreatedBy { get; set; }
     public DateTimeOffset CreatedAt { get; set; }
     public DateTimeOffset? ExpiresAt { get; set; }
+
+    /// <summary>
+    /// A link kept through a key rotation (09 §9.6): the generation its fragment key belongs to. Null while the link
+    /// follows the file. A frozen link serves only what that key opens: <see cref="FrozenVersionSeq"/>, the name and the
+    /// metadata as they were sealed before the rotation, read only, and no relay room.
+    /// </summary>
+    public int? FrozenGeneration { get; set; }
+
+    /// <summary>The head version at the rotation that froze the link; null when the file had no head.</summary>
+    public long? FrozenVersionSeq { get; set; }
+
+    /// <summary>The file's <c>name_enc</c> sealed with the frozen generation's key, as it was before the rotation.</summary>
+    public byte[]? FrozenNameEnc { get; set; }
+
+    /// <summary>The file's <c>metadata_enc</c> sealed with the frozen generation's key, as it was before the rotation.</summary>
+    public byte[]? FrozenMetadataEnc { get; set; }
     public DateTimeOffset? RevokedAt { get; set; }
 }

@@ -398,6 +398,8 @@ CREATE TABLE files (
   crdt_head_seq      bigint NOT NULL DEFAULT 0,  -- last crdt_updates.seq handed out; a counter, so pruning never moves it back
   pending_restore_seq bigint,                -- set by POST /files/{id}/restore; the restorer's next version records it as restored_from_seq
   pending_restore_by uuid,                   -- the account that recorded pending_restore_seq; only its own next version takes it (10 §10.5)
+  pending_restore_at timestamptz,            -- when the mark was recorded; it lapses after NYXITE__Limits__RestoreMarkLifetime (10 §10.5)
+  rotation_pending_at timestamptz,           -- set by the owner's revoke of a share reaching the file, cleared by the next rotation (09 §9.6)
   excluded_at      timestamptz,              -- set on a switch to excluded, cleared on a switch back; drives the content purge (06 §6.2)
   crdt_doc_id        uuid,                    -- text types only (client-allocated UUIDv7 at creation)
   key_generation     int NOT NULL DEFAULT 1,  -- current file-key rotation generation
@@ -436,7 +438,12 @@ CREATE TABLE shares (
   created_at      timestamptz NOT NULL DEFAULT now(),
   expires_at      timestamptz,
   revoked_at      timestamptz,
-  CHECK (num_nonnulls(file_id, folder_id, project_id) = 1)
+  frozen_generation   int,                  -- links only: the generation a rotation kept the link at (09 §9.6)
+  frozen_version_seq  bigint,               -- the head the frozen link serves; null when the file had none
+  frozen_name_enc     bytea,                -- name_enc as sealed before the rotation
+  frozen_metadata_enc bytea,                -- metadata_enc as sealed before the rotation
+  CHECK (num_nonnulls(file_id, folder_id, project_id) = 1),
+  CHECK (frozen_generation IS NULL OR (kind = 'link' AND frozen_name_enc IS NOT NULL))
 );
 CREATE INDEX ix_shares_target_file   ON shares(file_id)   WHERE revoked_at IS NULL;
 CREATE INDEX ix_shares_target_folder ON shares(folder_id) WHERE revoked_at IS NULL;
@@ -448,6 +455,9 @@ CREATE INDEX ix_shares_link          ON shares(link_token_hash) WHERE kind='link
 > `ix_shares_target_project` and `ix_shares_grantee` serve project shares and the "shared with me" listing.
 > `file_keys.share_id` and `structure_keys.share_id` now reference `shares(id)`.
 > For a **user_grant**, the file key is wrapped to the grantee's public key in `file_keys`. For a **link**, the key rides the URL fragment ([09](09-sharing-and-acl.md)); the server stores only the token hash.
+> As built (migration `RotationLinksAndParentSeq`) [P]:
+> a key rotation with `links: keep` freezes a link at the old generation and stores the head seq, name and metadata its fragment key opens, ciphertext only, so the link keeps serving exactly that ([09 §9.6](09-sharing-and-acl.md)).
+> Storing the old name and metadata on the share was chosen over a name history of the file, because only frozen links ever need them.
 
 ### file_keys  (wrapped file keys — one row per authorized member or link-share grant)
 ```sql
@@ -511,6 +521,7 @@ CREATE TABLE file_versions (
   author_id    uuid REFERENCES users(id), -- null for guests
   crdt_seq     bigint,                     -- text snapshots: the last crdt_updates.seq the snapshot contains
   restored_from_seq bigint,                -- set when this head is a recorded restore of that version (10 §10.5)
+  parent_seq   bigint NOT NULL DEFAULT 0,  -- the version the upload was based on, 0 for none; flags kept LWW losers (10 §10.1)
   created_at   timestamptz NOT NULL DEFAULT now(),
   UNIQUE (file_id, seq)
 );
@@ -542,6 +553,7 @@ CREATE INDEX ix_file_rotation_heads_created  ON file_rotation_heads(created_at);
 > a rotation uploads the new head before its commit, and the commit turns this row into the head version in the transaction that switches `files.key_generation` ([09 §9.6](09-sharing-and-acl.md)).
 > It is a table of its own and not a `file_versions` row, because a version sealed with a key nobody has a wrap for would appear in every member's history if the rotation never committed.
 > The commit deletes every stage of the file, the blob collector treats `blob_ref` as a reference, the cleanup deletes a stage older than `NYXITE__Retention__OrphanBlobAgeHours`, and a purge takes it along by cascade.
+> The commit reads its stage `FOR UPDATE` and the cleanup skips locked rows, so a stage that expires during its commit is never deleted under it.
 > Staged bytes count against the owner's quota until then.
 > No `size_plain` and no `summary`: the server can't measure plaintext or summarize a diff (diffs are client-side, [10](10-version-history.md)).
 
