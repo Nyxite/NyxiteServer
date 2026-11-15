@@ -119,7 +119,7 @@ Revocation is **two-layered** ([§9.1](#91-principles)):
 >    Uploading the new-key head through the normal upload paths before the commit was impossible, because they take only the current key, and committing first and uploading afterwards was rejected, because a client that fails in between leaves a head that a member added later with the new key only cannot open.
 > 3. A text head must cover the whole log, its `Nyxite-Snapshot-Seq` equal to the last update the file has.
 >    Anything that moved after staging, a newer update, a newer snapshot or a blob written in between, answers `409 version_conflict` and the newer state stays, so a rotation never replaces content it has not seen and never leaves an update sealed with the old key behind the new head (V1 of the review of 2026-11-15).
->    The client stages again and retries, with the retry and backoff rules of the client specs `12 §12.1`.
+>    The client stages again and retries, with the configurable retry and backoff settings of the client specs (`13` "Rotation by any writer, links and retries").
 >    Refusing only a newer snapshot was rejected, because a member added later with the new key only would then load the new head without the edits after it and see a silently incomplete document.
 >
 > The commit also carries `nameEnc` and `metadataEnc` sealed again with the new key, because listings hand every member only its wrap of the current generation, which would no longer open a name sealed with the old key.
